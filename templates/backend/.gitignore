@@ -1,0 +1,7 @@
+.env
+.env.*
+!.env.example
+dev-data/
+*.log
+*.bak
+node_modules/

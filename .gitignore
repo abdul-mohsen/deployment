@@ -1,0 +1,8 @@
+config.env
+config.*.env
+!config.env.example
+swarm/config.env
+swarm/join-command.txt
+*.bak
+*.log
+dev-data/

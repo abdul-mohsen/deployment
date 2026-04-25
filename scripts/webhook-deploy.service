@@ -1,0 +1,21 @@
+[Unit]
+Description=Webhook Deploy Listener (Docker)
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f webhook-deploy
+ExecStart=/usr/bin/docker run --rm --name webhook-deploy \
+    --network host \
+    -v /opt/deployment:/opt/deployment \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -v /var/lib/auto-pull:/var/lib/auto-pull \
+    -v /usr/local/bin/dokku:/usr/local/bin/dokku:ro \
+    webhook-deploy:latest bash /opt/deployment/scripts/webhook-server.sh
+ExecStop=/usr/bin/docker stop webhook-deploy
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

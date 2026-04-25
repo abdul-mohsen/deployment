@@ -1,0 +1,45 @@
+# =============================================================================
+# Backend — local dev compose
+# =============================================================================
+# Lives in the BACKEND repo. Run from the repo root:
+#   cp .env.example .env   # edit values
+#   docker compose up
+#
+# Hot-rebuild on code change:  docker compose up --build
+# =============================================================================
+
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-devpass}
+      MYSQL_DATABASE: ${DB_NAME:-app_dev}
+    ports:
+      - "${DB_PORT_HOST:-3307}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${DB_PASSWORD:-devpass}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    image: ${IMAGE_NAME:-local/api}:dev
+    depends_on:
+      mysql:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DATABASE_URL: mysql://root:${DB_PASSWORD:-devpass}@mysql:3306/${DB_NAME:-app_dev}
+    ports:
+      - "${API_PORT:-3000}:3000"
+    volumes:
+      - ./dev-data/uploads:/app/uploads
+      - ./dev-data/data:/app/data
+
+volumes:
+  mysql_data:

@@ -1,0 +1,17 @@
+# =============================================================================
+# Frontend — local dev compose
+# =============================================================================
+# Run from the frontend repo root:
+#   cp .env.example .env
+#   docker compose up
+# =============================================================================
+
+services:
+  web:
+    build: .
+    image: ${IMAGE_NAME:-local/web}:dev
+    env_file: .env
+    environment:
+      API_URL: ${API_URL:-http://localhost:3000}
+    ports:
+      - "${WEB_PORT:-8080}:80"

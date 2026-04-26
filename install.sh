@@ -44,12 +44,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${CONFIG_FILE:-$SCRIPT_DIR/config.env}"
+INSTALL_ENV="${INSTALL_ENV:-$SCRIPT_DIR/install.env}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 log()   { echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[✗]${NC} $*" >&2; }
 info()  { echo -e "${BLUE}[i]${NC} $*"; }
+
+# Load install.env if present (preferred over CLI flags)
+if [ -f "$INSTALL_ENV" ]; then
+    info "Loading values from $INSTALL_ENV"
+    set -a; source "$INSTALL_ENV"; set +a
+fi
 
 # Defaults (env-var overridable)
 : "${BASE_DOMAIN:=}"

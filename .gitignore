@@ -1,6 +1,8 @@
 config.env
 config.*.env
 !config.env.example
+install.env
+!install.env.example
 swarm/config.env
 swarm/join-command.txt
 *.bak

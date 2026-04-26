@@ -263,6 +263,9 @@ done
 
 # ---- 7. External MySQL database ----
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
+# Restrict tenant DB users to the docker bridge subnet (defaults to 172.%).
+# Override with MYSQL_TENANT_HOST in config.env if your bridge is elsewhere.
+MYSQL_TENANT_HOST="${MYSQL_TENANT_HOST:-172.%}"
 
 TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
 TENANT_DB_USER="usr_${TENANT_NAME//-/_}"
@@ -274,11 +277,11 @@ if ! $NO_DATABASE; then
         # Generate a random password for the tenant DB user
         TENANT_DB_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)
 
-        log "Creating MySQL database: $TENANT_DB_NAME (user: $TENANT_DB_USER)"
+        log "Creating MySQL database: $TENANT_DB_NAME (user: $TENANT_DB_USER@'$MYSQL_TENANT_HOST')"
         run_mysql <<SQLEOF
 CREATE DATABASE IF NOT EXISTS \`${TENANT_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER IF NOT EXISTS '${TENANT_DB_USER}'@'%' IDENTIFIED BY '${TENANT_DB_PASS}';
-GRANT ALL PRIVILEGES ON \`${TENANT_DB_NAME}\`.* TO '${TENANT_DB_USER}'@'%';
+CREATE USER IF NOT EXISTS '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY '${TENANT_DB_PASS}';
+GRANT ALL PRIVILEGES ON \`${TENANT_DB_NAME}\`.* TO '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}';
 FLUSH PRIVILEGES;
 SQLEOF
 

@@ -166,7 +166,9 @@ APP_IMAGE_frontend=${APP_IMAGE_frontend}
 DEV_TENANT=${DEV_TENANT}
 DEV_TAG=${DEV_TAG}
 
-MIGRATE_CMD=${MIGRATE_CMD}
+# Single-quoted: \$DATABASE_URL must stay literal here. It's expanded inside
+# the backend container by Dokku at run time, not when config.env is sourced.
+MIGRATE_CMD='${MIGRATE_CMD}'
 
 WEBHOOK_SECRET=${WEBHOOK_SECRET}
 EOF

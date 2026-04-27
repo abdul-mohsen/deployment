@@ -95,7 +95,9 @@ fi
 
 echo ""
 log "Dev tenant ready."
-info "URL:           https://${NAME}.${BASE_DOMAIN:-app.example.com}"
+DEV_SCHEME="http"
+[ "${ENABLE_SSL:-false}" = "true" ] && DEV_SCHEME="https"
+info "URL:           ${DEV_SCHEME}://${NAME}.${BASE_DOMAIN:-app.example.com}"
 info "Auto-deploy:   pushes to the 'dev' branch → CI builds ${BACKEND_IMG} → auto-pull.sh deploys here every 2 min"
 info "Manual deploy: bash scripts/deploy-all.sh ${BACKEND_IMG} --tenant ${NAME}"
 info "Logs:          bash scripts/tail-logs.sh ${APP_BACKEND}"

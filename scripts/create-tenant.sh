@@ -330,11 +330,13 @@ if ! $GIT_ONLY; then
 fi
 
 # ---- 10. SSL / External nginx ----
-if [ "$NGINX_MODE" = "standalone" ]; then
+if [ "$NGINX_MODE" = "standalone" ] && [ "${ENABLE_SSL:-false}" = "true" ]; then
     if [ -n "$BACKEND_IMAGE" ] || [ -n "$FRONTEND_IMAGE" ]; then
         log "Enabling SSL via Let's Encrypt..."
         dokku letsencrypt:enable "$FRONTEND_APP" 2>/dev/null || warn "SSL setup deferred (app may need a deploy first)."
     fi
+else
+    info "ENABLE_SSL=false — skipping Let's Encrypt (HTTP only)."
 fi
 
 # ---- 11. Run database migration ----

@@ -1,39 +1,83 @@
 #!/usr/bin/env bash
 # =============================================================================
-# verify-mysql.sh — Quick check that MYSQL_ROOT_USER can connect from a container
+# verify-mysql.sh — Test that the admin account works from inside a container
 # =============================================================================
-# Reads credentials from install.env so nothing is typed on the command line.
-# Run AFTER you've created the dokku_admin user in MySQL.
+# Reads credentials from install.env (preferred) or config.env. Never takes
+# the password on the command line, never echoes it. Uses MYSQL_PWD via
+# `--env-file` so the secret never appears in /proc/<pid>/cmdline.
 #
+# Usage:
 #   sudo bash scripts/verify-mysql.sh
+#   sudo bash scripts/verify-mysql.sh --tenant-host 172.18.0.5  # test from a specific bridge
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-INSTALL_ENV="${INSTALL_ENV:-$PROJECT_DIR/install.env}"
-CONFIG_FILE="${CONFIG_FILE:-$PROJECT_DIR/config.env}"
 
-if [ -f "$INSTALL_ENV" ]; then
-    set -a; source "$INSTALL_ENV"; set +a
-elif [ -f "$CONFIG_FILE" ]; then
-    set -a; source "$CONFIG_FILE"; set +a
-else
-    echo "[!] Neither install.env nor config.env found." >&2
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+log()   { echo -e "${GREEN}[+]${NC} $*"; }
+warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
+error() { echo -e "${RED}[✗]${NC} $*" >&2; }
+info()  { echo -e "${BLUE}[i]${NC} $*"; }
+
+# Load values: install.env wins, then config.env
+for f in "$PROJECT_DIR/install.env" "$PROJECT_DIR/config.env"; do
+    if [ -f "$f" ]; then
+        set -a; source "$f"; set +a
+        info "Loaded $f"
+        break
+    fi
+done
+
+: "${MYSQL_HOST:=host.docker.internal}"
+: "${MYSQL_PORT:=3306}"
+: "${MYSQL_ROOT_USER:=dokku_admin}"
+: "${MYSQL_ROOT_PASSWORD:=}"
+: "${MYSQL_MASTER_DB:=zatca_master}"
+
+if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
+    error "MYSQL_ROOT_PASSWORD not set (looked in install.env and config.env)"
     exit 1
 fi
 
-: "${MYSQL_HOST:?MYSQL_HOST not set}"
-: "${MYSQL_PORT:=3306}"
-: "${MYSQL_ROOT_USER:?MYSQL_ROOT_USER not set}"
-: "${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD not set}"
+# Pass the password via env file (NOT --env so it doesn't show in `ps`)
+ENV_FILE="$(mktemp)"
+trap 'rm -f "$ENV_FILE"' EXIT
+chmod 600 "$ENV_FILE"
+printf 'MYSQL_PWD=%s\n' "$MYSQL_ROOT_PASSWORD" > "$ENV_FILE"
 
-# host.docker.internal is normally added on Docker Desktop. On Linux we add it
-# explicitly so the container can reach the bridge gateway.
-docker run --rm \
+log "Testing ${MYSQL_ROOT_USER}@${MYSQL_HOST}:${MYSQL_PORT}..."
+
+set +e
+docker run --rm --env-file "$ENV_FILE" \
     --add-host=host.docker.internal:host-gateway \
-    -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" \
-    mysql:8.0 \
-    mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_ROOT_USER" \
-        -e "SELECT user() AS connected_as, @@hostname AS server, @@version AS version;"
+    mysql:8.0 mysql \
+        -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_ROOT_USER" \
+        --connect-timeout=5 --batch --skip-column-names \
+        -e "SELECT user(), @@hostname, @@version;"
+RC=$?
+set -e
+
+if [ $RC -ne 0 ]; then
+    error "Connection FAILED (exit $RC)"
+    error "Common causes:"
+    error "  • MySQL bind-address still 127.0.0.1 — set to 172.17.0.1 or 0.0.0.0"
+    error "  • Firewall blocking 3306 from docker bridge"
+    error "  • User '${MYSQL_ROOT_USER}'@'172.%' not created or wrong password"
+    exit $RC
+fi
+
+log "Admin connection OK ✓"
+
+# Verify expected privileges exist
+log "Checking grants..."
+docker run --rm --env-file "$ENV_FILE" \
+    --add-host=host.docker.internal:host-gateway \
+    mysql:8.0 mysql \
+        -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_ROOT_USER" \
+        --batch --skip-column-names \
+        -e "SHOW GRANTS FOR CURRENT_USER();"
+
+log "All checks passed."

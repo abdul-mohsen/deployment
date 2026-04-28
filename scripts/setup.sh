@@ -299,7 +299,7 @@ else
         --restart always \
         --privileged \
         --add-host=host.docker.internal:host-gateway \
-        -p 8085:80 \
+        -p "${DOKKU_PORT}":80 \
         -p 443:443 \
         -v /var/lib/dokku:/mnt/dokku \
         -v /var/run/docker.sock:/var/run/docker.sock \

@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-set -euxo pipefail
+set -euo pipefail
+
+# Directory of this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Allow overriding these from the environment; sane defaults for local/dev use
+DOKKU_PORT="${DOKKU_PORT:-8080}"
+DOKKU_HOSTNAME="${DOKKU_HOSTNAME:-localtest.me}"
 
 echo "== Syntax check: scripts/setup.sh =="
-bash -n scripts/setup.sh || { echo "SYNTAX-ERROR"; exit 1; }
+bash -n "${SCRIPT_DIR}/setup.sh" || { echo "SYNTAX-ERROR"; exit 1; }
 
 echo "== docker --version =="
 docker --version || { echo "DOCKER-MISSING"; exit 2; }
@@ -17,8 +24,8 @@ if docker ps -a --format '{{.Names}}' | grep -q '^dokku$'; then
     docker start dokku || { echo "START-FAILED"; exit 3; }
   fi
 else
-  echo "ACTION: creating dokku container (ports 8080->80, 443->443)"
-  docker run -d --name dokku --restart always --privileged --add-host=host.docker.internal:host-gateway -p 8080:80 -p 443:443 -v /var/lib/dokku:/mnt/dokku -v /var/run/docker.sock:/var/run/docker.sock -e DOKKU_HOSTNAME=localtest.me dokku/dokku:latest || { echo "RUN-FAILED"; exit 4; }
+  echo "ACTION: creating dokku container (ports ${DOKKU_PORT}->80, 443->443)"
+  docker run -d --name dokku --restart always --privileged --add-host=host.docker.internal:host-gateway -p "${DOKKU_PORT}":80 -p 443:443 -v /var/lib/dokku:/mnt/dokku -v /var/run/docker.sock:/var/run/docker.sock -e DOKKU_HOSTNAME="${DOKKU_HOSTNAME}" dokku/dokku:latest || { echo "RUN-FAILED"; exit 4; }
 fi
 
 # Wait up to 60s for dokku to respond

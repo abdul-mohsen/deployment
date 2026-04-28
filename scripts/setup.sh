@@ -88,6 +88,12 @@ log "Docker found: $(docker --version)"
 # Source shared helpers (mysql/mysqldump via Docker containers)
 source "$SCRIPT_DIR/lib.sh"
 
+# In-script fallback for the `dokku` CLI: prefer calling the container directly
+# to avoid "dokku: command not found" when /usr/local/bin/dokku isn't available
+# (shell functions take precedence over external commands in POSIX shells).
+dokku() {
+    docker exec -i dokku dokku "$@"
+}
 # =============================================================================
 # STEP 1: Interactive configuration
 # =============================================================================
@@ -293,7 +299,7 @@ else
         --restart always \
         --privileged \
         --add-host=host.docker.internal:host-gateway \
-        -p 80:80 \
+        -p "${DOKKU_PORT}":80 \
         -p 443:443 \
         -v /var/lib/dokku:/mnt/dokku \
         -v /var/run/docker.sock:/var/run/docker.sock \

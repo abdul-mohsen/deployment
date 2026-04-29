@@ -94,6 +94,26 @@ source "$SCRIPT_DIR/lib.sh"
 dokku() {
     docker exec -i dokku dokku "$@"
 }
+
+ensure_default_http_vhost() {
+    docker exec -i dokku bash -s <<'DOKKU_DEFAULT_NGINX'
+set -euo pipefail
+cat > /etc/nginx/conf.d/00-dokku-default.conf <<'NGINX'
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    location / {
+        default_type text/plain;
+        return 200 "dokku ready\n";
+    }
+}
+NGINX
+nginx -t >/dev/null
+sv reload /etc/service/nginx >/dev/null || nginx -s reload >/dev/null
+DOKKU_DEFAULT_NGINX
+}
 # =============================================================================
 # STEP 1: Interactive configuration
 # =============================================================================
@@ -326,6 +346,8 @@ else
     done
     log "Dokku container ready: $(docker exec dokku dokku version)"
 fi
+
+ensure_default_http_vhost
 
 # Create 'dokku' wrapper command on the host
 cat > /usr/local/bin/dokku <<'WRAPPER'

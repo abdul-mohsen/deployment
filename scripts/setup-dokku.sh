@@ -33,6 +33,26 @@ validate_existing_dokku_container() {
   fi
 }
 
+ensure_default_http_vhost() {
+  docker exec -i dokku bash -s <<'DOKKU_DEFAULT_NGINX'
+set -euo pipefail
+cat > /etc/nginx/conf.d/00-dokku-default.conf <<'NGINX'
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    location / {
+        default_type text/plain;
+        return 200 "dokku ready\n";
+    }
+}
+NGINX
+nginx -t >/dev/null
+sv reload /etc/service/nginx >/dev/null || nginx -s reload >/dev/null
+DOKKU_DEFAULT_NGINX
+}
+
 echo "== Syntax check: scripts/setup.sh =="
 bash -n "${SCRIPT_DIR}/setup.sh" || { echo "SYNTAX-ERROR"; exit 1; }
 
@@ -59,6 +79,7 @@ for i in $(seq 1 30); do
   if docker exec dokku dokku version >/dev/null 2>&1; then
     echo "DOKKU-READY: $(docker exec dokku dokku version | head -1)"
     docker exec dokku dokku domains:set-global "${DOKKU_HOSTNAME}" >/dev/null
+    ensure_default_http_vhost
     break
   fi
   sleep 2

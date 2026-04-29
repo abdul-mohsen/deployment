@@ -146,6 +146,7 @@ if $NEED_CONFIG; then
     if [ "$NGINX_MODE" = "behind-nginx" ]; then
         DOKKU_PORT=$(prompt_val "Dokku internal port" "8080")
     fi
+    DOKKU_HOSTNAME=$(prompt_val "Dokku hostname" "$BASE_DOMAIN")
 
     # ---- MySQL ----
     echo ""
@@ -208,6 +209,7 @@ BASE_DOMAIN=${BASE_DOMAIN}
 ACME_EMAIL=${ACME_EMAIL}
 NGINX_MODE=${NGINX_MODE}
 DOKKU_PORT=${DOKKU_PORT}
+DOKKU_HOSTNAME=${DOKKU_HOSTNAME}
 NGINX_CONF_DIR=${NGINX_CONF_DIR}
 STORAGE_ROOT=${STORAGE_ROOT}
 BACKUP_DIR=${BACKUP_DIR}
@@ -251,6 +253,7 @@ BASE_DOMAIN="${BASE_DOMAIN:?}"
 ACME_EMAIL="${ACME_EMAIL:-}"
 NGINX_MODE="${NGINX_MODE:-standalone}"
 DOKKU_PORT="${DOKKU_PORT:-8080}"
+DOKKU_HOSTNAME="${DOKKU_HOSTNAME:-$BASE_DOMAIN}"
 NGINX_CONF_DIR="${NGINX_CONF_DIR:-/etc/nginx/dokku-tenants}"
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
 BACKUP_DIR="${BACKUP_DIR:-/opt/tenant-backups}"
@@ -270,6 +273,7 @@ echo "==========================================="
 echo "  Domain:     *.${BASE_DOMAIN}"
 echo "  Email:      ${ACME_EMAIL:-not set}"
 echo "  Nginx:      ${NGINX_MODE}"
+echo "  Dokku:      ${DOKKU_HOSTNAME}:${DOKKU_PORT}"
 echo "  MySQL:      ${MYSQL_HOST}:${MYSQL_PORT}"
 echo "  Docker Hub: ${DOCKERHUB_USERNAME:-not configured}"
 echo "  Storage:    ${STORAGE_ROOT}"
@@ -288,6 +292,12 @@ fi
 
 if docker ps -a --format '{{.Names}}' | grep -q '^dokku$'; then
     log "Dokku container already exists"
+    CURRENT_DOKKU_PORT="$(docker port dokku 80/tcp 2>/dev/null | awk -F: 'NR == 1 { print $NF }')"
+    if [ -n "$CURRENT_DOKKU_PORT" ] && [ "$CURRENT_DOKKU_PORT" != "$DOKKU_PORT" ]; then
+        error "Existing Dokku container maps host port ${CURRENT_DOKKU_PORT}->80, but config requests ${DOKKU_PORT}->80."
+        error "Remove/recreate the dokku container or set DOKKU_PORT=${CURRENT_DOKKU_PORT} in $CONFIG_FILE."
+        exit 1
+    fi
     if ! docker ps --format '{{.Names}}' | grep -q '^dokku$'; then
         log "Starting Dokku container..."
         docker start dokku
@@ -303,7 +313,7 @@ else
         -p 443:443 \
         -v /var/lib/dokku:/mnt/dokku \
         -v /var/run/docker.sock:/var/run/docker.sock \
-        -e DOKKU_HOSTNAME="${BASE_DOMAIN}" \
+        -e DOKKU_HOSTNAME="${DOKKU_HOSTNAME}" \
         dokku/dokku:latest
 
     # Wait for Dokku to be ready

@@ -8,3 +8,5 @@ swarm/join-command.txt
 *.bak
 *.log
 dev-data/
+dashboard/bin/
+dashboard/node_modules/

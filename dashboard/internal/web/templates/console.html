@@ -1,0 +1,89 @@
+{{define "content"}}
+<section class="mb-6 flex items-end justify-between gap-3">
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight">Console</h1>
+    <p class="text-sm text-zinc-400">Run any allow-listed <code>dokku</code> command. Output streams live.</p>
+  </div>
+</section>
+
+<form id="cmd-form" class="flex items-center gap-2">
+  <span class="text-emerald-400 font-mono select-none">dokku</span>
+  <input id="cmd" name="cmd" placeholder="apps:list" autocomplete="off" autofocus
+         class="flex-1 bg-zinc-900/60 ring-1 ring-zinc-800 focus:ring-emerald-500/50 outline-none rounded-lg px-3 py-2 font-mono text-sm">
+  <button class="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-sm transition">Run</button>
+  <button type="button" id="clear-out" class="px-3 py-2 rounded-lg ring-1 ring-zinc-700 hover:ring-zinc-500 text-sm">Clear</button>
+</form>
+
+<details class="mt-3 text-xs text-zinc-500">
+  <summary class="cursor-pointer hover:text-zinc-300">Allow-listed commands ({{len .Allowed}})</summary>
+  <div class="mt-2 grid grid-cols-3 md:grid-cols-5 gap-1 font-mono">
+    {{range .Allowed}}
+    <button type="button" class="suggest text-left px-2 py-1 rounded hover:bg-zinc-800/60 truncate" title="{{.}}">{{.}}</button>
+    {{end}}
+  </div>
+</details>
+
+<section class="mt-6">
+  <h2 class="text-xs uppercase tracking-widest text-zinc-400 mb-2">Output</h2>
+  <pre id="out" class="bg-zinc-950 ring-1 ring-zinc-800 rounded-xl p-4 h-[28rem] overflow-y-auto text-xs leading-5 whitespace-pre-wrap font-mono"></pre>
+</section>
+
+<script>
+(function () {
+  const form = document.getElementById('cmd-form');
+  const input = document.getElementById('cmd');
+  const out = document.getElementById('out');
+  const clear = document.getElementById('clear-out');
+  let es = null;
+
+  document.querySelectorAll('.suggest').forEach(b => {
+    b.addEventListener('click', () => {
+      input.value = b.textContent + ' ';
+      input.focus();
+    });
+  });
+
+  clear.onclick = () => out.textContent = '';
+
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const cmd = input.value.trim();
+    if (!cmd) return;
+    out.textContent += '$ dokku ' + cmd + '\n';
+
+    // EventSource doesn't support POST; use fetch + ReadableStream.
+    if (es) es.close();
+    const res = await fetch('/console/run', {
+      method: 'POST',
+      body: new URLSearchParams({ cmd }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    });
+    if (!res.ok) {
+      out.textContent += '✖ ' + res.status + ' ' + (await res.text()) + '\n\n';
+      return;
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const ln of block.split('\n')) {
+          if (ln.startsWith('data: ')) out.textContent += ln.slice(6) + '\n';
+          if (ln.startsWith('event: error')) out.textContent += '✖ ';
+          if (ln.startsWith('event: done')) out.textContent += '\n';
+        }
+        out.scrollTop = out.scrollHeight;
+      }
+    }
+  });
+})();
+</script>
+{{end}}
+
+{{define "console.html"}}{{template "_layout.html" .}}{{end}}

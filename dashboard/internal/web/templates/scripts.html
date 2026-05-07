@@ -1,0 +1,22 @@
+{{define "content"}}
+<section class="mb-6">
+  <h1 class="text-2xl font-semibold tracking-tight">Scripts</h1>
+  <p class="text-sm text-zinc-400">Every orchestration script under <code>scripts/</code>. Click to open a form, fill in args, watch live output.</p>
+</section>
+
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+  {{range .Scripts}}
+  <a href="/scripts/{{.Name}}" class="group block rounded-xl bg-zinc-900/60 ring-1 ring-zinc-800 hover:ring-emerald-500/40 transition p-5">
+    <div class="flex items-center gap-2">
+      <h3 class="font-semibold truncate">{{.Title}}</h3>
+      {{if .Danger}}<span class="text-[10px] px-1.5 py-0.5 rounded ring-1 ring-rose-500/30 text-rose-300 uppercase tracking-widest">danger</span>{{end}}
+    </div>
+    <p class="text-xs text-zinc-400 mt-1">{{.Summary}}</p>
+    <code class="text-[11px] text-zinc-500 mt-3 block truncate">scripts/{{.Name}}</code>
+    <span class="text-[11px] text-emerald-400 mt-3 inline-block opacity-0 group-hover:opacity-100 transition">open →</span>
+  </a>
+  {{end}}
+</div>
+{{end}}
+
+{{define "scripts.html"}}{{template "_layout.html" .}}{{end}}

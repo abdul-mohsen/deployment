@@ -49,6 +49,16 @@ dokku_shell() {
     docker exec -i dokku bash -c "$*"
 }
 
+# Wrapper for the `dokku` CLI. Dokku always runs as a Docker container in this
+# setup; defining this as a shell function means every script that sources
+# lib.sh gets a working `dokku` even when /usr/local/bin/dokku is missing
+# (e.g. setup.sh died before it wrote the wrapper, or PATH is sanitized by
+# sudo). The function takes precedence over any binary on PATH within this
+# shell, so behavior stays consistent across hosts.
+dokku() {
+    docker exec -i dokku dokku "$@"
+}
+
 # Get remote Docker Hub image digest (public, anonymous)
 get_remote_digest() {
     local image="$1"

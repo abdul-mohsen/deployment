@@ -80,7 +80,7 @@ check_and_deploy() {
     log "New ${app_type} image: $full_image"
     info "  ${current_digest:-<first run>} → $remote_digest"
 
-    if "$SCRIPT_DIR/deploy-all.sh" "$full_image" \
+    if bash "$SCRIPT_DIR/deploy-all.sh" "$full_image" \
             --type "$app_type" \
             --tenant "$DEV_TENANT" \
             --skip-canary; then

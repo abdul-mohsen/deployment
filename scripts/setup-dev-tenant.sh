@@ -65,28 +65,28 @@ if dokku apps:exists "$APP_BACKEND" 2>/dev/null; then
     info "Tenant '${NAME}' already exists — refreshing image pin only."
 else
     log "Creating tenant '${NAME}' (git-only, will be deployed by auto-pull)..."
-    "$SCRIPT_DIR/create-tenant.sh" "$NAME" --git-only --config "$CONFIG_FILE"
+    bash "$SCRIPT_DIR/create-tenant.sh" "$NAME" --git-only --config "$CONFIG_FILE"
 fi
 
 # 2) Pin backend to :dev tag in the master DB so global deploys skip it
 log "Pinning ${NAME} backend → ${BACKEND_IMG}"
-"$SCRIPT_DIR/set-tenant-image.sh" "$NAME" --backend "$BACKEND_IMG" --config "$CONFIG_FILE"
+bash "$SCRIPT_DIR/set-tenant-image.sh" "$NAME" --backend "$BACKEND_IMG" --config "$CONFIG_FILE"
 
 if $PIN_FRONTEND; then
     log "Pinning ${NAME} frontend → ${FRONTEND_IMG}"
-    "$SCRIPT_DIR/set-tenant-image.sh" "$NAME" --frontend "$FRONTEND_IMG" --config "$CONFIG_FILE"
+    bash "$SCRIPT_DIR/set-tenant-image.sh" "$NAME" --frontend "$FRONTEND_IMG" --config "$CONFIG_FILE"
 fi
 
 # 3) Trigger an initial pull+deploy if the :dev image already exists on Docker Hub
 log "Triggering initial deploy from ${BACKEND_IMG}..."
-if "$SCRIPT_DIR/deploy-all.sh" "$BACKEND_IMG" --type backend --tenant "$NAME" --skip-canary; then
+if bash "$SCRIPT_DIR/deploy-all.sh" "$BACKEND_IMG" --type backend --tenant "$NAME" --skip-canary; then
     log "Initial backend deploy ✓"
 else
     warn "Initial deploy failed (image may not exist yet). Push to your dev branch — auto-pull will pick it up."
 fi
 
 if $PIN_FRONTEND; then
-    if "$SCRIPT_DIR/deploy-all.sh" "$FRONTEND_IMG" --type frontend --tenant "$NAME" --skip-canary; then
+    if bash "$SCRIPT_DIR/deploy-all.sh" "$FRONTEND_IMG" --type frontend --tenant "$NAME" --skip-canary; then
         log "Initial frontend deploy ✓"
     else
         warn "Initial frontend deploy failed — auto-pull will retry."

@@ -1,0 +1,31 @@
+# Production profile: bind to 127.0.0.1; expose via Dokku/nginx behind TLS.
+# Required env (place in dashboard.env on the server):
+#   ADMIN_USER, ADMIN_PASSWORD_HASH (bcrypt), SESSION_KEY (32-byte hex), BASE_DOMAIN
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ssdawweq/dokku-dashboard:prod
+    container_name: dokku-dashboard-prod
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    env_file: dashboard.env
+    environment:
+      DASHBOARD_ENV: prod
+      LISTEN: ":8080"
+      DOCKER_BIN: docker
+      DOKKU_CONTAINER: dokku
+      LOG_BUFFER_LINES: 5000
+      COOKIE_SECURE: "true"
+      SCRIPTS_HOST_PATH: ${SCRIPTS_HOST_PATH:-/opt/deployment}
+      SCRIPT_RUNNER_IMAGE: ${SCRIPT_RUNNER_IMAGE:-dokku/dokku:latest}
+      DEPLOY_CONFIG_FILE: ${DEPLOY_CONFIG_FILE:-/opt/deployment/config.env}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

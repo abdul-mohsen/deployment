@@ -1,0 +1,33 @@
+# Local dev profile: maps to a high port, password "admin" (BCRYPT below).
+# Run:
+#   docker compose -f docker-compose.dev.yml up --build
+# Then open http://localhost:8088   (user: admin / pass: admin)
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ssdawweq/dokku-dashboard:dev
+    container_name: dokku-dashboard-dev
+    restart: unless-stopped
+    ports:
+      - "8088:8080"
+    environment:
+      DASHBOARD_ENV: dev
+      LISTEN: ":8080"
+      DOCKER_BIN: docker
+      DOKKU_CONTAINER: dokku
+      BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      # bcrypt of "admin"
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:-$$2a$$10$$wSLpsqKwddxuOPon/l4aGuSQUAg6.cOqx2vnGuWWsayjtvyW5tZse}
+      SESSION_KEY: ${SESSION_KEY:-}
+      LOG_BUFFER_LINES: 2000
+      COOKIE_SECURE: "false"
+      # Path to /opt/deployment on the *host* docker daemon. The dashboard spawns
+      # a sidecar container with this directory mounted to execute scripts.
+      # On Windows Docker Desktop, the host path is the absolute Windows path.
+      SCRIPTS_HOST_PATH: ${SCRIPTS_HOST_PATH}
+      SCRIPT_RUNNER_IMAGE: ${SCRIPT_RUNNER_IMAGE:-dokku/dokku:latest}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

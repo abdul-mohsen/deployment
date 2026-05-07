@@ -1,0 +1,69 @@
+{{define "content"}}
+{{with .App}}
+<a href="/" class="text-xs text-zinc-400 hover:text-zinc-100">&larr; back</a>
+<div class="mt-3 flex items-center justify-between">
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight">{{.Name}}</h1>
+    <p class="text-sm text-zinc-400">{{.Role}} · tenant <code>{{.Tenant}}</code></p>
+  </div>
+  <span class="text-xs px-2 py-1 rounded ring-1 {{stateClr .State}}">{{.State}}</span>
+</div>
+
+<dl class="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+  <div class="rounded-lg bg-zinc-900/60 ring-1 ring-zinc-800 p-4">
+    <dt class="text-xs text-zinc-500 uppercase">Image</dt>
+    <dd class="truncate" title="{{.Image}}">{{or .Image "—"}}</dd>
+  </div>
+  <div class="rounded-lg bg-zinc-900/60 ring-1 ring-zinc-800 p-4">
+    <dt class="text-xs text-zinc-500 uppercase">HTTP</dt>
+    <dd>{{.HTTPCode}}</dd>
+  </div>
+  <div class="rounded-lg bg-zinc-900/60 ring-1 ring-zinc-800 p-4">
+    <dt class="text-xs text-zinc-500 uppercase">Internal port</dt>
+    <dd>{{or .IntPort "—"}}</dd>
+  </div>
+  <div class="rounded-lg bg-zinc-900/60 ring-1 ring-zinc-800 p-4">
+    <dt class="text-xs text-zinc-500 uppercase">Host ports</dt>
+    <dd class="truncate" title="{{.HostPorts}}">{{or .HostPorts "—"}}</dd>
+  </div>
+</dl>
+
+<div class="mt-6 flex flex-wrap gap-2">
+  <button class="text-sm px-3 py-1.5 rounded ring-1 ring-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10"
+          hx-post="/apps/{{.Name}}/start" hx-swap="none">Start</button>
+  <button class="text-sm px-3 py-1.5 rounded ring-1 ring-amber-500/30 text-amber-400 hover:bg-amber-500/10"
+          hx-post="/apps/{{.Name}}/stop" hx-confirm="Stop {{.Name}}?" hx-swap="none">Stop</button>
+  <button class="text-sm px-3 py-1.5 rounded ring-1 ring-zinc-700 hover:ring-emerald-500/50 hover:text-emerald-300"
+          hx-post="/apps/{{.Name}}/restart" hx-confirm="Restart {{.Name}}?" hx-swap="none">Restart</button>
+  <button class="text-sm px-3 py-1.5 rounded ring-1 ring-zinc-700 hover:ring-emerald-500/50 hover:text-emerald-300"
+          hx-post="/apps/{{.Name}}/rebuild" hx-confirm="Rebuild {{.Name}}? (re-runs the latest release)" hx-swap="none">Rebuild</button>
+  {{if and .Domains (eq .State "running")}}
+  <a href="http://{{index .Domains 0}}" target="_blank" rel="noopener"
+     class="text-sm px-3 py-1.5 rounded ring-1 ring-blue-500/30 text-blue-400 hover:bg-blue-500/10">Open ↗</a>
+  {{end}}
+  <a href="/apps/{{.Name}}/logs.txt"
+     class="text-sm px-3 py-1.5 rounded ring-1 ring-zinc-700 hover:ring-zinc-500 ml-auto">Download buffered logs</a>
+</div>
+
+<section class="mt-8">
+  <h2 class="text-sm uppercase tracking-widest text-zinc-400 mb-2">Live logs</h2>
+  <pre id="logs" class="bg-zinc-950 ring-1 ring-zinc-800 rounded-lg p-4 h-[28rem] overflow-y-auto text-xs leading-5 whitespace-pre-wrap"></pre>
+</section>
+
+<script>
+(function () {
+  const pre = document.getElementById('logs');
+  const es = new EventSource('/apps/{{.Name}}/logs');
+  es.onmessage = (ev) => {
+    const stuck = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 4;
+    pre.textContent += ev.data + '\n';
+    if (stuck) pre.scrollTop = pre.scrollHeight;
+  };
+  es.onerror = () => { pre.textContent += '\n[stream closed]\n'; es.close(); };
+  window.addEventListener('beforeunload', () => es.close());
+})();
+</script>
+{{end}}
+{{end}}
+
+{{define "app.html"}}{{template "_layout.html" .}}{{end}}

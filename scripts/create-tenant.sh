@@ -70,6 +70,17 @@ DRY_RUN=false
 MIGRATE_CMD=""
 declare -a ENV_VARS=()
 
+has_env_var() {
+    local key="$1"
+    local ev
+    for ev in "${ENV_VARS[@]+${ENV_VARS[@]}}"; do
+        if [[ "$ev" == "$key="* ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --backend-image)  BACKEND_IMAGE="$2"; shift 2 ;;
@@ -114,9 +125,32 @@ fi
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
 
+MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
+HAS_DATABASE_URL=false
+HAS_DB_PARTS=false
+if has_env_var "DATABASE_URL"; then
+    HAS_DATABASE_URL=true
+fi
+if has_env_var "DB_HOST" && has_env_var "DB_PORT" && has_env_var "DB_NAME" && has_env_var "DB_USER" && has_env_var "DB_PASSWORD"; then
+    HAS_DB_PARTS=true
+fi
+
 BACKEND_APP="${TENANT_NAME}-backend"
 FRONTEND_APP="${TENANT_NAME}-frontend"
 TENANT_DOMAIN="${TENANT_NAME}.${BASE_DOMAIN}"
+
+if [ -n "$BACKEND_IMAGE" ] && ! $HAS_DATABASE_URL && ! $HAS_DB_PARTS; then
+    if $NO_DATABASE; then
+        error "Backend image deploy requires database settings, but --no-database was set and no DATABASE_URL/DB_* env vars were provided."
+        error "Either remove --no-database and configure MySQL, or provide explicit DB env vars."
+        exit 1
+    fi
+    if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
+        error "Backend image deploy requires database provisioning, but MYSQL_ROOT_PASSWORD is not configured in config.env."
+        error "Set MYSQL_ROOT_PASSWORD, run scripts/verify-mysql.sh, then retry; or provide DATABASE_URL/DB_* via --env; or use --git-only."
+        exit 1
+    fi
+fi
 
 # Check if apps already exist
 if dokku apps:exists "$BACKEND_APP" 2>/dev/null; then
@@ -237,9 +271,15 @@ dokku config:set --no-restart "$BACKEND_APP" \
     TENANT_ID="$TENANT_NAME" \
     NODE_ENV=production
 
+# Determine protocol based on SSL setting
+PROTOCOL="http"
+if [ "$NGINX_MODE" = "standalone" ] && [ "${ENABLE_SSL:-false}" = "true" ]; then
+    PROTOCOL="https"
+fi
+
 dokku config:set --no-restart "$FRONTEND_APP" \
     TENANT_ID="$TENANT_NAME" \
-    API_URL="https://$TENANT_DOMAIN/api"
+    API_URL="${PROTOCOL}://$TENANT_DOMAIN/api"
 
 # Message service (if configured)
 MSG_HOST="${MSG_HOST:-}"
@@ -308,9 +348,14 @@ SQLEOF
 fi
 
 # ---- 8. Health checks ----
+# Modern Dokku (>= 0.30) uses an app-root CHECKS file or app.json for HTTP
+# path checks; the legacy `checks:set <app> web http-path=...` form was
+# removed (only `wait-to-retire` is now valid for checks:set). We write a
+# CHECKS file into each app's working dir on the dokku host so health checks
+# are configured before first deploy.
 log "Configuring health checks..."
-dokku checks:set "$BACKEND_APP" web "http-path=/api/health"
-dokku checks:set "$FRONTEND_APP" web "http-path=/"
+dokku_shell "mkdir -p /home/dokku/${BACKEND_APP} && echo '/api/health' > /home/dokku/${BACKEND_APP}/CHECKS" || warn "could not seed backend CHECKS"
+dokku_shell "mkdir -p /home/dokku/${FRONTEND_APP} && echo '/' > /home/dokku/${FRONTEND_APP}/CHECKS" || warn "could not seed frontend CHECKS"
 
 # ---- 9. Deploy (if images provided) ----
 if ! $GIT_ONLY; then
@@ -358,10 +403,11 @@ echo ""
 log "============================================"
 log "  Tenant '$TENANT_NAME' created!"
 log ""
-log "  URL:      https://${TENANT_DOMAIN}"
-log "  API:      https://${TENANT_DOMAIN}/api"
+log "  Frontend: ${PROTOCOL}://${TENANT_DOMAIN}"
+log "  API:      ${PROTOCOL}://${TENANT_DOMAIN}/api"
 log "  Storage:  ${STORAGE_ROOT}/${TENANT_NAME}/"
 log ""
+log "  Dashboard: http://localhost:8088 (Apps page)"
 log "  View logs:  dokku logs ${BACKEND_APP} --tail"
 log "  Status:     dokku ps:report ${BACKEND_APP}"
 log "============================================"

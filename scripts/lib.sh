@@ -16,11 +16,25 @@ else
     _MYSQL_VIA="docker"
 fi
 
+# Resolve the MySQL host for the *current* execution context.
+# `host.docker.internal` is a Docker-only DNS name and does NOT resolve on
+# the host itself, so when we shell out to the host's mysql client we must
+# translate it to a loopback address. Inside a container the original name
+# is preserved (with `--add-host=host.docker.internal:host-gateway`).
+_resolve_mysql_host() {
+    local h="${MYSQL_HOST:-127.0.0.1}"
+    if [ "$_MYSQL_VIA" = "host" ] && [ "$h" = "host.docker.internal" ]; then
+        echo "127.0.0.1"
+    else
+        echo "$h"
+    fi
+}
+
 # MySQL client (supports stdin/heredocs)
 run_mysql() {
     if [ "$_MYSQL_VIA" = "host" ]; then
         MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-}" \
-            mysql -h "${MYSQL_HOST:-127.0.0.1}" -P "${MYSQL_PORT:-3306}" -u "${MYSQL_ROOT_USER:-root}" "$@"
+            mysql -h "$(_resolve_mysql_host)" -P "${MYSQL_PORT:-3306}" -u "${MYSQL_ROOT_USER:-root}" "$@"
     else
         docker run --rm -i \
             --add-host=host.docker.internal:host-gateway \
@@ -34,7 +48,7 @@ run_mysql() {
 run_mysqldump() {
     if [ "$_MYSQL_VIA" = "host" ]; then
         MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-}" \
-            mysqldump -h "${MYSQL_HOST:-127.0.0.1}" -P "${MYSQL_PORT:-3306}" -u "${MYSQL_ROOT_USER:-root}" "$@"
+            mysqldump -h "$(_resolve_mysql_host)" -P "${MYSQL_PORT:-3306}" -u "${MYSQL_ROOT_USER:-root}" "$@"
     else
         docker run --rm \
             --add-host=host.docker.internal:host-gateway \

@@ -97,9 +97,46 @@ app_internal_port() {
         | tr -d ' ' | head -1
 }
 
-# Host-published port if Dokku is itself published (only meaningful in standalone)
-dokku_host_port() {
-    docker port dokku 80/tcp 2>/dev/null | awk -F: '{print $NF}' | head -1
+# Host-published ports for the app's container, formatted as "host:container,...".
+# Empty when Dokku fronts traffic via its own nginx (the usual case).
+app_host_ports() {
+    local app="$1"
+    local cid; cid=$(app_container_id "$app")
+    [ -z "$cid" ] && return 0
+    docker inspect -f \
+        '{{range $p, $b := .NetworkSettings.Ports}}{{range $b}}{{.HostPort}}->{{$p}} {{end}}{{end}}' \
+        "$cid" 2>/dev/null | xargs 2>/dev/null
+}
+
+# Dokku's own host-published ports (the entry point all tenant traffic goes through)
+dokku_host_ports() {
+    docker port dokku 2>/dev/null | awk '{print $1" -> "$3}' | paste -sd ', ' -
+}
+
+# What process types does this app expose? (e.g. "web cron worker")
+app_process_types() {
+    local app="$1"
+    docker exec -i dokku dokku ps:scale "$app" 2>/dev/null \
+        | awk 'NR>2 && $1!="" {print $1}' | xargs 2>/dev/null
+}
+
+# Detect role from app name suffix; falls back to "app" for arbitrary names.
+app_kind() {
+    case "$1" in
+        *-backend)  echo backend  ;;
+        *-frontend) echo frontend ;;
+        *)          echo app      ;;
+    esac
+}
+
+# Tenant inferred from app name ("-backend"/"-frontend" stripped if present).
+app_tenant() {
+    local app="$1"
+    case "$app" in
+        *-backend)  echo "${app%-backend}"  ;;
+        *-frontend) echo "${app%-frontend}" ;;
+        *)          echo "$app" ;;
+    esac
 }
 
 # HTTP probe inside the dokku container against the app's web service
@@ -150,108 +187,110 @@ colorize_http() {
 # ---- One pass of the report --------------------------------------------------
 render_once() {
     local dstate; dstate=$(dokku_state)
+    local dports; dports=$(dokku_host_ports)
     if ! $JSON; then
         echo ""
         echo "${B}===========================================================${N}"
         echo "${B}  Dokku Status — *.${BASE_DOMAIN}   $(date '+%F %T %Z')${N}"
         echo "${B}===========================================================${N}"
         printf "  Dokku container : %s\n" "$(colorize_state "$dstate")"
+        printf "  Dokku host ports: %s\n" "${dports:-<none>}"
         printf "  Auto-pull cron  : %s\n" "$(cron_has_autopull)"
-        local hp; hp=$(dokku_host_port)
-        [ -n "$hp" ] && printf "  Dokku host port : 80 -> ${hp}\n"
         echo ""
     fi
 
     if [ "$dstate" != "running" ]; then
         $JSON || echo "${R}Dokku is not running — no app data to report.${N}"
-        $JSON && echo '{"dokku":"'"$dstate"'","tenants":[]}'
+        $JSON && echo '{"dokku":"'"$dstate"'","apps":[]}'
         return
     fi
 
-    # Build tenant list from app names ending in -backend or -frontend
-    local apps; apps=$(docker exec -i dokku dokku apps:list 2>/dev/null | tail -n +2 || true)
-    local -A tenants_seen=()
-    local tenant_list=()
-    while IFS= read -r app; do
-        [ -z "$app" ] && continue
-        local t=""
-        case "$app" in
-            *-backend)  t="${app%-backend}"  ;;
-            *-frontend) t="${app%-frontend}" ;;
-            *) continue ;;
-        esac
-        if [ -z "${tenants_seen[$t]:-}" ]; then
-            tenants_seen[$t]=1
-            tenant_list+=("$t")
-        fi
-    done <<< "$apps"
+    # All Dokku apps (one per line). Strip the "=====> My Apps" header by keeping
+    # only lines that look like a Dokku app name (lowercase, digits, hyphens).
+    local apps; apps=$(docker exec -i dokku dokku --quiet apps:list 2>/dev/null \
+                       | grep -E '^[a-z0-9][a-z0-9-]*$' || true)
 
     if [ -n "$TENANT_FILTER" ]; then
-        local filtered=()
-        for t in "${tenant_list[@]}"; do
-            [ "$t" = "$TENANT_FILTER" ] && filtered+=("$t")
-        done
-        tenant_list=("${filtered[@]}")
+        apps=$(printf '%s\n' "$apps" \
+               | awk -v t="$TENANT_FILTER" '$0==t || $0==t"-backend" || $0==t"-frontend"')
     fi
 
-    if [ ${#tenant_list[@]} -eq 0 ]; then
-        $JSON && echo '{"dokku":"running","tenants":[]}' || echo "  (no tenants)"
+    if [ -z "$apps" ]; then
+        if $JSON; then
+            printf '{"dokku":"running","host_ports":"%s","apps":[]}\n' "$dports"
+        else
+            echo "  ${Y}No Dokku apps registered.${N}"
+            echo "  ${D}Raw 'dokku apps:list' output:${N}"
+            docker exec -i dokku dokku apps:list 2>&1 | sed 's/^/    /' || true
+            echo ""
+            echo "  Hints:"
+            echo "    • Did setup-dev-tenant.sh complete?  sudo bash scripts/setup-dev-tenant.sh"
+            echo "    • Create one manually:                 dokku apps:create dev-backend"
+        fi
         return
     fi
 
     if $JSON; then
-        printf '{"dokku":"running","host_port":"%s","tenants":[' "$(dokku_host_port)"
+        printf '{"dokku":"running","host_ports":"%s","apps":[' "$dports"
     else
-        printf "  ${D}%-12s %-9s %-8s %-3s %-5s %-32s %-5s %s${N}\n" \
-            "TENANT" "APP" "STATE" "RST" "HTTP" "IMAGE (running)" "PORT" "DOMAINS"
+        printf "  ${D}%-18s %-8s %-9s %-3s %-5s %-6s %-7s %-32s %s${N}\n" \
+            "APP" "ROLE" "STATE" "RST" "HTTP" "INTPORT" "PROCS" "IMAGE (running)" "DOMAINS"
     fi
 
     local first=true
-    for t in "${tenant_list[@]}"; do
-        local pin; pin=$(tenant_pin "$t")
-        local pin_be; pin_be="${pin%%|*}"
-        local rest="${pin#*|}"
-        local pin_fe; pin_fe="${rest%%|*}"
-        local enabled; enabled="${rest##*|}"
+    while IFS= read -r app; do
+        [ -z "$app" ] && continue
+        local tenant; tenant=$(app_tenant "$app")
+        local kind;   kind=$(app_kind "$app")
+        local cid;    cid=$(app_container_id "$app")
 
-        for kind in backend frontend; do
-            local app="${t}-${kind}"
-            docker exec -i dokku dokku apps:exists "$app" &>/dev/null || continue
+        local state="missing" rcount="-" image="-" probe="000" path="/"
+        if [ -n "$cid" ]; then
+            state=$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || echo missing)
+            rcount=$(app_restart_count "$app")
+            image=$(app_image "$app")
+        else
+            state="not-deployed"
+        fi
+        local intport;   intport=$(app_internal_port "$app")
+        local hostports; hostports=$(app_host_ports "$app")
+        local procs;     procs=$(app_process_types "$app")
+        [ "$kind" = "backend" ] && path="/healthz"
+        [ -n "$cid" ] && probe=$(app_http_probe "$app" "$path")
+        local domains; domains=$(docker exec -i dokku dokku domains:report "$app" --domains-app-vhosts 2>/dev/null | tr -s ' ')
 
-            local cid; cid=$(app_container_id "$app")
-            local state="missing" rcount="-" image="-" port="-" probe="000" path="/"
-            if [ -n "$cid" ]; then
-                state=$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || echo missing)
-                rcount=$(app_restart_count "$app")
-                image=$(app_image "$app")
-            fi
-            port=$(app_internal_port "$app")
-            [ "$kind" = "backend" ] && path="/healthz"
-            [ -n "$cid" ] && probe=$(app_http_probe "$app" "$path")
-            local domains; domains=$(docker exec -i dokku dokku domains:report "$app" --domains-app-vhosts 2>/dev/null | tr -s ' ')
-
-            if $JSON; then
-                $first || printf ','
-                first=false
-                printf '{"tenant":"%s","app":"%s","state":"%s","restarts":"%s","http":"%s","image":"%s","port":"%s","domains":"%s","pinned_backend":"%s","pinned_frontend":"%s","enabled":"%s"}' \
-                    "$t" "$app" "$state" "$rcount" "$probe" "$image" "$port" "$domains" "$pin_be" "$pin_fe" "$enabled"
-            else
-                printf "  %-12s %-9s %s %-3s %s %-32s %-5s %s\n" \
-                    "$t" "$kind" "$(printf '%-9s' "$(colorize_state "$state")")" \
-                    "$rcount" \
-                    "$(printf '%-5s' "$(colorize_http "$probe")")" \
-                    "${image:--}" "${port:--}" "${domains:--}"
-            fi
-        done
+        if $JSON; then
+            $first || printf ','
+            first=false
+            local pin; pin=$(tenant_pin "$tenant")
+            local pin_be; pin_be="${pin%%|*}"
+            local rest="${pin#*|}"
+            local pin_fe; pin_fe="${rest%%|*}"
+            local enabled="${rest##*|}"
+            printf '{"app":"%s","tenant":"%s","role":"%s","state":"%s","restarts":"%s","http":"%s","internal_port":"%s","host_ports":"%s","processes":"%s","image":"%s","domains":"%s","pinned_backend":"%s","pinned_frontend":"%s","enabled":"%s"}' \
+                "$app" "$tenant" "$kind" "$state" "$rcount" "$probe" "$intport" "$hostports" "$procs" "$image" "$domains" "$pin_be" "$pin_fe" "$enabled"
+        else
+            printf "  %-18s %-8s %s %-3s %s %-6s %-7s %-32s %s\n" \
+                "$app" "$kind" "$(printf '%-9s' "$(colorize_state "$state")")" \
+                "$rcount" \
+                "$(printf '%-5s' "$(colorize_http "$probe")")" \
+                "${intport:--}" "${procs:--}" "${image:--}" "${domains:--}"
+            [ -n "$hostports" ] && printf "  ${D}%-18s   host-published: %s${N}\n" "" "$hostports"
+        fi
 
         if ! $JSON && [ -n "$TENANT_FILTER" ]; then
+            local pin; pin=$(tenant_pin "$tenant")
+            local pin_be; pin_be="${pin%%|*}"
+            local rest="${pin#*|}"
+            local pin_fe; pin_fe="${rest%%|*}"
+            local enabled="${rest##*|}"
             echo ""
             echo "  ${D}Pinned in master DB :${N} backend=${pin_be:-<unset>} frontend=${pin_fe:-<unset>} enabled=${enabled:-?}"
             echo ""
-            echo "  ${D}Recent backend logs:${N}"
-            docker exec -i dokku dokku logs "${t}-backend" --tail 15 2>/dev/null | sed 's/^/    /' || true
+            echo "  ${D}Recent ${app} logs:${N}"
+            docker exec -i dokku dokku logs "$app" --tail 15 2>/dev/null | sed 's/^/    /' || true
         fi
-    done
+    done <<< "$apps"
 
     $JSON && printf ']}\n'
     $JSON || echo ""

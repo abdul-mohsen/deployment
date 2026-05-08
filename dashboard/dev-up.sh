@@ -11,4 +11,7 @@ export CGO_ENABLED=0
 mkdir -p bin
 go build -ldflags="-s -w" -trimpath -o bin/dashboard .
 
-docker compose -f docker-compose.dev.yml up -d --build
+# Force a clean image rebuild so freshly-baked binary + templates always land
+# in the running container (avoids stale layers cached by Docker).
+docker compose -f docker-compose.dev.yml build --no-cache
+docker compose -f docker-compose.dev.yml up -d --force-recreate

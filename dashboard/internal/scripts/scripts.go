@@ -23,10 +23,10 @@ import (
 
 // Field describes one input on a script's form.
 type Field struct {
-	Name        string   // form field name (also used in argv synthesis when --arg-style)
+	Name        string // form field name (also used in argv synthesis when --arg-style)
 	Label       string
 	Help        string
-	Type        string   // "text" | "select" | "checkbox" | "kv" (KEY=VALUE list)
+	Type        string // "text" | "select" | "checkbox" | "kv" (KEY=VALUE list)
 	Placeholder string
 	Required    bool
 	Options     []string // for type=select
@@ -36,7 +36,7 @@ type Field struct {
 
 // Script is a registered orchestration script the UI can invoke.
 type Script struct {
-	Name    string  // script file name in scripts/ (e.g. "create-tenant.sh")
+	Name    string // script file name in scripts/ (e.g. "create-tenant.sh")
 	Title   string
 	Summary string
 	Danger  bool    // confirmation required in UI
@@ -166,6 +166,10 @@ func Catalog() []Script {
 		{
 			Name: "setup-nats.sh", Title: "Setup NATS",
 			Summary: "Run a NATS JetStream server on the host (idempotent). Backends connect via host.docker.internal:4222.",
+		},
+		{
+			Name: "discover-dokku-nginx.sh", Title: "Discover Dokku nginx",
+			Summary: "Print the IP/port Dokku nginx is reachable on, plus a ready-to-paste edge-nginx wildcard server block.",
 		},
 		{
 			Name: "auto-pull.sh", Title: "Run auto-pull",

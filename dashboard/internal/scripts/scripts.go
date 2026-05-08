@@ -172,6 +172,10 @@ func Catalog() []Script {
 			Summary: "Print the IP/port Dokku nginx is reachable on, plus a ready-to-paste edge-nginx wildcard server block.",
 		},
 		{
+			Name: "watch-dokku-traffic.sh", Title: "Watch Dokku traffic",
+			Summary: "Tail Dokku nginx access logs prefixed with the tenant (vhost) name; verify *.<base-domain> routing.",
+		},
+		{
 			Name: "auto-pull.sh", Title: "Run auto-pull",
 			Summary: "Force one auto-pull cycle (normally cron does this every 2m).",
 			Fields: []Field{

@@ -44,6 +44,13 @@ type Script struct {
 	Fields  []Field // ordered
 }
 
+// Slug returns the URL-safe identifier for the script (file name without
+// the .sh suffix). Used so dashboard URLs don't end in .sh, which some
+// nginx setups treat as suspicious / try to execute via fastcgi.
+func (s Script) Slug() string {
+	return strings.TrimSuffix(s.Name, ".sh")
+}
+
 // Catalog returns the curated list of scripts the dashboard exposes.
 //
 // Adding a new script: drop it into ./scripts/ and add an entry here. Only
@@ -174,11 +181,13 @@ func Catalog() []Script {
 	}
 }
 
-// Find returns the script with the given file name, or nil.
+// Find returns the script with the given file name or slug (file name
+// without the .sh suffix), or nil.
 func Find(name string) *Script {
-	for i := range Catalog() {
-		if Catalog()[i].Name == name {
-			s := Catalog()[i]
+	cat := Catalog()
+	for i := range cat {
+		if cat[i].Name == name || cat[i].Slug() == name {
+			s := cat[i]
 			return &s
 		}
 	}

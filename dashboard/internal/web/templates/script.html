@@ -93,7 +93,7 @@
     const fd = new FormData(form);
     appendLine('');
     appendLine('--- run ' + new Date().toISOString() + ' ---');
-    const res = await fetch('/scripts/{{.Name}}/run', { method: 'POST', body: new URLSearchParams(fd) });
+    const res = await fetch('/scripts/{{.Slug}}/run', { method: 'POST', body: new URLSearchParams(fd) });
     if (!res.ok) {
       appendLine('✖ ' + res.status + ' ' + (await res.text()));
       return;

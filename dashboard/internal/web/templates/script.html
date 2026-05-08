@@ -18,8 +18,11 @@
 </div>
 {{end}}
 
-<form id="run-form" class="mt-6 space-y-4 max-w-2xl">
+<form id="run-form" class="mt-6 space-y-4 max-w-2xl" autocomplete="on">
   {{range .Fields}}
+  {{if eq .Type "hidden"}}
+    <input type="hidden" name="{{.Name}}" value="{{.Default}}">
+  {{else}}
   <label class="block">
     <div class="flex items-baseline justify-between">
       <span class="text-xs uppercase tracking-widest text-zinc-400">
@@ -40,13 +43,27 @@
       <textarea name="{{.Name}}" rows="3"
         placeholder="KEY=value&#10;OTHER=value"
         class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-sm outline-none focus:border-emerald-500"></textarea>
-    {{else}}
-      <input type="text" name="{{.Name}}" placeholder="{{.Placeholder}}"
+    {{else if eq .Type "password"}}
+      <input type="password" name="{{.Name}}" placeholder="{{.Placeholder}}"
+        autocomplete="new-password"
         {{if .Required}}required{{end}}
         class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-sm outline-none focus:border-emerald-500">
+    {{else}}
+      <input type="text" name="{{.Name}}" placeholder="{{.Placeholder}}"
+        value="{{.Default}}"
+        autocomplete="on"
+        {{if .Suggest}}list="dl-{{.Name}}"{{end}}
+        {{if .Required}}required{{end}}
+        class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-sm outline-none focus:border-emerald-500">
+      {{if .Suggest}}
+      <datalist id="dl-{{.Name}}">
+        {{range .Suggest}}<option value="{{.}}">{{end}}
+      </datalist>
+      {{end}}
     {{end}}
     {{if .Help}}<p class="mt-1 text-[11px] text-zinc-500">{{.Help}}</p>{{end}}
   </label>
+  {{end}}
   {{end}}
   <div class="flex items-center gap-2">
     <button class="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-sm transition">Run</button>
@@ -66,6 +83,43 @@
   const out = document.getElementById('out');
   document.getElementById('clear-out').onclick = () => out.innerHTML = '';
   const danger = {{.Danger}};
+  const slug = '{{.Slug}}';
+  const STORE_KEY = 'script-form:' + slug;
+
+  // ---- Auto-fill from last successful submission (localStorage) ----
+  // Restores previously entered text/select/textarea values per script.
+  // Password inputs are intentionally excluded for security.
+  function restoreSaved() {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch (_) {}
+    for (const el of form.elements) {
+      if (!el.name) continue;
+      if (el.type === 'password' || el.type === 'hidden') continue;
+      if (!(el.name in saved)) continue;
+      if (el.type === 'checkbox') {
+        el.checked = !!saved[el.name];
+      } else if (el.value === '' || el.value === el.defaultValue) {
+        // Don't clobber server-provided defaults that the user hasn't touched.
+        el.value = saved[el.name];
+      }
+    }
+  }
+
+  function persistOnSubmit() {
+    const data = {};
+    for (const el of form.elements) {
+      if (!el.name) continue;
+      if (el.type === 'password' || el.type === 'hidden') continue;
+      if (el.type === 'checkbox') {
+        data[el.name] = el.checked;
+      } else {
+        data[el.name] = el.value;
+      }
+    }
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(data)); } catch (_) {}
+  }
+
+  restoreSaved();
 
   function escapeHtml(s) {
     return s
@@ -90,6 +144,7 @@
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     if (danger && !confirm('This script may modify or delete data. Continue?')) return;
+    persistOnSubmit();
     const fd = new FormData(form);
     appendLine('');
     appendLine('--- run ' + new Date().toISOString() + ' ---');

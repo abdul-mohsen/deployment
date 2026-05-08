@@ -26,12 +26,15 @@ type Field struct {
 	Name        string // form field name (also used in argv synthesis when --arg-style)
 	Label       string
 	Help        string
-	Type        string // "text" | "select" | "checkbox" | "kv" (KEY=VALUE list)
+	Type        string // "text" | "password" | "hidden" | "select" | "checkbox" | "kv" (KEY=VALUE list)
 	Placeholder string
 	Required    bool
 	Options     []string // for type=select
 	Flag        string   // CLI flag, e.g. "--type"; empty -> positional
 	Boolean     bool     // when true, presence appends Flag (no value)
+	Suggest     []string // optional datalist values rendered next to the input for auto-suggest
+	Secret      bool     // when true, value is masked in the echoed command line and excluded from auto-fill persistence
+	Default     string   // default value pre-filled into the input on render (and used as the hidden value)
 }
 
 // Script is a registered orchestration script the UI can invoke.
@@ -72,14 +75,31 @@ func Catalog() []Script {
 			Summary: "Provision a new tenant (backend + frontend + storage + SSL).",
 			Danger:  true,
 			Fields: []Field{
-				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true, Placeholder: "acme"},
-				{Name: "admin_user", Label: "Admin username", Flag: "--env", Type: "text", Required: true, Placeholder: "admin"},
+				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true, Placeholder: "acme",
+					Suggest: []string{"acme", "demo", "dev", "staging", "test"}},
+				{Name: "admin_user", Label: "Admin username", Flag: "--env", Type: "text", Required: true, Placeholder: "admin",
+					Default: "admin", Suggest: []string{"admin"}},
+				{Name: "admin_password", Label: "Admin password", Flag: "--env", Type: "password", Required: true, Secret: true,
+					Placeholder: "Strong password for the admin user",
+					Help:        "Sent as ADMIN_PASSWORD to the backend; used to seed the initial admin account."},
+				{Name: "manager_user", Label: "Manager username", Flag: "--env", Type: "text", Placeholder: "manager",
+					Suggest: []string{"manager"},
+					Help:    "Optional. Leave blank to skip seeding a manager account."},
+				{Name: "manager_password", Label: "Manager password", Flag: "--env", Type: "password", Secret: true,
+					Placeholder: "Strong password for the manager user",
+					Help:        "Optional. Sent as MANAGER_PASSWORD to the backend; required if a Manager username is provided."},
 				{Name: "company_name", Label: "Company name", Flag: "--env", Type: "text", Required: true, Placeholder: "ACME Corp"},
 				{Name: "backend_image", Label: "Backend image", Flag: "--backend-image", Type: "text", Placeholder: "ssdawweq/ifritah-api:dev",
-					Help: "Requires database provisioning to be configured in config.env, or explicit DATABASE_URL/DB_* env vars below."},
-				{Name: "frontend_image", Label: "Frontend image", Flag: "--frontend-image", Type: "text", Placeholder: "ssdawweq/ifritah-web:dev"},
-				{Name: "backend_port", Label: "Backend port", Flag: "--backend-port", Type: "text", Placeholder: "8090"},
-				{Name: "frontend_port", Label: "Frontend port", Flag: "--frontend-port", Type: "text", Placeholder: "8000"},
+					Default: "ssdawweq/ifritah-api:dev",
+					Suggest: []string{"ssdawweq/ifritah-api:dev", "ssdawweq/ifritah-api:latest", "ssdawweq/ifritah-api:stable"},
+					Help:    "Requires database provisioning to be configured in config.env, or explicit DATABASE_URL/DB_* env vars below."},
+				{Name: "frontend_image", Label: "Frontend image", Flag: "--frontend-image", Type: "text", Placeholder: "ssdawweq/ifritah-web:dev",
+					Default: "ssdawweq/ifritah-web:dev",
+					Suggest: []string{"ssdawweq/ifritah-web:dev", "ssdawweq/ifritah-web:latest", "ssdawweq/ifritah-web:stable"}},
+				// Ports are intentionally hidden — operators should not change container ports
+				// from the UI; defaults match the upstream images.
+				{Name: "backend_port", Flag: "--backend-port", Type: "hidden", Default: "8090"},
+				{Name: "frontend_port", Flag: "--frontend-port", Type: "hidden", Default: "8000"},
 				{Name: "no_database", Label: "Skip database", Flag: "--no-database", Type: "checkbox", Boolean: true,
 					Help: "Only use this if the backend can boot without a DB, or if you provide DATABASE_URL/DB_* in Env vars."},
 				{Name: "git_only", Label: "Git-only (no deploy)", Flag: "--git-only", Type: "checkbox", Boolean: true},

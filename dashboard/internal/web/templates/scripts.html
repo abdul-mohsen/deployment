@@ -6,7 +6,7 @@
 
 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
   {{range .Scripts}}
-  <a href="/scripts/{{.Name}}" class="group block rounded-xl bg-zinc-900/60 ring-1 ring-zinc-800 hover:ring-emerald-500/40 transition p-5">
+  <a href="/scripts/{{.Slug}}" class="group block rounded-xl bg-zinc-900/60 ring-1 ring-zinc-800 hover:ring-emerald-500/40 transition p-5">
     <div class="flex items-center gap-2">
       <h3 class="font-semibold truncate">{{.Title}}</h3>
       {{if .Danger}}<span class="text-[10px] px-1.5 py-0.5 rounded ring-1 ring-rose-500/30 text-rose-300 uppercase tracking-widest">danger</span>{{end}}

@@ -271,7 +271,10 @@ dokku config:set --no-restart "$BACKEND_APP" \
     TENANT_ID="$TENANT_NAME" \
     NODE_ENV=production \
     PORT="$BACKEND_PORT" \
-    SERVER_PORT="$BACKEND_PORT"
+    SERVER_PORT="$BACKEND_PORT" \
+    NATS_URL="${NATS_URL:-nats://host.docker.internal:4222}" \
+    BASEURL="${BASEURL:-/api/}" \
+    JWT_SECERT_KEY="${JWT_SECERT_KEY:-$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48)}"
 
 # Determine protocol based on SSL setting
 PROTOCOL="http"

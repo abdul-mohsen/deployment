@@ -495,10 +495,12 @@ func (s *server) render(w http.ResponseWriter, name string, data any) {
 		return
 	}
 	if m, ok := data.(map[string]any); ok {
-		mysqlConfigured := s.cfg.EnvName == "prod" || strings.TrimSpace(getenv("MYSQL_ROOT_PASSWORD")) != ""
-		mysqlPlaceholder := strings.TrimSpace(getenv("MYSQL_ROOT_PASSWORD")) == "changeme"
-		m["MySQLConfigured"] = mysqlConfigured && !mysqlPlaceholder
-		m["MySQLNeedsConfig"] = mysqlPlaceholder || !mysqlConfigured
+		pw := strings.TrimSpace(getenv("MYSQL_ROOT_PASSWORD"))
+		user := strings.TrimSpace(getenv("MYSQL_ROOT_USER"))
+		configured := pw != "" && pw != "changeme"
+		m["MySQLConfigured"] = configured
+		m["MySQLNeedsConfig"] = !configured
+		m["MySQLAdminUser"] = user
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := t.ExecuteTemplate(w, name, data); err != nil {

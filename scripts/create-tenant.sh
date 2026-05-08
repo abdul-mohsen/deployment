@@ -217,7 +217,10 @@ dokku domains:add "$FRONTEND_APP" "$TENANT_DOMAIN"
 log "Configuring URL routing..."
 
 # Backend: /api prefix
+# proxy_busy_buffers_size must be >= proxy_buffer_size and one of proxy_buffers (nginx requirement)
 dokku nginx:set "$BACKEND_APP" proxy-buffer-size "128k"
+dokku nginx:set "$BACKEND_APP" proxy-buffers "4 256k"
+dokku nginx:set "$BACKEND_APP" proxy-busy-buffers-size "256k"
 
 # Create custom nginx config for path-based routing
 # Frontend is the main app, backend is proxied at /api
@@ -236,6 +239,7 @@ location /api {
     proxy_set_header X-Request-Start "t=\${msec}";
     proxy_buffer_size 128k;
     proxy_buffers 4 256k;
+    proxy_busy_buffers_size 256k;
     proxy_read_timeout 300s;
 }
 NGINX_CONF

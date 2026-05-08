@@ -213,17 +213,28 @@ dokku domains:clear "$FRONTEND_APP"
 dokku domains:add "$FRONTEND_APP" "$TENANT_DOMAIN"
 
 # ---- 3. Configure nginx routing ----
-# Backend handles /api/* , frontend handles everything else
-log "Configuring URL routing..."
+# NGINX_MODE values:
+#   behind-nginx-shared (default) — host nginx wildcards *.BASE_DOMAIN to a
+#       single port and Dokku's internal nginx routes by Host header. No
+#       per-tenant host port. TLS lives on host nginx; Dokku speaks HTTP.
+#   standalone — Dokku owns 80/443 directly (Let's Encrypt enabled).
 
-# Backend: /api prefix
-# proxy_busy_buffers_size must be >= proxy_buffer_size and one of proxy_buffers (nginx requirement)
+NGINX_MODE="${NGINX_MODE:-behind-nginx-shared}"
+DOKKU_PORT="${DOKKU_PORT:-8080}"
+NGINX_CLIENT_MAX_BODY_SIZE="${NGINX_CLIENT_MAX_BODY_SIZE:-50m}"
+
+case "$NGINX_MODE" in
+    standalone|behind-nginx-shared) ;;
+    *) error "Unknown NGINX_MODE='$NGINX_MODE' (expected: behind-nginx-shared | standalone)"; exit 1 ;;
+esac
+
+log "Configuring URL routing (Dokku edge nginx, mode=$NGINX_MODE)..."
+# proxy_busy_buffers_size must be >= proxy_buffer_size and one of proxy_buffers
 dokku nginx:set "$BACKEND_APP" proxy-buffer-size "128k"
 dokku nginx:set "$BACKEND_APP" proxy-buffers "4 256k"
 dokku nginx:set "$BACKEND_APP" proxy-busy-buffers-size "256k"
 
-# Create custom nginx config for path-based routing
-# Frontend is the main app, backend is proxied at /api
+# Custom nginx snippet: frontend vhost proxies /api/* to backend by service name
 dokku_shell "mkdir -p /home/dokku/${FRONTEND_APP}/nginx.conf.d"
 docker exec -i dokku bash -c "cat > /home/dokku/${FRONTEND_APP}/nginx.conf.d/api-proxy.conf" <<NGINX_CONF
 # Proxy /api requests to the backend app
@@ -246,18 +257,11 @@ NGINX_CONF
 dokku_shell "chown -R dokku:dokku /home/dokku/${FRONTEND_APP}/nginx.conf.d"
 
 # ---- 4. Set ports ----
-NGINX_MODE="${NGINX_MODE:-standalone}"
-DOKKU_PORT="${DOKKU_PORT:-8080}"
-NGINX_CONF_DIR="${NGINX_CONF_DIR:-/etc/nginx/dokku-tenants}"
-
-if [ "$NGINX_MODE" = "behind-nginx" ]; then
-    LISTEN_PORT="$DOKKU_PORT"
-else
-    LISTEN_PORT=80
-fi
-
-log "Setting container ports..."
-dokku ports:set "$BACKEND_APP" "http:${LISTEN_PORT}:${BACKEND_PORT}"
+# Dokku edge nginx listens on :80 inside its own network; host nginx (if any)
+# just forwards to DOKKU_PORT.
+LISTEN_PORT=80
+log "Setting container ports (Dokku edge listens on :${LISTEN_PORT})..."
+dokku ports:set "$BACKEND_APP"  "http:${LISTEN_PORT}:${BACKEND_PORT}"
 dokku ports:set "$FRONTEND_APP" "http:${LISTEN_PORT}:${FRONTEND_PORT}"
 
 # ---- 5. Persistent storage ----
@@ -277,7 +281,7 @@ dokku config:set --no-restart "$BACKEND_APP" \
     PORT="$BACKEND_PORT" \
     SERVER_PORT="$BACKEND_PORT" \
     NATS_URL="${NATS_URL:-nats://host.docker.internal:4222}" \
-    BASEURL="${BASEURL:-/api/}" \
+    BASEURL="${BASEURL:-/api/v2}" \
     JWT_SECERT_KEY="${JWT_SECERT_KEY:-$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48)}"
 
 # Determine protocol based on SSL setting
@@ -392,7 +396,13 @@ if ! $GIT_ONLY; then
 fi
 
 # ---- 10. SSL / External nginx ----
-if [ "$NGINX_MODE" = "standalone" ] && [ "${ENABLE_SSL:-false}" = "true" ]; then
+if [ "$NGINX_MODE" = "behind-nginx-shared" ]; then
+    info "behind-nginx-shared — host nginx wildcards *.${BASE_DOMAIN} → 127.0.0.1:${DOKKU_PORT}; nothing to do per-tenant."
+    info "Verify (one-time, on the host):"
+    info "  /etc/nginx/sites-enabled/dokku-shared.conf has:"
+    info "    server { listen 443 ssl …; server_name *.${BASE_DOMAIN}; … proxy_pass http://127.0.0.1:${DOKKU_PORT}; proxy_set_header Host \$host; … }"
+    info "  Then: sudo nginx -t && sudo systemctl reload nginx"
+elif [ "$NGINX_MODE" = "standalone" ] && [ "${ENABLE_SSL:-false}" = "true" ]; then
     if [ -n "$BACKEND_IMAGE" ] || [ -n "$FRONTEND_IMAGE" ]; then
         log "Enabling SSL via Let's Encrypt..."
         dokku letsencrypt:enable "$FRONTEND_APP" 2>/dev/null || warn "SSL setup deferred (app may need a deploy first)."
@@ -424,6 +434,11 @@ log "  Frontend: ${PROTOCOL}://${TENANT_DOMAIN}"
 log "  API:      ${PROTOCOL}://${TENANT_DOMAIN}/api"
 log "  Storage:  ${STORAGE_ROOT}/${TENANT_NAME}/"
 log ""
+if [ "$NGINX_MODE" = "behind-nginx-shared" ]; then
+    log "  Routing: host nginx (TLS) → 127.0.0.1:${DOKKU_PORT} → Dokku → ${TENANT_DOMAIN}"
+    log "  No per-tenant host port; Dokku routes by Host header."
+    log ""
+fi
 log "  Dashboard: http://localhost:8088 (Apps page)"
 log "  View logs:  dokku logs ${BACKEND_APP} --tail"
 log "  Status:     dokku ps:report ${BACKEND_APP}"

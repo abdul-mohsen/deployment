@@ -91,6 +91,56 @@ _dokku_fix_hostname() {
     export _DOKKU_HOSTS_FIXED=1
 }
 
+# =============================================================================
+# Host port allocation (used in NGINX_MODE=behind-nginx)
+# =============================================================================
+# _collect_used_ports
+#   Prints, one per line, every TCP port we want to avoid when allocating a
+#   new host-side port for a tenant app:
+#     1. Host-side ports already mapped by any existing Dokku app
+#     2. Ports currently listening on this host (best-effort; the dashboard
+#        sidecar's network namespace may differ from the real host, but Dokku
+#        port-map dedup is the critical invariant)
+_collect_used_ports() {
+    local apps app
+    apps="$(dokku --quiet apps:list 2>/dev/null || true)"
+    for app in $apps; do
+        # `dokku ports:report <app> --proxy-port-map` returns
+        #   "http:18000:8000 https:18443:8000 ..."
+        dokku ports:report "$app" --proxy-port-map 2>/dev/null \
+            | tr ' ' '\n' \
+            | awk -F: '/^[a-zA-Z]+:[0-9]+:[0-9]+$/ {print $2}'
+    done
+    if command -v ss &>/dev/null; then
+        ss -ltn 2>/dev/null | awk 'NR>1 {n=split($4,a,":"); print a[n]}'
+    elif command -v netstat &>/dev/null; then
+        netstat -ltn 2>/dev/null | awk 'NR>2 {n=split($4,a,":"); print a[n]}'
+    fi
+}
+
+# allocate_host_port <range_start> <range_end> [exclude_csv]
+#   Echoes the lowest free port in [range_start, range_end] not in the used
+#   set or in the comma-separated exclusion list. Returns 1 if none free.
+allocate_host_port() {
+    local start="$1" end="$2" exclude_csv="${3:-}"
+    local used p x skip
+    used="$(_collect_used_ports | sort -un)"
+    for ((p=start; p<=end; p++)); do
+        if echo "$used" | grep -qx "$p"; then continue; fi
+        skip=0
+        if [ -n "$exclude_csv" ]; then
+            local IFS=','
+            for x in $exclude_csv; do
+                if [ "$x" = "$p" ]; then skip=1; break; fi
+            done
+        fi
+        [ "$skip" -eq 1 ] && continue
+        echo "$p"
+        return 0
+    done
+    return 1
+}
+
 # Get remote Docker Hub image digest (public, anonymous)
 get_remote_digest() {
     local image="$1"

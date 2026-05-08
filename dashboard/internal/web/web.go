@@ -415,7 +415,7 @@ func (s *server) handleScriptRun(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	fmt.Fprintf(w, "data: $ bash scripts/%s %s\n\n", sc.Name, strings.Join(argv, " "))
+	fmt.Fprintf(w, "data: $ bash scripts/%s %s\n\n", sc.Name, strings.Join(displayArgv(sc, argv), " "))
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -444,6 +444,9 @@ func buildArgv(sc *scripts.Script, form url.Values) ([]string, error) {
 				flags = append(flags, f.Flag)
 			}
 			continue
+		}
+		if v == "" && f.Default != "" {
+			v = f.Default
 		}
 		if v == "" {
 			if f.Required {
@@ -475,7 +478,38 @@ func buildArgv(sc *scripts.Script, form url.Values) ([]string, error) {
 			}
 		}
 	}
+	// Cross-field validation: if a manager username is supplied, demand a password too.
+	if mu := strings.TrimSpace(form.Get("manager_user")); mu != "" {
+		if strings.TrimSpace(form.Get("manager_password")) == "" {
+			return nil, fmt.Errorf("Manager password is required when a Manager username is set")
+		}
+	}
 	return append(positionals, flags...), nil
+}
+
+// displayArgv returns argv with values of secret fields replaced by ***
+// for safe echoing in the streamed command line.
+func displayArgv(sc *scripts.Script, argv []string) []string {
+	secretEnv := map[string]bool{}
+	for _, f := range sc.Fields {
+		if f.Secret && f.Flag == "--env" {
+			secretEnv[strings.ToUpper(f.Name)+"="] = true
+		}
+	}
+	if len(secretEnv) == 0 {
+		return argv
+	}
+	out := make([]string, len(argv))
+	copy(out, argv)
+	for i, a := range out {
+		for prefix := range secretEnv {
+			if strings.HasPrefix(a, prefix) {
+				out[i] = prefix + "***"
+				break
+			}
+		}
+	}
+	return out
 }
 
 func (s *server) collect(ctx context.Context) []dokku.App {

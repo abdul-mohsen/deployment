@@ -67,10 +67,41 @@ dokku_state() {
     docker inspect -f '{{.State.Status}}' dokku 2>/dev/null
 }
 
-# Returns the running container ID for an app's web process (empty if none)
+# Returns the running container ID for an app's web process (empty if none).
+# Prefers Dokku's container labels (reliable across naming-scheme changes), and
+# falls back to the legacy '<app>.web.<n>' name pattern.
 app_container_id() {
-    local app="$1"
-    docker ps --filter "name=^${app}\.web\." --format '{{.ID}}' | head -1
+    local app="$1" cid
+    cid=$(docker ps \
+            --filter "label=com.dokku.app-name=${app}" \
+            --filter "label=com.dokku.process-type=web" \
+            --format '{{.ID}}' | head -1)
+    if [ -z "$cid" ]; then
+        cid=$(docker ps --filter "label=com.dokku.app-name=${app}" \
+                       --format '{{.ID}}' | head -1)
+    fi
+    if [ -z "$cid" ]; then
+        cid=$(docker ps --filter "name=^${app}\.web\." --format '{{.ID}}' | head -1)
+    fi
+    echo "$cid"
+}
+
+# Authoritative app state from Dokku itself: prints one of
+#   not-deployed | stopped | running | restarting | mixed | unknown
+# This is more reliable than guessing from container presence alone, because
+# Dokku knows whether a release has ever been deployed for the app.
+app_dokku_state() {
+    local app="$1" report deployed running
+    report=$(docker exec -i dokku dokku ps:report "$app" 2>/dev/null) || { echo unknown; return; }
+    deployed=$(printf '%s\n' "$report" | awk -F: '/Deployed:/    {gsub(/ /,"",$2); print tolower($2); exit}')
+    running=$(printf  '%s\n' "$report" | awk -F: '/Running:/     {gsub(/ /,"",$2); print tolower($2); exit}')
+    if [ "$deployed" != "true" ]; then echo not-deployed; return; fi
+    case "$running" in
+        true)    echo running ;;
+        false)   echo stopped ;;
+        mixed)   echo mixed ;;
+        *)       echo unknown ;;
+    esac
 }
 
 # Returns image:tag currently running for an app (empty if not running)
@@ -167,11 +198,12 @@ cron_has_autopull() {
 
 colorize_state() {
     case "$1" in
-        running)               echo "${G}running${N}" ;;
-        restarting|created)    echo "${Y}$1${N}" ;;
-        exited|dead|paused)    echo "${R}$1${N}" ;;
-        missing|"")            echo "${R}missing${N}" ;;
-        *)                     echo "$1" ;;
+        running)                       echo "${G}running${N}" ;;
+        restarting|created|mixed)      echo "${Y}$1${N}" ;;
+        exited|dead|paused|stopped)    echo "${R}$1${N}" ;;
+        not-deployed)                  echo "${Y}not-deployed${N}" ;;
+        missing|unknown|"")            echo "${R}${1:-missing}${N}" ;;
+        *)                             echo "$1" ;;
     esac
 }
 
@@ -244,13 +276,17 @@ render_once() {
         local kind;   kind=$(app_kind "$app")
         local cid;    cid=$(app_container_id "$app")
 
-        local state="missing" rcount="-" image="-" probe="000" path="/"
+        local state rcount="-" image="-" probe="000" path="/"
+        # Ask Dokku first; only fall back to docker inspect to refine 'running'
+        # into 'restarting'/'exited' when the container is mid-flap.
+        state=$(app_dokku_state "$app")
         if [ -n "$cid" ]; then
-            state=$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || echo missing)
+            local cstate; cstate=$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || echo "")
+            case "$cstate" in
+                restarting|exited|dead|paused) state="$cstate" ;;
+            esac
             rcount=$(app_restart_count "$app")
             image=$(app_image "$app")
-        else
-            state="not-deployed"
         fi
         local intport;   intport=$(app_internal_port "$app")
         local hostports; hostports=$(app_host_ports "$app")

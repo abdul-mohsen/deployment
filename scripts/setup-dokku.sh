@@ -71,7 +71,7 @@ if docker ps -a --format '{{.Names}}' | grep -q '^dokku$'; then
   fi
 else
   echo "ACTION: creating dokku container (ports ${DOKKU_PORT}->80, 443->443)"
-  docker run -d --name dokku --restart always --privileged --add-host=host.docker.internal:host-gateway -p "${DOKKU_PORT}":80 -p 443:443 -v /var/lib/dokku:/mnt/dokku -v /var/run/docker.sock:/var/run/docker.sock -e DOKKU_HOSTNAME="${DOKKU_HOSTNAME}" dokku/dokku:latest || { echo "RUN-FAILED"; exit 4; }
+  docker run -d --name dokku --hostname dokku --restart always --privileged --add-host=host.docker.internal:host-gateway -p "${DOKKU_PORT}":80 -p 443:443 -v /var/lib/dokku:/mnt/dokku -v /var/run/docker.sock:/var/run/docker.sock -e DOKKU_HOSTNAME="${DOKKU_HOSTNAME}" dokku/dokku:latest || { echo "RUN-FAILED"; exit 4; }
 fi
 
 # Wait up to 60s for dokku to respond

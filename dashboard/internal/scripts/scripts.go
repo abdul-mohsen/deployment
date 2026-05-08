@@ -160,6 +160,10 @@ func Catalog() []Script {
 			Name: "verify-mysql.sh", Title: "Verify MySQL", Summary: "Sanity-check the admin connection from a container.",
 		},
 		{
+			Name: "fix-dokku-hostname.sh", Title: "Fix Dokku hostname",
+			Summary: "Silence the 'sudo: unable to resolve host' warning.",
+		},
+		{
 			Name: "auto-pull.sh", Title: "Run auto-pull",
 			Summary: "Force one auto-pull cycle (normally cron does this every 2m).",
 			Fields: []Field{

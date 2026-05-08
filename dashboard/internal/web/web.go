@@ -50,7 +50,7 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		"httpClr":  httpClass,
 	}
 	pages := map[string]*template.Template{}
-	layoutPages := []string{"index.html", "app.html", "console.html", "scripts.html", "script.html"}
+	layoutPages := []string{"index.html", "app.html", "scripts.html", "script.html"}
 	for _, name := range layoutPages {
 		pages[name] = template.Must(template.New("").Funcs(funcs).ParseFS(tplFS,
 			"templates/_layout.html",
@@ -93,9 +93,6 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		r.Get("/apps/{name}/logs.txt", s.handleLogDump)
 		r.Get("/api/apps", s.handleAPIApps)
 		r.Get("/events", s.handleEvents)
-		r.Get("/console", s.handleConsolePage)
-		r.Post("/console/run", s.handleConsoleRun)
-		r.Get("/console/allowed", s.handleConsoleAllowed)
 		r.Get("/scripts", s.handleScriptsPage)
 		r.Get("/scripts/{name}", s.handleScriptPage)
 		r.Post("/scripts/{name}/run", s.handleScriptRun)
@@ -309,62 +306,6 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-	}
-}
-
-func (s *server) handleConsolePage(w http.ResponseWriter, _ *http.Request) {
-	s.render(w, "console.html", map[string]any{
-		"Env":     s.cfg.EnvName,
-		"Allowed": dokku.AllowedDokkuCommands(),
-	})
-}
-
-func (s *server) handleConsoleAllowed(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprint(w, "[")
-	for i, a := range dokku.AllowedDokkuCommands() {
-		if i > 0 {
-			fmt.Fprint(w, ",")
-		}
-		fmt.Fprintf(w, "%q", a)
-	}
-	fmt.Fprint(w, "]")
-}
-
-// handleConsoleRun streams the output of a user-supplied dokku command back as
-// SSE. The command is parsed, allow-listed, and executed inside the dokku
-// container. Any input that contains a shell metacharacter is rejected.
-func (s *server) handleConsoleRun(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
-		return
-	}
-	cmdLine := strings.TrimSpace(r.FormValue("cmd"))
-	if cmdLine == "" {
-		http.Error(w, "empty", http.StatusBadRequest)
-		return
-	}
-	if strings.ContainsAny(cmdLine, "|;&`$<>\\\n\r") {
-		http.Error(w, "shell metacharacters not allowed", http.StatusBadRequest)
-		return
-	}
-	argv := strings.Fields(cmdLine)
-	if !dokku.IsAllowedDokkuCommand(argv[0]) {
-		http.Error(w, "command not allowed", http.StatusForbidden)
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-	defer cancel()
-	if err := s.dokku.RunDokku(ctx, w, argv); err != nil {
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
-	}
-	fmt.Fprint(w, "event: done\ndata: end\n\n")
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
 	}
 }
 

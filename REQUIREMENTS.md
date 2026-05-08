@@ -1,0 +1,195 @@
+# Deployment App — Minimum Requirements
+
+Reference for what this repo (`deployment/`) needs to provision multi-tenant
+backend + frontend apps on Dokku. Plain HTTP only — TLS is the operator's
+responsibility on the host nginx in front of Dokku.
+
+---
+
+## 1. Topology (only supported)
+
+```
+Internet
+   │
+   ▼
+host nginx  (operator-managed; terminates TLS if any)
+   │  proxy_pass http://127.0.0.1:DOKKU_PORT;
+   │  proxy_set_header Host $host;          # CRITICAL — Dokku routes by Host
+   ▼
+Dokku container  (published as -p 8080:80)
+   │
+   ▼
+Dokku internal nginx  (one vhost per app, server_name <tenant>.BASE_DOMAIN)
+   │
+   ▼
+tenant frontend  ──/api──▶  tenant backend
+```
+
+- This repo never installs certificates and never touches port 443.
+- One-time host nginx vhost template lives at
+  [templates/nginx/host-shared.conf](templates/nginx/host-shared.conf).
+
+---
+
+## 2. Host prerequisites
+
+| Requirement | Notes |
+|---|---|
+| Linux + Docker | tested with Docker Engine on Ubuntu |
+| Dokku container | run with `-p 8080:80` (do **not** publish 443) and `--hostname dokku` |
+| External MySQL on host | **single MySQL server hosts both dev and prod tenants** — isolation is per-database (`tenant_<name>`) and per-user. Reachable from containers as `host.docker.internal:3306` (containers get `--add-host=host.docker.internal:host-gateway`). |
+| NATS on host | exposed at `nats://host.docker.internal:4222` (backend fatals without it) |
+| ZATCA submitter on host | separate process running on the host that reads tenant DBs from MySQL and submits invoices to ZATCA. Not deployed by this repo — must already be running. The `zatca_env` column in the master `tenant` table (default `production`, also accepts `sandbox`, `simulation`) tells the submitter which ZATCA endpoint to use per tenant. |
+| Wildcard DNS | `*.BASE_DOMAIN` → server IP |
+| Host nginx wildcard vhost | template ready in [templates/nginx/host-shared.conf](templates/nginx/host-shared.conf); points to `127.0.0.1:DOKKU_PORT` |
+
+### dev vs prod
+
+- **One Dokku host, one MySQL** serves both. Tenants are separated only by app
+  name and database name. There is no separate "dev cluster".
+- The `DEV_TENANT` (default `dev`) in [config.env](config.env.example) is a
+  single tenant that tracks `:dev` images via `auto-pull.sh`; all other tenants
+  track `:latest` (`PULL_TAG`) and are deployed manually via
+  [scripts/deploy-all.sh](scripts/deploy-all.sh).
+- The string `production` you may see in scripts refers to:
+  - the `zatca_env` column default (which ZATCA endpoint to submit to — has
+    nothing to do with the tenant being a "production tenant"), and
+  - comments distinguishing dev vs real deploy flow.
+  It does **not** mean the backend runs in a different mode. The Go backend has
+  no concept of `NODE_ENV` (that variable was a dead leftover and has been
+  removed from `create-tenant.sh`).
+
+---
+
+## 3. Required `config.env` keys
+
+Copy from [config.env.example](config.env.example) and fill:
+
+- `BASE_DOMAIN` — tenants become `<tenant>.BASE_DOMAIN`.
+- `DOKKU_PORT=8080` — host port the dokku container publishes.
+- `STORAGE_ROOT=/opt/tenant-data`
+- `MYSQL_HOST=host.docker.internal`, `MYSQL_PORT=3306`,
+  `MYSQL_ROOT_USER`, `MYSQL_ROOT_PASSWORD`
+- `MYSQL_MASTER_DB=zatca_master` — registry table `tenant(name, db_name, enabled)`
+- `MYSQL_TENANT_HOST=172.%` — docker bridge subnet; **must match** the host
+  pattern used in [scripts/remove-tenant.sh](scripts/remove-tenant.sh)
+- `DOCKERHUB_USERNAME`, optional `BACKEND_IMAGE` / `FRONTEND_IMAGE`,
+  `PULL_TAG=latest`
+- `MIGRATE_CMD` — Atlas:
+  `atlas migrate apply --dir file:///app/migrations --url "$DATABASE_URL"`
+- Optional: `PUBLIC_PROTOCOL=https|http` (controls only the `API_URL` string),
+  `NGINX_CLIENT_MAX_BODY_SIZE=50m`
+
+---
+
+## 4. One-time MySQL admin grants
+
+Required for the dokku-side admin user to create per-tenant DBs/users:
+
+```sql
+GRANT ALL PRIVILEGES ON `tenant_%`.* TO 'dokku_admin'@'172.%' WITH GRANT OPTION;
+GRANT ALL PRIVILEGES ON `zatca_master`.* TO 'dokku_admin'@'172.%';
+GRANT CREATE USER ON *.* TO 'dokku_admin'@'172.%';
+```
+
+Rules learned the hard way:
+- Use **backticks** for `tenant_%`, never single quotes.
+- `.*` is mandatory in `GRANT \`tenant_%\`.*` — without it MySQL treats it as a
+  table-level grant in the current database.
+- No `FLUSH PRIVILEGES` — needs `RELOAD` priv and isn't required in MySQL 8 for
+  `CREATE USER` / `GRANT`.
+- `CREATE USER IF NOT EXISTS` does **not** update an existing password — always
+  pair with `ALTER USER … IDENTIFIED BY` for idempotency.
+
+---
+
+## 5. What `create-tenant.sh` provisions per tenant
+
+- Apps: `<tenant>-backend`, `<tenant>-frontend`.
+- Domain: `<tenant>.BASE_DOMAIN` on both apps.
+- Ports: `dokku ports:set <app> http:80:<container_port>`
+  (backend default 3000, frontend 80; override via `--backend-port` /
+  `--frontend-port`).
+- Frontend `/api` → backend via
+  `/home/dokku/<frontend>/nginx.conf.d/api-proxy.conf` (proxies to
+  `<backend>-web:<BACKEND_PORT>` on the dokku internal network).
+- MySQL: db `tenant_<name>`, user `usr_<name>@'172.%'`, registered in
+  `zatca_master.tenant`.
+- Storage mounts:
+  `$STORAGE_ROOT/<tenant>/{uploads,data}` → `/app/{uploads,data}`.
+- CHECKS files seeded: backend `/api/health`, frontend `/`.
+
+---
+
+## 6. Backend container env (LEGACY names — required)
+
+The `ifritah-go` backend reads the legacy variable names below. Setting only
+the modern `DB_*` names is **silently ignored**.
+
+| Var | Meaning |
+|---|---|
+| `HOST` | `host:port` string (NOT `DB_HOST`) |
+| `DBUSER` | DB username |
+| `PASSWORD` | DB password |
+| `DBNAME` | DB name |
+| `SERVER_PORT` | listener port inside the container |
+| `JWT_SECERT_KEY` | JWT signing key (intentional misspelling) |
+| `NATS_URL` | required at boot — fatals without it |
+| `BASEURL` | route prefix, e.g. `/api/v2` (default in script) |
+| `TENANT_ID` | tenant slug |
+
+Modern duplicates (`DATABASE_URL`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`,
+`DB_PASSWORD`) are also set for forward compatibility.
+
+---
+
+## 7. Frontend container env
+
+- `TENANT_ID`
+- `API_URL=${PUBLIC_PROTOCOL}://<tenant>.BASE_DOMAIN/api`
+
+---
+
+## 8. Dashboard (Go web app)
+
+- Local: `http://localhost:8088` · Live: `https://odoo.ifritah.com`
+- Login: `admin` / `admin`.
+- Apps page lists tenants with health, log tail per app at `/apps/<name>/logs.txt`.
+- Scripts page (`/scripts`) runs the curated form-driven scripts (e.g.
+  `create-tenant`) with their output streamed back as SSE.
+- **No `/console`**. Arbitrary `dokku <verb>` execution from the dashboard was
+  removed in this PR — it was a remote-code-execution surface even with the
+  allow-list, and every legitimate use is already covered by the Apps and
+  Scripts pages plus per-tenant logs.
+
+---
+
+## 9. Out of scope (do NOT add back)
+
+- TLS certificates, Let's Encrypt, cert renewal.
+- Per-tenant host port allocation.
+- Multiple `NGINX_MODE` values — single mode only.
+- "Standalone" Dokku where Dokku owns :443 — operator nginx is mandatory.
+- Deploying or managing the on-host ZATCA submitter — it lives outside this repo.
+
+---
+
+## 10. Test workflow (no direct prod access)
+
+I (the agent) only have:
+- the local workspace at `c:\ssda\chatGPT\clone\deployment`
+- the live dashboard at `https://odoo.ifritah.com` (admin/admin) — Apps and
+  Scripts pages, plus per-tenant log dumps at `/apps/<name>/logs.txt`. No
+  arbitrary command surface (the old `/console` was removed for security).
+
+I do **not** have shell on the production server. The user does.
+
+So the loop is:
+1. Reproduce locally first — full stack runs on this machine
+   (MySQL `:13306`, NATS `:4222`, Dokku container `:8080`, dashboard `:8088`).
+2. Run the changed script (e.g. `create-tenant.sh`) against the local Dokku;
+   verify with `dokku ps:report`, curl, and the local dashboard.
+3. Only after local pass, hand the change to the user to apply on the real
+   server, or drive it remotely via the dashboard `/console` for `dokku`
+   subcommands and ask the user to run anything that needs host shell
+   (`sudo nginx -t`, `ss -ltnp`, file edits in `/etc/nginx/`, etc.).

@@ -35,7 +35,7 @@
     const items = [];
     if (q.startsWith('>')) {
       const rest = q.slice(1).trim().toLowerCase();
-      const cmds = ['Go to Apps:/', 'Open Console:/console'];
+      const cmds = ['Go to Apps:/', 'Open Scripts:/scripts'];
       for (const it of cmds) {
         const [label, href] = it.split(':');
         if (!rest || label.toLowerCase().includes(rest)) items.push({label, href});

@@ -24,6 +24,16 @@ import (
 )
 
 func main() {
+	// Pull MYSQL_*, BASE_DOMAIN, etc. from the deployment env files (same
+	// precedence verify-mysql.sh uses: install.env wins over config.env).
+	// Environment variables already set in the container (compose / shell)
+	// always take precedence over file values.
+	depDir := os.Getenv("DEPLOYMENT_DIR")
+	if depDir == "" {
+		depDir = "/opt/deployment"
+	}
+	config.LoadEnvFiles(depDir+"/install.env", depDir+"/config.env")
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config: %v", err)

@@ -60,6 +60,7 @@ run_mysqldump() {
 
 # Run a shell command inside the Dokku container
 dokku_shell() {
+    _dokku_fix_hostname
     docker exec -i dokku bash -c "$*"
 }
 
@@ -70,7 +71,24 @@ dokku_shell() {
 # sudo). The function takes precedence over any binary on PATH within this
 # shell, so behavior stays consistent across hosts.
 dokku() {
+    _dokku_fix_hostname
     docker exec -i dokku dokku "$@"
+}
+
+# Silence the harmless but noisy "sudo: unable to resolve host <containerid>"
+# warning that Dokku's internal sudo calls produce when the dokku container
+# was started without --hostname. Idempotent: only writes /etc/hosts once per
+# shell, and only if the entry is actually missing inside the container.
+_dokku_fix_hostname() {
+    [ -n "${_DOKKU_HOSTS_FIXED:-}" ] && return 0
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^dokku$' || return 0
+    local h
+    h=$(docker exec dokku hostname 2>/dev/null) || return 0
+    [ -n "$h" ] || return 0
+    if ! docker exec dokku grep -q "[[:space:]]${h}\$" /etc/hosts 2>/dev/null; then
+        docker exec -u root dokku sh -c "echo '127.0.1.1 ${h}' >> /etc/hosts" 2>/dev/null || true
+    fi
+    export _DOKKU_HOSTS_FIXED=1
 }
 
 # Get remote Docker Hub image digest (public, anonymous)

@@ -95,10 +95,10 @@ TENANT_DB_USER="usr_${TENANT_NAME//-/_}"
 
 if [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" != "changeme" ]; then
     log "Dropping MySQL database: $TENANT_DB_NAME"
+    MYSQL_TENANT_HOST="${MYSQL_TENANT_HOST:-172.%}"
     run_mysql <<SQLEOF 2>/dev/null || warn "Database $TENANT_DB_NAME not found (may already be dropped)."
 DROP DATABASE IF EXISTS \`${TENANT_DB_NAME}\`;
-DROP USER IF EXISTS '${TENANT_DB_USER}'@'%';
-FLUSH PRIVILEGES;
+DROP USER IF EXISTS '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}';
 SQLEOF
 
     # Mark as disabled in master database

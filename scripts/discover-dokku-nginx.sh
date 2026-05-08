@@ -20,16 +20,24 @@ ip=""
 port=""
 
 if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
-    # 1. Container IP on the default bridge.
+    # 1. Container IP on the default bridge (empty if --network host).
     ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "$CONTAINER" | awk '{print $1}')"
 
-    # 2. Is port 80 published to the host?
+    # 2. Detect host networking explicitly.
+    netmode="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$CONTAINER" 2>/dev/null || echo '')"
+
+    # 3. Is port 80 published to the host?
     pub="$(docker port "$CONTAINER" 80/tcp 2>/dev/null | head -1 || true)"
+
     if [ -n "$pub" ]; then
-        # e.g. "0.0.0.0:80" -> use 127.0.0.1
         port="${pub##*:}"
         host_target="127.0.0.1:${port}"
         mode="published-port"
+    elif [ "$netmode" = "host" ] || [ -z "$ip" ]; then
+        # Container shares the host network namespace -> nginx is on host's :80.
+        host_target="127.0.0.1:80"
+        port=80
+        mode="host-network"
     else
         port=80
         host_target="${ip}:80"

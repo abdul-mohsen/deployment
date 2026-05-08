@@ -110,13 +110,13 @@ else
     warn "MYSQL_ROOT_PASSWORD not set — skipping database cleanup."
 fi
 
-# ---- Remove external nginx config (uncomment if using per-tenant configs) ----
-# NGINX_CONF_DIR="${NGINX_CONF_DIR:-/etc/nginx/dokku-tenants}"
-# if [ -f "$NGINX_CONF_DIR/${TENANT_NAME}.conf" ]; then
-#     log "Removing external nginx config: $NGINX_CONF_DIR/${TENANT_NAME}.conf"
-#     rm -f "$NGINX_CONF_DIR/${TENANT_NAME}.conf"
-#     nginx -t && nginx -s reload 2>/dev/null || true
-# fi
+# ---- Remove host nginx vhost (NGINX_MODE=behind-nginx) ----
+NGINX_CONF_DIR="${NGINX_CONF_DIR:-/etc/nginx/dokku-tenants}"
+if [ -f "$NGINX_CONF_DIR/${TENANT_NAME}.conf" ]; then
+    log "Removing host nginx vhost: $NGINX_CONF_DIR/${TENANT_NAME}.conf"
+    rm -f "$NGINX_CONF_DIR/${TENANT_NAME}.conf"
+    warn "Reload host nginx to drop the vhost: sudo nginx -t && sudo systemctl reload nginx"
+fi
 
 # ---- Destroy Dokku apps ----
 if $BACKEND_EXISTS; then

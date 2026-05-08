@@ -38,8 +38,12 @@
   <main class="max-w-7xl mx-auto px-6 py-8 view-fade">
     {{if .MySQLNeedsConfig}}
     <section class="mb-6 rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
-      <div class="font-semibold tracking-tight">MySQL is not configured for backend tenant deploys.</div>
-      <div class="mt-1 text-rose-100/80">Set a real <code>MYSQL_ROOT_PASSWORD</code> in <code>config.env</code>, run <code>scripts/verify-mysql.sh</code>, or provide <code>DATABASE_URL</code>/<code>DB_*</code> env vars before deploying a backend image.</div>
+      <div class="font-semibold tracking-tight">MySQL admin credentials are not configured.</div>
+      <div class="mt-1 text-rose-100/80">
+        The deployment scripts read <code>MYSQL_ROOT_USER</code> (the admin user; <strong>need not be <code>root</code></strong> &mdash; a scoped account like <code>dokku_admin</code> is recommended) and <code>MYSQL_ROOT_PASSWORD</code> from <code>install.env</code> (preferred) or <code>config.env</code>.
+        Set them there and run <code>scripts/verify-mysql.sh</code>, or provide <code>DATABASE_URL</code>/<code>DB_*</code> env vars per tenant.
+      </div>
+      {{if .MySQLAdminUser}}<div class="mt-1 text-rose-100/60">Currently detected admin user: <code>{{.MySQLAdminUser}}</code> &mdash; password missing or still <code>changeme</code>.</div>{{end}}
     </section>
     {{end}}
     {{template "content" .}}

@@ -164,6 +164,10 @@ func Catalog() []Script {
 			Summary: "Silence the 'sudo: unable to resolve host' warning.",
 		},
 		{
+			Name: "setup-nats.sh", Title: "Setup NATS",
+			Summary: "Run a NATS JetStream server on the host (idempotent). Backends connect via host.docker.internal:4222.",
+		},
+		{
 			Name: "auto-pull.sh", Title: "Run auto-pull",
 			Summary: "Force one auto-pull cycle (normally cron does this every 2m).",
 			Fields: []Field{

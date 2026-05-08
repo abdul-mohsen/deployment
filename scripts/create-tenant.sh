@@ -269,7 +269,9 @@ dokku storage:mount "$BACKEND_APP" "$STORAGE_ROOT/$TENANT_NAME/data:/app/data"
 log "Setting environment variables..."
 dokku config:set --no-restart "$BACKEND_APP" \
     TENANT_ID="$TENANT_NAME" \
-    NODE_ENV=production
+    NODE_ENV=production \
+    PORT="$BACKEND_PORT" \
+    SERVER_PORT="$BACKEND_PORT"
 
 # Determine protocol based on SSL setting
 PROTOCOL="http"
@@ -332,7 +334,9 @@ VALUES ('${TENANT_NAME}', '${TENANT_DB_NAME}')
 ON DUPLICATE KEY UPDATE enabled=1;
 SQLEOF
 
-        # Inject DATABASE_URL into the backend container
+        # Inject DB env vars into the backend container.
+        # Both naming conventions: modern (DB_HOST/DB_USER/...) and legacy
+        # ifritah-go (HOST/DBUSER/PASSWORD/DBNAME — HOST is host:port).
         DATABASE_URL="mysql://${TENANT_DB_USER}:${TENANT_DB_PASS}@${MYSQL_HOST}:${MYSQL_PORT}/${TENANT_DB_NAME}"
         dokku config:set --no-restart "$BACKEND_APP" \
             DATABASE_URL="$DATABASE_URL" \
@@ -340,7 +344,11 @@ SQLEOF
             DB_PORT="$MYSQL_PORT" \
             DB_NAME="$TENANT_DB_NAME" \
             DB_USER="$TENANT_DB_USER" \
-            DB_PASSWORD="$TENANT_DB_PASS"
+            DB_PASSWORD="$TENANT_DB_PASS" \
+            HOST="${MYSQL_HOST}:${MYSQL_PORT}" \
+            DBUSER="$TENANT_DB_USER" \
+            PASSWORD="$TENANT_DB_PASS" \
+            DBNAME="$TENANT_DB_NAME"
 
         log "Database ready: $TENANT_DB_NAME"
     fi

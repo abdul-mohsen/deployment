@@ -244,10 +244,12 @@ log "Creating per-tenant docker network: $TENANT_NETWORK"
 dokku network:create "$TENANT_NETWORK" 2>/dev/null || info "Network $TENANT_NETWORK already exists"
 
 log "Attaching apps to $TENANT_NETWORK"
+# Dokku 0.30+ rejects setting attach-post-create AND attach-post-deploy for the
+# same network on the same app ("Network name already associated with this app").
+# attach-post-create alone is enough: it attaches on container create which
+# covers both image deploys (ps:rebuild) and git-push deploys.
 dokku network:set "$BACKEND_APP"  attach-post-create "$TENANT_NETWORK"
-dokku network:set "$BACKEND_APP"  attach-post-deploy "$TENANT_NETWORK"
 dokku network:set "$FRONTEND_APP" attach-post-create "$TENANT_NETWORK"
-dokku network:set "$FRONTEND_APP" attach-post-deploy "$TENANT_NETWORK"
 
 # ---- 4. Set ports ----
 # Dokku edge nginx listens on :80 inside its own network; host nginx (if any)

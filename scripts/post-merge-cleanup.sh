@@ -118,10 +118,10 @@ for t in "${TENANTS[@]}"; do
 
     info "  network: $net"
     dk_dokku network:create "$net" >/dev/null 2>&1 || true
-    dk_dokku network:set "$be" attach-post-create "$net" >/dev/null
-    dk_dokku network:set "$be" attach-post-deploy "$net" >/dev/null
-    dk_dokku network:set "$fe" attach-post-create "$net" >/dev/null
-    dk_dokku network:set "$fe" attach-post-deploy "$net" >/dev/null
+    # Use only attach-post-create: Dokku rejects setting both attach-post-create
+    # and attach-post-deploy to the same network on the same app.
+    dk_dokku network:set "$be" attach-post-create "$net" >/dev/null || true
+    dk_dokku network:set "$fe" attach-post-create "$net" >/dev/null || true
 
     info "  config: backend BASEURL=$BASEURL"
     dk_dokku config:set --no-restart "$be" BASEURL="$BASEURL" >/dev/null

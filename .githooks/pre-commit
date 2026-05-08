@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Enforce: feature branches must be based on origin/main (no stacking on other PR branches).
+# Skip on main itself, on merge commits, and on rebases.
+set -e
+
+branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+[ "$branch" = "main" ] || [ "$branch" = "HEAD" ] && exit 0
+
+# Refresh remote ref, but don't fail if offline.
+git fetch --quiet origin main 2>/dev/null || {
+    echo "[pre-commit] (offline) skipping base-on-main check"; exit 0;
+}
+
+# Find the merge-base with origin/main and walk back to confirm linear ancestry.
+mb="$(git merge-base HEAD origin/main 2>/dev/null || true)"
+om="$(git rev-parse origin/main)"
+
+if [ "$mb" != "$om" ]; then
+    cat >&2 <<MSG
+[pre-commit] ❌ Branch '$branch' is NOT based on origin/main.
+             merge-base: ${mb:-<none>}
+             origin/main: ${om}
+
+Fix:
+    git fetch origin
+    git rebase origin/main
+    # or, for a clean start:
+    git checkout -b <new-branch> origin/main
+    git cherry-pick <your-commits>
+
+(Repo rule: every feature branch must branch FROM origin/main.)
+MSG
+    exit 1
+fi

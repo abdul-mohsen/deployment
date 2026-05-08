@@ -57,13 +57,39 @@ echo "    proxy target : $host_target"
 echo "    base domain  : $BASE_DOMAIN"
 echo
 
-# Sanity check: should answer with an HTTP status (404/200/whatever — anything but timeout).
+# Sanity check.
+# We may be running INSIDE a container (the dashboard) — in that case 127.0.0.1
+# means "this container", not the host. Try the dokku container itself first
+# (it's always on the same network as the host's :80 when --network=host),
+# then fall back to host.docker.internal.
 echo "[+] curl test (Host: tenant.${BASE_DOMAIN})"
-if status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -H "Host: tenant.${BASE_DOMAIN}" "http://${host_target}/" 2>/dev/null)"; then
-    echo "    HTTP $status   (any non-zero response means the address is reachable)"
-else
-    echo "    ! could not reach $host_target — fix this before adding the nginx block"
+test_targets=()
+if docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+    test_targets+=("docker:exec ${CONTAINER}")
 fi
+test_targets+=("local:host.docker.internal:${port}" "local:${host_target}")
+
+reached=""
+for t in "${test_targets[@]}"; do
+    case "$t" in
+        docker:*)
+            if status="$(docker exec "$CONTAINER" curl -s -o /dev/null -w '%{http_code}' --max-time 3 -H "Host: tenant.${BASE_DOMAIN}" "http://127.0.0.1:${port}/" 2>/dev/null)" \
+               && [ -n "$status" ] && [ "$status" != "000" ]; then
+                echo "    HTTP $status   (from inside the dokku container -> 127.0.0.1:${port})"
+                reached=1; break
+            fi
+            ;;
+        local:*)
+            addr="${t#local:}"
+            if status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 -H "Host: tenant.${BASE_DOMAIN}" "http://${addr}/" 2>/dev/null)" \
+               && [ -n "$status" ] && [ "$status" != "000" ]; then
+                echo "    HTTP $status   (from this script's container -> ${addr})"
+                reached=1; break
+            fi
+            ;;
+    esac
+done
+[ -n "$reached" ] || echo "    ! could not reach Dokku nginx from any vantage point — but ${host_target} is still the right edge-nginx target on the host."
 echo
 
 cat <<NGINX

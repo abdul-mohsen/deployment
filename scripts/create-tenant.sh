@@ -6,8 +6,11 @@
 #   - Backend app (API) at <tenant>.<domain>/api
 #   - Frontend app at <tenant>.<domain>
 #   - Persistent storage for uploads/data
-#   - Auto-SSL via Let's Encrypt
 #   - Health checks and auto-restart
+#
+# TLS is NOT handled here. The host nginx in front of Dokku is owned by the
+# operator and is expected to terminate TLS and forward plain HTTP to
+# 127.0.0.1:DOKKU_PORT with the original Host header preserved.
 #
 # Usage:
 #   ./scripts/create-tenant.sh <tenant-name> [options]
@@ -62,8 +65,9 @@ fi
 TENANT_NAME=""
 BACKEND_IMAGE=""
 FRONTEND_IMAGE=""
-BACKEND_PORT="3000"
-FRONTEND_PORT="80"
+# ifritah-go listens on 8090; templates expose 8000 for the frontend.
+BACKEND_PORT="8090"
+FRONTEND_PORT="8000"
 NO_DATABASE=false
 GIT_ONLY=false
 DRY_RUN=false
@@ -120,6 +124,16 @@ TENANT_NAME="$(echo "$TENANT_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-
 if [ -z "$TENANT_NAME" ] || [ ${#TENANT_NAME} -gt 63 ]; then
     error "Invalid tenant name (must be 1-63 chars, lowercase alphanumeric + hyphens)."
     exit 1
+fi
+
+# ---- Logging: tee everything to a per-run log file -------------------------
+# So we (and the dashboard) can read what happened after the fact.
+LOG_DIR="${LOG_DIR:-${PROJECT_DIR}/logs}"
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+LOG_FILE="${LOG_DIR}/create-tenant-${TENANT_NAME}-$(date +%Y%m%d-%H%M%S).log"
+if [ -w "$LOG_DIR" ]; then
+    exec > >(tee -a "$LOG_FILE") 2>&1
+    info "Logging to: $LOG_FILE"
 fi
 
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"
@@ -212,49 +226,28 @@ dokku domains:add "$BACKEND_APP" "$TENANT_DOMAIN"
 dokku domains:clear "$FRONTEND_APP"
 dokku domains:add "$FRONTEND_APP" "$TENANT_DOMAIN"
 
-# ---- 3. Configure nginx routing ----
-# NGINX_MODE values:
-#   behind-nginx-shared (default) — host nginx wildcards *.BASE_DOMAIN to a
-#       single port and Dokku's internal nginx routes by Host header. No
-#       per-tenant host port. TLS lives on host nginx; Dokku speaks HTTP.
-#   standalone — Dokku owns 80/443 directly (Let's Encrypt enabled).
+# ---- 3. Inter-app networking ----
+# /api routing happens INSIDE the frontend Go app (it reads BACKEND_URL and
+# proxies HTTP itself). We do NOT write a Dokku nginx /api snippet here —
+# referencing a sibling app from a custom nginx.conf.d snippet breaks
+# `nginx:validate-config` (the upstream alias doesn't resolve from the
+# dokku-nginx context), which silently blocks reloads for ALL tenants.
+#
+# Instead: attach both apps to a per-tenant docker network so the frontend
+# container can reach the backend by Dokku's auto-alias "<app>.web".
 
-NGINX_MODE="${NGINX_MODE:-behind-nginx-shared}"
 DOKKU_PORT="${DOKKU_PORT:-8080}"
 NGINX_CLIENT_MAX_BODY_SIZE="${NGINX_CLIENT_MAX_BODY_SIZE:-50m}"
+TENANT_NETWORK="tenant-${TENANT_NAME}"
 
-case "$NGINX_MODE" in
-    standalone|behind-nginx-shared) ;;
-    *) error "Unknown NGINX_MODE='$NGINX_MODE' (expected: behind-nginx-shared | standalone)"; exit 1 ;;
-esac
+log "Creating per-tenant docker network: $TENANT_NETWORK"
+dokku network:create "$TENANT_NETWORK" 2>/dev/null || info "Network $TENANT_NETWORK already exists"
 
-log "Configuring URL routing (Dokku edge nginx, mode=$NGINX_MODE)..."
-# proxy_busy_buffers_size must be >= proxy_buffer_size and one of proxy_buffers
-dokku nginx:set "$BACKEND_APP" proxy-buffer-size "128k"
-dokku nginx:set "$BACKEND_APP" proxy-buffers "4 256k"
-dokku nginx:set "$BACKEND_APP" proxy-busy-buffers-size "256k"
-
-# Custom nginx snippet: frontend vhost proxies /api/* to backend by service name
-dokku_shell "mkdir -p /home/dokku/${FRONTEND_APP}/nginx.conf.d"
-docker exec -i dokku bash -c "cat > /home/dokku/${FRONTEND_APP}/nginx.conf.d/api-proxy.conf" <<NGINX_CONF
-# Proxy /api requests to the backend app
-location /api {
-    proxy_pass http://${BACKEND_APP}-web:${BACKEND_PORT};
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade \$http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header Host \$http_host;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Request-Start "t=\${msec}";
-    proxy_buffer_size 128k;
-    proxy_buffers 4 256k;
-    proxy_busy_buffers_size 256k;
-    proxy_read_timeout 300s;
-}
-NGINX_CONF
-dokku_shell "chown -R dokku:dokku /home/dokku/${FRONTEND_APP}/nginx.conf.d"
+log "Attaching apps to $TENANT_NETWORK"
+dokku network:set "$BACKEND_APP"  attach-post-create "$TENANT_NETWORK"
+dokku network:set "$BACKEND_APP"  attach-post-deploy "$TENANT_NETWORK"
+dokku network:set "$FRONTEND_APP" attach-post-create "$TENANT_NETWORK"
+dokku network:set "$FRONTEND_APP" attach-post-deploy "$TENANT_NETWORK"
 
 # ---- 4. Set ports ----
 # Dokku edge nginx listens on :80 inside its own network; host nginx (if any)
@@ -277,22 +270,24 @@ dokku storage:mount "$BACKEND_APP" "$STORAGE_ROOT/$TENANT_NAME/data:/app/data"
 log "Setting environment variables..."
 dokku config:set --no-restart "$BACKEND_APP" \
     TENANT_ID="$TENANT_NAME" \
-    NODE_ENV=production \
     PORT="$BACKEND_PORT" \
     SERVER_PORT="$BACKEND_PORT" \
     NATS_URL="${NATS_URL:-nats://host.docker.internal:4222}" \
     BASEURL="${BASEURL:-/api/v2}" \
     JWT_SECERT_KEY="${JWT_SECERT_KEY:-$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48)}"
 
-# Determine protocol based on SSL setting
-PROTOCOL="http"
-if [ "$NGINX_MODE" = "standalone" ] && [ "${ENABLE_SSL:-false}" = "true" ]; then
-    PROTOCOL="https"
-fi
+# Public URL scheme is set by the operator's host nginx (TLS is external).
+# Default to http; override with PUBLIC_PROTOCOL=https when host nginx terminates TLS.
+PROTOCOL="${PUBLIC_PROTOCOL:-http}"
 
+# Frontend speaks to backend over the per-tenant docker network. Dokku exposes
+# each web container under the alias "<app>.web" inside attached networks.
 dokku config:set --no-restart "$FRONTEND_APP" \
     TENANT_ID="$TENANT_NAME" \
-    API_URL="${PROTOCOL}://$TENANT_DOMAIN/api"
+    PORT="$FRONTEND_PORT" \
+    APP_DOMAIN="$TENANT_DOMAIN" \
+    BACKEND_URL="http://${BACKEND_APP}.web:${BACKEND_PORT}" \
+    API_URL="${PROTOCOL}://${TENANT_DOMAIN}/api"
 
 # Message service (if configured)
 MSG_HOST="${MSG_HOST:-}"
@@ -395,21 +390,9 @@ if ! $GIT_ONLY; then
     fi
 fi
 
-# ---- 10. SSL / External nginx ----
-if [ "$NGINX_MODE" = "behind-nginx-shared" ]; then
-    info "behind-nginx-shared — host nginx wildcards *.${BASE_DOMAIN} → 127.0.0.1:${DOKKU_PORT}; nothing to do per-tenant."
-    info "Verify (one-time, on the host):"
-    info "  /etc/nginx/sites-enabled/dokku-shared.conf has:"
-    info "    server { listen 443 ssl …; server_name *.${BASE_DOMAIN}; … proxy_pass http://127.0.0.1:${DOKKU_PORT}; proxy_set_header Host \$host; … }"
-    info "  Then: sudo nginx -t && sudo systemctl reload nginx"
-elif [ "$NGINX_MODE" = "standalone" ] && [ "${ENABLE_SSL:-false}" = "true" ]; then
-    if [ -n "$BACKEND_IMAGE" ] || [ -n "$FRONTEND_IMAGE" ]; then
-        log "Enabling SSL via Let's Encrypt..."
-        dokku letsencrypt:enable "$FRONTEND_APP" 2>/dev/null || warn "SSL setup deferred (app may need a deploy first)."
-    fi
-else
-    info "ENABLE_SSL=false — skipping Let's Encrypt (HTTP only)."
-fi
+# ---- 10. External nginx ----
+info "Host nginx (operator-managed) wildcards *.${BASE_DOMAIN} → 127.0.0.1:${DOKKU_PORT}; nothing to do per-tenant."
+info "Verify once on the host that the wildcard vhost forwards with 'Host \$host' preserved, then: sudo nginx -t && sudo systemctl reload nginx"
 
 # ---- 11. Run database migration ----
 if [ -n "$MIGRATE_CMD" ] && [ -n "$BACKEND_IMAGE" ]; then
@@ -434,11 +417,9 @@ log "  Frontend: ${PROTOCOL}://${TENANT_DOMAIN}"
 log "  API:      ${PROTOCOL}://${TENANT_DOMAIN}/api"
 log "  Storage:  ${STORAGE_ROOT}/${TENANT_NAME}/"
 log ""
-if [ "$NGINX_MODE" = "behind-nginx-shared" ]; then
-    log "  Routing: host nginx (TLS) → 127.0.0.1:${DOKKU_PORT} → Dokku → ${TENANT_DOMAIN}"
-    log "  No per-tenant host port; Dokku routes by Host header."
-    log ""
-fi
+log "  Routing: host nginx (operator-managed TLS) → 127.0.0.1:${DOKKU_PORT} → Dokku → ${TENANT_DOMAIN}"
+log "  No per-tenant host port; Dokku routes by Host header."
+log ""
 log "  Dashboard: http://localhost:8088 (Apps page)"
 log "  View logs:  dokku logs ${BACKEND_APP} --tail"
 log "  Status:     dokku ps:report ${BACKEND_APP}"

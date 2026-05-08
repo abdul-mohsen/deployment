@@ -5,7 +5,7 @@ Argo-CD-style web UI for the Dokku tenants on this server.
 - Live status grid (SSE; updates every 3s with smooth state-change animations)
 - Per-app actions: start / stop / restart / rebuild
 - Live log streaming (SSE) + ring-buffer log aggregation + downloadable dump
-- Console: run any allow-listed `dokku <verb>` command; output streams live
+- Form-driven scripts (`/scripts/<name>`) with streamed output
 - Command palette (Ctrl/Cmd+K)
 - Single-admin login (bcrypt) with signed cookie session
 
@@ -83,13 +83,6 @@ dokku letsencrypt:enable admin-prod
 
 (Or front it with the host's nginx — the container already binds to
 `127.0.0.1:8080`.)
-
-## Allow-listed Console commands
-
-The Console only forwards a hard-coded subset of `dokku` verbs. See
-`internal/dokku/dokku.go` → `AllowedDokkuCommands()`. Anything containing shell
-metacharacters (`| ; & \` $ < >`, newlines, backslashes) is rejected before
-execution.
 
 ## Security notes
 

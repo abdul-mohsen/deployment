@@ -39,8 +39,9 @@ Options:
 Environment overrides:
     BACKEND_IMAGE                Backend image containing schema/migrations
     TENANT_IMAGE_PULL_POLICY     always | missing | never (default: always)
-  TENANT_SCHEMA_IMAGE_PATH     Schema path inside backend image
-  TENANT_MIGRATIONS_IMAGE_DIR  Migrations directory inside backend image
+    TENANT_SCHEMA_IMAGE_PATH     Schema path inside backend image
+    TENANT_MIGRATIONS_IMAGE_DIR  Migrations directory inside backend image
+    TENANT_IGNORED_SCHEMA_FILES  Comma-separated schema files to skip
 EOF
 }
 
@@ -105,6 +106,7 @@ MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
 TENANT_SCHEMA_IMAGE_PATH="${TENANT_SCHEMA_IMAGE_PATH:-/app/db/schema/schema.sql}"
 TENANT_MIGRATIONS_IMAGE_DIR="${TENANT_MIGRATIONS_IMAGE_DIR:-/app/db/migrations}"
 TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"
+TENANT_IGNORED_SCHEMA_FILES="${TENANT_IGNORED_SCHEMA_FILES:-car_part.sql}"
 
 if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
     error "MYSQL_ROOT_PASSWORD is not configured; cannot initialize tenant DB."
@@ -268,11 +270,24 @@ find_image_file() {
     fi
     for path in "$@"; do
         if image_has_file "$image" "$path"; then
+            if schema_file_is_ignored "$path"; then
+                warn "Ignoring backend schema file: $path"
+                continue
+            fi
             echo "$path"
             return 0
         fi
     done
     return 1
+}
+
+schema_file_is_ignored() {
+    local base
+    base="$(basename "$1")"
+    case ",$TENANT_IGNORED_SCHEMA_FILES," in
+        *,"$base",*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 find_image_dir() {

@@ -257,6 +257,10 @@ grep -q 'GRANT CREATE VIEW, SHOW VIEW' scripts/init-tenant-db.sh \
     && grep -q 'SQL SECURITY INVOKER' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db handles mysqldump view imports" \
     || FAIL "init-tenant-db must handle view privileges and dump definers"
+grep -q 'TENANT_IGNORED_SCHEMA_FILES="${TENANT_IGNORED_SCHEMA_FILES:-car_part.sql}"' scripts/init-tenant-db.sh \
+    && grep -q 'schema_file_is_ignored' scripts/init-tenant-db.sh \
+    && PASS "init-tenant-db ignores car_part schema" \
+    || FAIL "init-tenant-db must ignore car_part schema"
 grep -q 'IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"' scripts/deploy-all.sh \
     && grep -q 'docker pull "\$image"' scripts/deploy-all.sh \
     && PASS "deploy-all refreshes image before deploy" \

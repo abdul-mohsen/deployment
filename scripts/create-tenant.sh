@@ -177,7 +177,7 @@ echo ""
 info "=== Tenant Provisioning Plan ==="
 info "  Tenant:         $TENANT_NAME"
 info "  Domain:         $TENANT_DOMAIN"
-info "  Backend app:    $BACKEND_APP  → $TENANT_DOMAIN/api"
+info "  Backend app:    $BACKEND_APP  → internal only (${BACKEND_APP}.web:${BACKEND_PORT})"
 info "  Frontend app:   $FRONTEND_APP → $TENANT_DOMAIN"
 info "  Backend port:   $BACKEND_PORT"
 info "  Frontend port:  $FRONTEND_PORT"
@@ -219,9 +219,10 @@ dokku apps:create "$FRONTEND_APP"
 
 # ---- 2. Set domains ----
 log "Configuring domains..."
-# Remove default domain, set tenant subdomain
+# The frontend owns the public tenant domain. The backend is reached only from
+# the frontend over the per-tenant Docker network; giving both apps the same
+# public domain makes Dokku generate duplicate nginx server_name blocks.
 dokku domains:clear "$BACKEND_APP"
-dokku domains:add "$BACKEND_APP" "$TENANT_DOMAIN"
 
 dokku domains:clear "$FRONTEND_APP"
 dokku domains:add "$FRONTEND_APP" "$TENANT_DOMAIN"
@@ -258,6 +259,9 @@ LISTEN_PORT=80
 log "Setting container ports (Dokku edge listens on :${LISTEN_PORT})..."
 dokku ports:set "$BACKEND_APP"  "http:${LISTEN_PORT}:${BACKEND_PORT}"
 dokku ports:set "$FRONTEND_APP" "http:${LISTEN_PORT}:${FRONTEND_PORT}"
+
+log "Disabling public proxy for backend app (internal-only)..."
+dokku proxy:disable "$BACKEND_APP" 2>/dev/null || true
 
 # ---- 5. Persistent storage ----
 log "Creating persistent storage..."

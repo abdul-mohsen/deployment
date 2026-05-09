@@ -11,7 +11,7 @@ PASS() { echo "PASS: $*"; }
 FAIL() { echo "FAIL: $*"; exit 1; }
 
 echo "=== 1. bash -n on changed scripts ==="
-for f in scripts/lib.sh scripts/setup-dokku.sh scripts/restart-stack.sh; do
+for f in scripts/lib.sh scripts/setup-dokku.sh scripts/setup.sh scripts/restart-stack.sh scripts/create-tenant.sh scripts/post-merge-cleanup.sh; do
     bash -n "$f" && PASS "syntax $f" || FAIL "syntax $f"
 done
 
@@ -41,9 +41,20 @@ chmod +x "$STUB_DIR/docker"
 OUT="$(PATH="$STUB_DIR:$PATH" bash scripts/setup-dokku.sh 2>&1 || true)"
 echo "$OUT" | grep -q '18082->80' && PASS "DOKKU_PORT from install.env honored" \
     || { echo "$OUT"; FAIL "expected '18082->80' in setup-dokku.sh output"; }
+echo "$OUT" | grep -q -- '-p 443:443' \
+    && { echo "$OUT"; FAIL "setup-dokku.sh must not publish 443"; } \
+    || PASS "setup-dokku.sh does not publish 443"
 
 echo
-echo "=== 3. ensure_dokku_running prints log on failure ==="
+echo "=== 3. setup scripts do not manually reload nginx ==="
+if grep -R -n -E 'sv reload /etc/service/nginx|nginx -s reload' scripts/setup-dokku.sh scripts/setup.sh; then
+    FAIL "setup scripts should not manually reload nginx inside dokku"
+else
+    PASS "no manual nginx reload in setup scripts"
+fi
+
+echo
+echo "=== 4. ensure_dokku_running prints log on failure ==="
 # Source lib.sh and invoke ensure_dokku_running with stub docker that pretends
 # the container exists but is stopped, and `docker start` fails.
 cat > "$STUB_DIR/docker" <<'STUB'
@@ -61,12 +72,27 @@ echo "$OUT" | grep -q 'FAKE-DOKKU-LOG' && PASS "log dumped on start failure" \
     || { echo "$OUT"; FAIL "expected log dump"; }
 
 echo
-echo "=== 4. restart-stack.sh --help prints usage ==="
+echo "=== 5. tenant backend is internal-only ==="
+if grep -n 'domains:add "$BACKEND_APP" "$TENANT_DOMAIN"' scripts/create-tenant.sh; then
+    FAIL "backend must not get the public tenant domain"
+else
+    PASS "create-tenant does not add public backend domain"
+fi
+grep -q 'proxy:disable "$BACKEND_APP"' scripts/create-tenant.sh \
+    && PASS "create-tenant disables backend proxy" \
+    || FAIL "create-tenant must disable backend proxy"
+grep -q 'domains:clear "$be"' scripts/post-merge-cleanup.sh \
+    && grep -q 'proxy:disable "$be"' scripts/post-merge-cleanup.sh \
+    && PASS "cleanup removes existing backend public proxy" \
+    || FAIL "cleanup must remove existing backend public proxy"
+
+echo
+echo "=== 6. restart-stack.sh --help prints usage ==="
 bash scripts/restart-stack.sh --help | grep -qi 'restart' && PASS "help works" \
     || FAIL "help missing"
 
 echo
-echo "=== 5. restart-stack.sh rejects unknown env ==="
+echo "=== 7. restart-stack.sh rejects unknown env ==="
 OUT="$(bash scripts/restart-stack.sh --env staging 2>&1 || true)"
 echo "$OUT" | grep -q "must be 'dev' or 'prod'" \
     && PASS "rejects unknown env" \

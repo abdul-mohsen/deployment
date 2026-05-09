@@ -2,8 +2,8 @@
 # Print the address an EDGE host nginx should proxy *.<base-domain> to,
 # plus a copy-paste-ready server block.
 #
-# This repo's setup-dokku.sh ALWAYS runs the dokku container with:
-#     docker run ... --name dokku -p ${DOKKU_PORT}:80 -p 443:443 ...
+# This repo's setup-dokku.sh runs the dokku container with:
+#     docker run ... --name dokku -p ${DOKKU_PORT}:80 ...
 # with DOKKU_PORT defaulting to 8080. So when you run a host nginx in front
 # (NGINX_MODE=behind-nginx), Dokku's HTTP is at  127.0.0.1:${DOKKU_PORT}.
 #

@@ -95,25 +95,6 @@ dokku() {
     docker exec -i dokku dokku "$@"
 }
 
-ensure_default_http_vhost() {
-    docker exec -i dokku bash -s <<'DOKKU_DEFAULT_NGINX'
-set -euo pipefail
-cat > /etc/nginx/conf.d/00-dokku-default.conf <<'NGINX'
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
-
-    location / {
-        default_type text/plain;
-        return 200 "dokku ready\n";
-    }
-}
-NGINX
-nginx -t >/dev/null
-sv reload /etc/service/nginx >/dev/null || nginx -s reload >/dev/null
-DOKKU_DEFAULT_NGINX
-}
 # =============================================================================
 # STEP 1: Interactive configuration
 # =============================================================================
@@ -153,19 +134,9 @@ if $NEED_CONFIG; then
 
     # ---- Nginx mode ----
     echo ""
-    info "Nginx mode:"
-    info "  standalone   — Dokku handles ports 80/443 + SSL (simpler)"
-    info "  behind-nginx — You have an existing nginx on 80/443"
-    NGINX_MODE=$(prompt_val "Nginx mode" "standalone")
-    while [ "$NGINX_MODE" != "standalone" ] && [ "$NGINX_MODE" != "behind-nginx" ]; do
-        warn "Must be 'standalone' or 'behind-nginx'."
-        NGINX_MODE=$(prompt_val "Nginx mode" "standalone")
-    done
-
-    DOKKU_PORT="8080"
-    if [ "$NGINX_MODE" = "behind-nginx" ]; then
-        DOKKU_PORT=$(prompt_val "Dokku internal port" "8080")
-    fi
+    info "Nginx mode: host nginx on 80/443 forwards tenant hosts to Dokku."
+    NGINX_MODE="behind-nginx"
+    DOKKU_PORT=$(prompt_val "Dokku internal port" "8080")
     DOKKU_HOSTNAME=$(prompt_val "Dokku hostname" "$BASE_DOMAIN")
 
     # ---- MySQL ----
@@ -271,7 +242,14 @@ fi
 # Re-read all config values with defaults
 BASE_DOMAIN="${BASE_DOMAIN:?}"
 ACME_EMAIL="${ACME_EMAIL:-}"
-NGINX_MODE="${NGINX_MODE:-standalone}"
+NGINX_MODE="${NGINX_MODE:-behind-nginx}"
+if [ "$NGINX_MODE" = "behind-nginx-shared" ]; then
+    NGINX_MODE="behind-nginx"
+fi
+if [ "$NGINX_MODE" != "behind-nginx" ]; then
+    warn "Unsupported NGINX_MODE=${NGINX_MODE}; using behind-nginx (host nginx owns 80/443)."
+    NGINX_MODE="behind-nginx"
+fi
 DOKKU_PORT="${DOKKU_PORT:-8080}"
 DOKKU_HOSTNAME="${DOKKU_HOSTNAME:-$BASE_DOMAIN}"
 NGINX_CONF_DIR="${NGINX_CONF_DIR:-/etc/nginx/dokku-tenants}"
@@ -330,7 +308,6 @@ else
         --privileged \
         --add-host=host.docker.internal:host-gateway \
         -p "${DOKKU_PORT}":80 \
-        -p 443:443 \
         -v /var/lib/dokku:/mnt/dokku \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -e DOKKU_HOSTNAME="${DOKKU_HOSTNAME}" \
@@ -347,8 +324,6 @@ else
     log "Dokku container ready: $(docker exec dokku dokku version)"
 fi
 
-ensure_default_http_vhost
-
 # Create 'dokku' wrapper command on the host
 cat > /usr/local/bin/dokku <<'WRAPPER'
 #!/bin/bash
@@ -364,24 +339,7 @@ dokku domains:set-global "${BASE_DOMAIN}"
 DOKKU_PORT="${DOKKU_PORT:-8080}"
 NGINX_CONF_DIR="${NGINX_CONF_DIR:-/etc/nginx/dokku-tenants}"
 
-log "Installing Dokku plugins..."
-
-# Let's Encrypt — automatic SSL (install plugin always, configure only in standalone)
-if ! dokku plugin:list 2>/dev/null | grep -q "letsencrypt"; then
-    log "  Installing letsencrypt plugin..."
-    dokku plugin:install https://github.com/dokku/dokku-letsencrypt.git
-else
-    log "  letsencrypt already installed."
-fi
-
-if [ "$NGINX_MODE" = "standalone" ]; then
-    if [ -n "${ACME_EMAIL:-}" ]; then
-        dokku letsencrypt:set --global email "${ACME_EMAIL}"
-    fi
-    dokku letsencrypt:cron-job --add 2>/dev/null || true
-else
-    log "  Skipping Let's Encrypt config (behind-nginx mode — SSL handled by your nginx)"
-fi
+log "Skipping Dokku TLS plugins — TLS is handled by the operator's host nginx."
 
 # ---- Step 5: Create storage root ----
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
@@ -419,8 +377,7 @@ else
 fi
 
 # ---- Step 6: Nginx configuration ----
-if [ "$NGINX_MODE" = "behind-nginx" ]; then
-    log "Mode: behind-nginx — Dokku nginx on 127.0.0.1:${DOKKU_PORT}"
+log "Mode: behind-nginx — host nginx proxies to Dokku on 127.0.0.1:${DOKKU_PORT}"
 
     # Bind Dokku's nginx to localhost only so it doesn't conflict
     dokku nginx:set --global bind-address-ipv4 "127.0.0.1"
@@ -451,19 +408,8 @@ UPSTREAMCONF
     warn "Add this line to your existing nginx.conf (inside the http block):"
     warn "  include ${NGINX_CONF_DIR}/*.conf;"
     warn ""
-    warn "SSL is handled by YOUR nginx — use certbot for each tenant domain."
-    warn "When ready to migrate to standalone: set NGINX_MODE=standalone in config.env and re-run setup.sh"
+    warn "TLS is handled by YOUR host nginx. This repo does not manage certificates."
     echo ""
-else
-    log "Mode: standalone — Dokku owns ports 80/443"
-
-    # Upload limit
-    dokku_shell "mkdir -p /home/dokku/.nginx.conf.d"
-    docker exec -i dokku bash -c "cat > /home/dokku/.nginx.conf.d/upload-limit.conf" <<'NGINX'
-client_max_body_size 50m;
-NGINX
-    dokku_shell "chown dokku:dokku /home/dokku/.nginx.conf.d/upload-limit.conf"
-fi
 
 # ---- Step 7: Script permissions ----
 chmod +x "$SCRIPT_DIR"/*.sh

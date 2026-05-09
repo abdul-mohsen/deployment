@@ -106,13 +106,16 @@ Rules learned the hard way:
 ## 5. What `create-tenant.sh` provisions per tenant
 
 - Apps: `<tenant>-backend`, `<tenant>-frontend`.
-- Domain: `<tenant>.BASE_DOMAIN` on both apps.
+- Domain: `<tenant>.BASE_DOMAIN` on the frontend app only. The backend app is
+  internal-only and must not own the same public domain, otherwise Dokku nginx
+  generates duplicate `server_name` blocks.
 - Ports: `dokku ports:set <app> http:80:<container_port>`
-  (backend default 3000, frontend 80; override via `--backend-port` /
+  (backend default 8090, frontend 8000; override via `--backend-port` /
   `--frontend-port`).
 - Frontend `/api` → backend via
-  `/home/dokku/<frontend>/nginx.conf.d/api-proxy.conf` (proxies to
-  `<backend>-web:<BACKEND_PORT>` on the dokku internal network).
+  the frontend app's own proxy, using `BACKEND_URL=http://<backend>.web:<BACKEND_PORT>`
+  on the per-tenant Docker network. Do not add custom Dokku nginx `/api`
+  snippets for this.
 - MySQL: db `tenant_<name>`, user `usr_<name>@'172.%'`, registered in
   `zatca_master.tenant`.
 - Storage mounts:

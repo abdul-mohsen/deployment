@@ -3,6 +3,22 @@ set -euo pipefail
 
 # Directory of this script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Pull DOKKU_PORT / DOKKU_HOSTNAME from install.env / config.env so callers
+# don't have to remember to export them. Order: config.env (auto-generated)
+# is sourced first, then install.env (operator's source of truth) so it wins.
+# Explicit env vars set by the caller still beat both.
+_caller_dokku_port="${DOKKU_PORT:-}"
+_caller_dokku_hostname="${DOKKU_HOSTNAME:-}"
+for _f in "${REPO_DIR}/config.env" "${REPO_DIR}/install.env"; do
+  if [ -f "$_f" ]; then
+    # shellcheck disable=SC1090
+    set -a; . "$_f"; set +a
+  fi
+done
+[ -n "$_caller_dokku_port" ]     && DOKKU_PORT="$_caller_dokku_port"
+[ -n "$_caller_dokku_hostname" ] && DOKKU_HOSTNAME="$_caller_dokku_hostname"
 
 # Allow overriding these from the environment; sane defaults for local/dev use
 DOKKU_PORT="${DOKKU_PORT:-8080}"

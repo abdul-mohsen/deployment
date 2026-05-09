@@ -290,7 +290,13 @@ fi
 
 if docker ps -a --format '{{.Names}}' | grep -q '^dokku$'; then
     log "Dokku container already exists"
-    CURRENT_DOKKU_PORT="$(docker port dokku 80/tcp 2>/dev/null | awk -F: 'NR == 1 { print $NF }')"
+    CURRENT_DOKKU_PORT="$(docker inspect dokku --format '{{range $port, $bindings := .HostConfig.PortBindings}}{{if eq $port "80/tcp"}}{{range $binding := $bindings}}{{println $binding.HostPort}}{{end}}{{end}}{{end}}' 2>/dev/null || true)"
+    if [ -n "$CURRENT_DOKKU_PORT" ]; then
+        CURRENT_DOKKU_PORT="$(awk 'NF { print; exit }' <<<"$CURRENT_DOKKU_PORT")"
+    else
+        CURRENT_DOKKU_PORT="$(docker port dokku 80/tcp 2>/dev/null || true)"
+        CURRENT_DOKKU_PORT="$(awk -F: 'NR == 1 { print $NF }' <<<"$CURRENT_DOKKU_PORT")"
+    fi
     if [ -n "$CURRENT_DOKKU_PORT" ] && [ "$CURRENT_DOKKU_PORT" != "$DOKKU_PORT" ]; then
         error "Existing Dokku container maps host port ${CURRENT_DOKKU_PORT}->80, but config requests ${DOKKU_PORT}->80."
         error "Remove/recreate the dokku container or set DOKKU_PORT=${CURRENT_DOKKU_PORT} in $CONFIG_FILE."

@@ -133,4 +133,110 @@ echo "$OUT" | grep -q "must be 'dev', 'prod', or 'all'" \
     || { echo "$OUT"; FAIL "should reject --env staging"; }
 
 echo
+echo "=== 10. stopped dokku with unavailable docker port is restarted ==="
+STATE_FILE="$STUB_DIR/dokku-state"
+echo stopped > "$STATE_FILE"
+cat > "$STUB_DIR/docker" <<'STUB'
+#!/usr/bin/env bash
+state_file="${STATE_FILE:?}"
+state="$(cat "$state_file" 2>/dev/null || echo absent)"
+
+case "$1" in
+    --version)
+        echo "Docker (stub)"; exit 0 ;;
+    ps)
+        if [[ "$*" == *"--filter name=dokku"* ]]; then
+            [ "$state" = running ] && echo -e "CONTAINER:\tdokku\tSTATUS:\tUp\tPORTS:\t127.0.0.1:18082->80/tcp"
+            exit 0
+        fi
+        if [[ "$*" == *"--format {{.Names}}"* || "$*" == *"--format '{{.Names}}'"* ]]; then
+            if [[ "$*" == *"-a"* ]]; then
+                [ "$state" != absent ] && echo dokku
+            else
+                [ "$state" = running ] && echo dokku
+            fi
+            exit 0
+        fi
+        exit 0 ;;
+    port)
+        if [ "$state" = stopped ]; then
+            exit 1
+        fi
+        [ "$2" = dokku ] && [ "$3" = "80/tcp" ] && [ "$state" = running ] && echo "0.0.0.0:18082"
+        exit 0 ;;
+    rm)
+        [ "$2" = dokku ] && echo absent > "$state_file"
+        exit 0 ;;
+    run)
+        echo running > "$state_file"
+        echo fake-dokku-id
+        exit 0 ;;
+    exec)
+        if [ "$2" = dokku ] && [ "$3" = dokku ] && [ "$4" = version ]; then
+            echo "dokku version stub"
+        fi
+        exit 0 ;;
+    logs)
+        echo "stub dokku logs"
+        exit 0 ;;
+esac
+exit 0
+STUB
+chmod +x "$STUB_DIR/docker"
+OUT="$(STATE_FILE="$STATE_FILE" PATH="$STUB_DIR:$PATH" bash scripts/restart-stack.sh --env dev --dokku-only 2>&1 || true)"
+echo "$OUT" | grep -q 'Dokku container already stopped' \
+    && echo "$OUT" | grep -q 'Recreating Dokku container: missing' \
+    && echo "$OUT" | grep -q 'dokku ready: dokku version stub' \
+    && PASS "stopped dokku no longer exits during docker port probe" \
+    || { echo "$OUT"; FAIL "stopped dokku should recreate/start even when docker port exits non-zero"; }
+
+echo
+echo "=== 11. stopped dokku with inspectable port is started, not recreated ==="
+echo stopped > "$STATE_FILE"
+cat > "$STUB_DIR/docker" <<'STUB'
+#!/usr/bin/env bash
+state_file="${STATE_FILE:?}"
+state="$(cat "$state_file" 2>/dev/null || echo absent)"
+
+case "$1" in
+    ps)
+        if [[ "$*" == *"--format {{.Names}}"* || "$*" == *"--format '{{.Names}}'"* ]]; then
+            if [[ "$*" == *"-a"* ]]; then
+                [ "$state" != absent ] && echo dokku
+            else
+                [ "$state" = running ] && echo dokku
+            fi
+        fi
+        exit 0 ;;
+    inspect)
+        if [[ "$*" == *"80/tcp"* ]]; then
+            echo 18082
+        fi
+        exit 0 ;;
+    port)
+        exit 1 ;;
+    start)
+        [ "$2" = dokku ] && echo running > "$state_file"
+        exit 0 ;;
+    exec)
+        if [ "$2" = dokku ] && [ "$3" = dokku ] && [ "$4" = version ]; then
+            echo "dokku version stub"
+        fi
+        exit 0 ;;
+    logs)
+        echo "stub dokku logs"
+        exit 0 ;;
+esac
+exit 0
+STUB
+chmod +x "$STUB_DIR/docker"
+OUT="$(STATE_FILE="$STATE_FILE" PATH="$STUB_DIR:$PATH" bash scripts/restart-stack.sh --env dev --dokku-only 2>&1 || true)"
+echo "$OUT" | grep -q 'Dokku container already stopped' \
+    && echo "$OUT" | grep -q 'Starting Dokku container' \
+    && echo "$OUT" | grep -q 'dokku ready: dokku version stub' \
+    && ! echo "$OUT" | grep -q 'Recreating Dokku container' \
+    && PASS "stopped dokku with correct port starts without recreate" \
+    || { echo "$OUT"; FAIL "stopped dokku with inspectable correct port should start without recreate"; }
+
+echo
 echo "ALL TESTS PASSED"

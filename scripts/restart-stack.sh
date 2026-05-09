@@ -155,8 +155,19 @@ start_dashboard_env() {
 
 dokku_exists() { docker ps -a --format '{{.Names}}' | grep -qx 'dokku'; }
 dokku_running() { docker ps --format '{{.Names}}' | grep -qx 'dokku'; }
-dokku_http_port() { docker port dokku 80/tcp 2>/dev/null | awk -F: 'NR == 1 { print $NF }'; }
-dokku_https_port() { docker port dokku 443/tcp 2>/dev/null | awk -F: 'NR == 1 { print $NF }'; }
+dokku_port() {
+    local container_port="$1"
+    local port_output
+    port_output="$(docker inspect dokku --format "{{range \$port, \$bindings := .HostConfig.PortBindings}}{{if eq \$port \"${container_port}\"}}{{range \$binding := \$bindings}}{{println \$binding.HostPort}}{{end}}{{end}}{{end}}" 2>/dev/null || true)"
+    if [ -n "$port_output" ]; then
+        awk 'NF { print; exit }' <<<"$port_output"
+        return 0
+    fi
+    port_output="$(docker port dokku "$container_port" 2>/dev/null || true)"
+    awk -F: 'NR == 1 { print $NF }' <<<"$port_output"
+}
+dokku_http_port() { dokku_port 80/tcp; }
+dokku_https_port() { dokku_port 443/tcp; }
 
 stop_dokku_if_present() {
     if dokku_exists; then

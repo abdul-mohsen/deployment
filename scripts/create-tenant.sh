@@ -85,6 +85,18 @@ has_env_var() {
     return 1
 }
 
+env_value() {
+    local key="$1"
+    local ev
+    for ev in "${ENV_VARS[@]+${ENV_VARS[@]}}"; do
+        if [[ "$ev" == "$key="* ]]; then
+            printf '%s' "${ev#*=}"
+            return 0
+        fi
+    done
+    return 0
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --backend-image)  BACKEND_IMAGE="$2"; shift 2 ;;
@@ -323,6 +335,7 @@ MYSQL_TENANT_HOST="${MYSQL_TENANT_HOST:-172.%}"
 
 TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
 TENANT_DB_USER="usr_${TENANT_NAME//-/_}"
+DB_PROVISIONED=false
 
 if ! $NO_DATABASE; then
     if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
@@ -366,6 +379,10 @@ SQLEOF
             DBNAME="$TENANT_DB_NAME"
 
         log "Database ready: $TENANT_DB_NAME"
+
+        log "Initializing tenant database schema..."
+        bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" --schema-only --config "$CONFIG_FILE"
+        DB_PROVISIONED=true
     fi
 fi
 
@@ -396,11 +413,38 @@ if ! $GIT_ONLY; then
     fi
 fi
 
-# ---- 10. External nginx ----
+# ---- 10. Seed tenant users ----
+if $DB_PROVISIONED && ! $GIT_ONLY; then
+    ADMIN_USER="$(env_value ADMIN_USER)"
+    ADMIN_PASSWORD="$(env_value ADMIN_PASSWORD)"
+    MANAGER_USER="$(env_value MANAGER_USER)"
+    MANAGER_PASSWORD="$(env_value MANAGER_PASSWORD)"
+    COMPANY_NAME="$(env_value COMPANY_NAME)"
+
+    if [ -n "$ADMIN_USER$ADMIN_PASSWORD$MANAGER_USER$MANAGER_PASSWORD" ]; then
+        if [ -n "$BACKEND_IMAGE" ] && [ -n "$FRONTEND_IMAGE" ]; then
+            log "Seeding tenant users..."
+            seed_args=("$TENANT_NAME" --seed-only --config "$CONFIG_FILE")
+            [ -n "$ADMIN_USER" ] && seed_args+=(--env "ADMIN_USER=$ADMIN_USER")
+            [ -n "$ADMIN_PASSWORD" ] && seed_args+=(--env "ADMIN_PASSWORD=$ADMIN_PASSWORD")
+            [ -n "$MANAGER_USER" ] && seed_args+=(--env "MANAGER_USER=$MANAGER_USER")
+            [ -n "$MANAGER_PASSWORD" ] && seed_args+=(--env "MANAGER_PASSWORD=$MANAGER_PASSWORD")
+            [ -n "$COMPANY_NAME" ] && seed_args+=(--env "COMPANY_NAME=$COMPANY_NAME")
+            bash "$SCRIPT_DIR/init-tenant-db.sh" "${seed_args[@]}"
+        else
+            warn "Seed credentials supplied, but both backend and frontend images must be deployed before API registration."
+            warn "Run later: bash scripts/init-tenant-db.sh $TENANT_NAME --seed-only --env ADMIN_USER=... --env ADMIN_PASSWORD=..."
+        fi
+    else
+        warn "No seed user credentials supplied; skipping admin/manager user creation."
+    fi
+fi
+
+# ---- 11. External nginx ----
 info "Host nginx (operator-managed) wildcards *.${BASE_DOMAIN} → 127.0.0.1:${DOKKU_PORT}; nothing to do per-tenant."
 info "Verify once on the host that the wildcard vhost forwards with 'Host \$host' preserved, then: sudo nginx -t && sudo systemctl reload nginx"
 
-# ---- 11. Run database migration ----
+# ---- 12. Run database migration ----
 if [ -n "$MIGRATE_CMD" ] && [ -n "$BACKEND_IMAGE" ]; then
     log "Running database migration: $MIGRATE_CMD"
     if dokku run "$BACKEND_APP" $MIGRATE_CMD; then

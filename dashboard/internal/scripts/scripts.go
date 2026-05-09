@@ -72,7 +72,7 @@ func Catalog() []Script {
 		},
 		{
 			Name: "create-tenant.sh", Title: "Create tenant",
-			Summary: "Provision a new tenant (backend + frontend + storage + SSL).",
+			Summary: "Provision a new tenant (backend + frontend + storage + DB).",
 			Danger:  true,
 			Fields: []Field{
 				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true, Placeholder: "acme",
@@ -106,6 +106,26 @@ func Catalog() []Script {
 				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
 				{Name: "envs", Label: "Env vars", Flag: "--env", Type: "kv",
 					Help: "One KEY=VALUE per line; each becomes a separate --env flag. Use this for DATABASE_URL or DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD when not provisioning MySQL from this script."},
+			},
+		},
+		{
+			Name: "init-tenant-db.sh", Title: "Initialize tenant DB",
+			Summary: "Apply the bundled schema/migrations and seed tenant users.",
+			Danger:  true,
+			Fields: []Field{
+				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true, Placeholder: "acme"},
+				{Name: "admin_user", Label: "Admin username", Flag: "--env", Type: "text", Placeholder: "admin",
+					Default: "admin", Suggest: []string{"admin"}},
+				{Name: "admin_password", Label: "Admin password", Flag: "--env", Type: "password", Secret: true,
+					Placeholder: "Strong password for the admin user"},
+				{Name: "manager_user", Label: "Manager username", Flag: "--env", Type: "text", Placeholder: "manager",
+					Suggest: []string{"manager"}},
+				{Name: "manager_password", Label: "Manager password", Flag: "--env", Type: "password", Secret: true,
+					Placeholder: "Strong password for the manager user"},
+				{Name: "company_name", Label: "Company name", Flag: "--env", Type: "text", Placeholder: "ACME Corp"},
+				{Name: "schema_only", Label: "Schema only", Flag: "--schema-only", Type: "checkbox", Boolean: true},
+				{Name: "seed_only", Label: "Seed only", Flag: "--seed-only", Type: "checkbox", Boolean: true},
+				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
 			},
 		},
 		{

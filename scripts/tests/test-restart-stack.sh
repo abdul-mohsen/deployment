@@ -11,7 +11,7 @@ PASS() { echo "PASS: $*"; }
 FAIL() { echo "FAIL: $*"; exit 1; }
 
 echo "=== 1. bash -n on changed scripts ==="
-for f in scripts/lib.sh scripts/setup-dokku.sh scripts/setup.sh scripts/restart-stack.sh scripts/create-tenant.sh scripts/post-merge-cleanup.sh; do
+for f in scripts/lib.sh scripts/setup-dokku.sh scripts/setup.sh scripts/restart-stack.sh scripts/create-tenant.sh scripts/init-tenant-db.sh scripts/list-tenants.sh scripts/tail-logs.sh scripts/update-tenant.sh scripts/rollback-tenant.sh scripts/post-merge-cleanup.sh; do
     bash -n "$f" && PASS "syntax $f" || FAIL "syntax $f"
 done
 
@@ -237,6 +237,34 @@ echo "$OUT" | grep -q 'Dokku container already stopped' \
     && ! echo "$OUT" | grep -q 'Recreating Dokku container' \
     && PASS "stopped dokku with correct port starts without recreate" \
     || { echo "$OUT"; FAIL "stopped dokku with inspectable correct port should start without recreate"; }
+
+echo
+echo "=== 12. tenant DB initializer is wired ==="
+[ -f scripts/sql/ifritah-schema.sql ] \
+    && grep -q 'CREATE TABLE `user`' scripts/sql/ifritah-schema.sql \
+    && PASS "bundled schema includes user table" \
+    || FAIL "bundled schema is missing or incomplete"
+[ -f scripts/sql/ifritah-migrations/0001_auth_tables.sql ] \
+    && grep -q 'CREATE TABLE IF NOT EXISTS `sessions`' scripts/sql/ifritah-migrations/0001_auth_tables.sql \
+    && PASS "bundled auth migration is present" \
+    || FAIL "bundled auth migration is missing"
+grep -q 'init-tenant-db.sh" "\$TENANT_NAME" --schema-only' scripts/create-tenant.sh \
+    && grep -q 'init-tenant-db.sh" "\${seed_args\[@\]}"' scripts/create-tenant.sh \
+    && PASS "create-tenant applies schema and seed phases" \
+    || FAIL "create-tenant must call init-tenant-db.sh for schema and seed phases"
+grep -q 'Name: "init-tenant-db.sh"' dashboard/internal/scripts/scripts.go \
+    && PASS "dashboard exposes init-tenant-db.sh" \
+    || FAIL "dashboard catalog must expose init-tenant-db.sh"
+for f in scripts/list-tenants.sh scripts/tail-logs.sh scripts/update-tenant.sh scripts/rollback-tenant.sh; do
+    grep -q 'source "\$SCRIPT_DIR/lib.sh"' "$f" \
+        && PASS "$f uses shared dokku wrapper" \
+        || FAIL "$f must source lib.sh before calling dokku"
+done
+if grep -q 'MIGRATE_CMD=atlas' config.env.example; then
+    FAIL "config example must not point to an unavailable Atlas command"
+else
+    PASS "config example leaves backend MIGRATE_CMD empty"
+fi
 
 echo
 echo "ALL TESTS PASSED"

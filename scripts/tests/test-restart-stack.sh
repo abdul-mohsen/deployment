@@ -92,9 +92,33 @@ bash scripts/restart-stack.sh --help | grep -qi 'restart' && PASS "help works" \
     || FAIL "help missing"
 
 echo
-echo "=== 7. restart-stack.sh rejects unknown env ==="
+echo "=== 7. restart-stack.sh stops before starting ==="
+if grep -q 'docker restart dokku' scripts/restart-stack.sh; then
+    FAIL "restart-stack must not use docker restart dokku"
+else
+    PASS "restart-stack avoids docker restart"
+fi
+grep -q 'docker compose -f "$compose_file" down --remove-orphans' scripts/restart-stack.sh \
+    && PASS "dashboard compose is stopped before start" \
+    || FAIL "dashboard compose down is required"
+grep -q 'docker stop dokku' scripts/restart-stack.sh \
+    && PASS "dokku is stopped before start" \
+    || FAIL "docker stop dokku is required"
+grep -q 'dokku_https_port' scripts/restart-stack.sh \
+    && grep -q 'old unsupported 443 publish' scripts/restart-stack.sh \
+    && PASS "old 443 publish triggers dokku recreate" \
+    || FAIL "restart-stack must recreate old 443-published dokku containers"
+
+echo
+echo "=== 8. restart-stack.sh accepts --env all ==="
+bash scripts/restart-stack.sh --help | grep -q -- '--env all' \
+    && PASS "help documents --env all" \
+    || FAIL "help must document --env all"
+
+echo
+echo "=== 9. restart-stack.sh rejects unknown env ==="
 OUT="$(bash scripts/restart-stack.sh --env staging 2>&1 || true)"
-echo "$OUT" | grep -q "must be 'dev' or 'prod'" \
+echo "$OUT" | grep -q "must be 'dev', 'prod', or 'all'" \
     && PASS "rejects unknown env" \
     || { echo "$OUT"; FAIL "should reject --env staging"; }
 

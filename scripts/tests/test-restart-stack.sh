@@ -101,13 +101,23 @@ fi
 grep -q 'docker compose -f "$compose_file" down --remove-orphans' scripts/restart-stack.sh \
     && PASS "dashboard compose is stopped before start" \
     || FAIL "dashboard compose down is required"
-grep -q 'docker stop dokku' scripts/restart-stack.sh \
-    && PASS "dokku is stopped before start" \
-    || FAIL "docker stop dokku is required"
+grep -q 'docker stop --time "$DOKKU_STOP_SECONDS" dokku' scripts/restart-stack.sh \
+    && PASS "dokku stop has explicit timeout" \
+    || FAIL "dokku stop must use an explicit timeout"
+grep -q 'docker kill dokku' scripts/restart-stack.sh \
+    && PASS "dokku stop has kill fallback" \
+    || FAIL "dokku stop must have a kill fallback"
+grep -q 'dokku stopped' scripts/restart-stack.sh \
+    && PASS "dokku stop prints completion" \
+    || FAIL "dokku stop must print a completion line"
 grep -q 'dokku_https_port' scripts/restart-stack.sh \
     && grep -q 'old unsupported 443 publish' scripts/restart-stack.sh \
     && PASS "old 443 publish triggers dokku recreate" \
     || FAIL "restart-stack must recreate old 443-published dokku containers"
+grep -q 'docker compose -f "$compose_file" down --remove-orphans' scripts/restart-stack.sh \
+    && grep -q 'run_with_timeout "$COMMAND_TIMEOUT_SECONDS"' scripts/restart-stack.sh \
+    && PASS "dashboard compose down is bounded" \
+    || FAIL "dashboard compose down must be bounded"
 
 echo
 echo "=== 8. restart-stack.sh accepts --env all ==="

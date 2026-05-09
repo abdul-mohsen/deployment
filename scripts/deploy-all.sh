@@ -64,6 +64,34 @@ SUFFIX="-${APP_TYPE}"
 BASE_DOMAIN="${BASE_DOMAIN:-app.example.com}"
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
 MIGRATE_CMD="${MIGRATE_CMD:-}"
+IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"
+
+ensure_deploy_image_available() {
+    local image="$1"
+    case "$IMAGE_PULL_POLICY" in
+        always)
+            log "Pulling image: $image"
+            docker pull "$image" >/dev/null
+            ;;
+        missing)
+            if docker image inspect "$image" >/dev/null 2>&1; then
+                return 0
+            fi
+            log "Pulling image: $image"
+            docker pull "$image" >/dev/null
+            ;;
+        never)
+            if ! docker image inspect "$image" >/dev/null 2>&1; then
+                error "Image is not present locally and IMAGE_PULL_POLICY=never: $image"
+                exit 1
+            fi
+            ;;
+        *)
+            error "IMAGE_PULL_POLICY must be 'always', 'missing', or 'never' (got: $IMAGE_PULL_POLICY)"
+            exit 1
+            ;;
+    esac
+}
 
 # Returns the per-tenant image override (or empty string if none)
 get_tenant_override() {
@@ -131,6 +159,8 @@ if [ -z "$APPS" ]; then
 fi
 
 APP_COUNT=$(echo "$APPS" | wc -l)
+ensure_deploy_image_available "$IMAGE"
+
 log "Deploying ${IMAGE} to ${APP_COUNT} ${APP_TYPE} app(s)"
 echo ""
 

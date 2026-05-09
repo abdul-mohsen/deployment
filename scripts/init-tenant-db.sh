@@ -37,7 +37,8 @@ Options:
   --config <path>         Path to config.env file (default: ../config.env)
 
 Environment overrides:
-  BACKEND_IMAGE                Backend image containing schema/migrations
+    BACKEND_IMAGE                Backend image containing schema/migrations
+    TENANT_IMAGE_PULL_POLICY     always | missing | never (default: always)
   TENANT_SCHEMA_IMAGE_PATH     Schema path inside backend image
   TENANT_MIGRATIONS_IMAGE_DIR  Migrations directory inside backend image
 EOF
@@ -103,6 +104,7 @@ DOKKU_PORT="${DOKKU_PORT:-8080}"
 MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
 TENANT_SCHEMA_IMAGE_PATH="${TENANT_SCHEMA_IMAGE_PATH:-/app/db/schema/schema.sql}"
 TENANT_MIGRATIONS_IMAGE_DIR="${TENANT_MIGRATIONS_IMAGE_DIR:-/app/db/migrations}"
+TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"
 
 if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
     error "MYSQL_ROOT_PASSWORD is not configured; cannot initialize tenant DB."
@@ -127,6 +129,10 @@ env_value() {
 
 sql_escape() {
     printf '%s' "$1" | sed "s/'/''/g"
+}
+
+sql_identifier_escape() {
+    printf '%s' "$1" | sed 's/`/``/g'
 }
 
 json_escape() {
@@ -154,6 +160,33 @@ ensure_tenant_database() {
     run_mysql <<SQLEOF
 CREATE DATABASE IF NOT EXISTS \`${TENANT_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 SQLEOF
+}
+
+ensure_schema_import_privileges() {
+    if $DRY_RUN; then
+        info "Would ensure schema import privileges for $TENANT_DB_NAME"
+        return 0
+    fi
+
+    local current_user mysql_user mysql_host user_sql host_sql db_sql
+    current_user="$(run_mysql -N -B -e "SELECT CURRENT_USER();" | awk 'NF { print $1; exit }')"
+    if [ -z "$current_user" ] || [[ "$current_user" != *@* ]]; then
+        warn "Could not determine current MySQL user; schema import may fail if CREATE VIEW is missing."
+        return 0
+    fi
+
+    mysql_user="${current_user%@*}"
+    mysql_host="${current_user#*@}"
+    user_sql="$(sql_escape "$mysql_user")"
+    host_sql="$(sql_escape "$mysql_host")"
+    db_sql="$(sql_identifier_escape "$TENANT_DB_NAME")"
+
+    if ! run_mysql <<SQLEOF
+GRANT CREATE VIEW, SHOW VIEW ON \`${db_sql}\`.* TO '${user_sql}'@'${host_sql}';
+SQLEOF
+    then
+        warn "Could not grant CREATE VIEW/SHOW VIEW to ${current_user}; schema import may fail on view definitions."
+    fi
 }
 
 resolve_backend_image() {
@@ -191,11 +224,29 @@ ensure_backend_image_available() {
         info "Would use backend image: $image"
         return 0
     fi
-    if docker image inspect "$image" >/dev/null 2>&1; then
-        return 0
-    fi
-    log "Pulling backend image: $image"
-    docker pull "$image" >/dev/null
+    case "$TENANT_IMAGE_PULL_POLICY" in
+        always)
+            log "Pulling backend image: $image"
+            docker pull "$image" >/dev/null
+            ;;
+        missing)
+            if docker image inspect "$image" >/dev/null 2>&1; then
+                return 0
+            fi
+            log "Pulling backend image: $image"
+            docker pull "$image" >/dev/null
+            ;;
+        never)
+            if ! docker image inspect "$image" >/dev/null 2>&1; then
+                error "Backend image is not present locally and TENANT_IMAGE_PULL_POLICY=never: $image"
+                exit 1
+            fi
+            ;;
+        *)
+            error "TENANT_IMAGE_PULL_POLICY must be 'always', 'missing', or 'never' (got: $TENANT_IMAGE_PULL_POLICY)"
+            exit 1
+            ;;
+    esac
 }
 
 image_has_file() {
@@ -247,7 +298,9 @@ apply_image_sql_file() {
         info "Would stream ${image}:${path} into ${TENANT_DB_NAME}"
         return 0
     fi
-    docker run --rm --entrypoint sh "$image" -c "cat $(shell_quote "$path")" | run_mysql "$TENANT_DB_NAME"
+    docker run --rm --entrypoint sh "$image" -c "cat $(shell_quote "$path")" \
+        | sed -E 's#/\*!50013 DEFINER=`[^`]+`@`[^`]+` SQL SECURITY DEFINER \*/#/\*!50013 SQL SECURITY INVOKER \*/#g' \
+        | run_mysql "$TENANT_DB_NAME"
 }
 
 list_image_migrations() {
@@ -257,6 +310,7 @@ list_image_migrations() {
 
 apply_schema() {
     ensure_tenant_database
+    ensure_schema_import_privileges
 
     local image count schema_path migrations_dir migration migrations_found
     image="$(resolve_backend_image)"

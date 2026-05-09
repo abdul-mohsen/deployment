@@ -253,10 +253,9 @@ grep -q 'TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"' scripts
     && grep -q 'docker pull "\$image"' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db refreshes backend image before schema read" \
     || FAIL "init-tenant-db must pull backend image before reading schema"
-grep -q 'GRANT CREATE VIEW, SHOW VIEW' scripts/init-tenant-db.sh \
-    && grep -q 'SQL SECURITY INVOKER' scripts/init-tenant-db.sh \
-    && PASS "init-tenant-db handles mysqldump view imports" \
-    || FAIL "init-tenant-db must handle view privileges and dump definers"
+grep -q 'run_tenant_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
+    && PASS "init-tenant-db imports schema as tenant DB user" \
+    || FAIL "init-tenant-db must import schema as tenant DB user"
 grep -q 'TENANT_IGNORED_SCHEMA_FILES="${TENANT_IGNORED_SCHEMA_FILES:-car_part.sql}"' scripts/init-tenant-db.sh \
     && grep -q 'schema_file_is_ignored' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db ignores car_part schema" \

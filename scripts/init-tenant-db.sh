@@ -164,33 +164,6 @@ CREATE DATABASE IF NOT EXISTS \`${TENANT_DB_NAME}\` CHARACTER SET utf8mb4 COLLAT
 SQLEOF
 }
 
-ensure_schema_import_privileges() {
-    if $DRY_RUN; then
-        info "Would ensure schema import privileges for $TENANT_DB_NAME"
-        return 0
-    fi
-
-    local current_user mysql_user mysql_host user_sql host_sql db_sql
-    current_user="$(run_mysql -N -B -e "SELECT CURRENT_USER();" | awk 'NF { print $1; exit }')"
-    if [ -z "$current_user" ] || [[ "$current_user" != *@* ]]; then
-        warn "Could not determine current MySQL user; schema import may fail if CREATE VIEW is missing."
-        return 0
-    fi
-
-    mysql_user="${current_user%@*}"
-    mysql_host="${current_user#*@}"
-    user_sql="$(sql_escape "$mysql_user")"
-    host_sql="$(sql_escape "$mysql_host")"
-    db_sql="$(sql_identifier_escape "$TENANT_DB_NAME")"
-
-    if ! run_mysql <<SQLEOF
-GRANT CREATE VIEW, SHOW VIEW ON \`${db_sql}\`.* TO '${user_sql}'@'${host_sql}';
-SQLEOF
-    then
-        warn "Could not grant CREATE VIEW/SHOW VIEW to ${current_user}; schema import may fail on view definitions."
-    fi
-}
-
 resolve_backend_image() {
     if [ -n "$BACKEND_IMAGE" ]; then
         echo "$BACKEND_IMAGE"
@@ -290,6 +263,85 @@ schema_file_is_ignored() {
     esac
 }
 
+backend_config_value() {
+    local key="$1"
+    dokku config:get "$BACKEND_APP" "$key" 2>/dev/null | awk 'NF { print; exit }' || true
+}
+
+tenant_db_setting() {
+    local key="$1" fallback="${2:-}" value
+    value="$(env_value "$key")"
+    if [ -n "$value" ]; then
+        printf '%s' "$value"
+        return 0
+    fi
+    value="$(backend_config_value "$key")"
+    if [ -n "$value" ]; then
+        printf '%s' "$value"
+        return 0
+    fi
+    printf '%s' "$fallback"
+}
+
+tenant_db_host() {
+    local host
+    host="$(tenant_db_setting DB_HOST "")"
+    if [ -z "$host" ]; then
+        host="$(tenant_db_setting HOST "")"
+        host="${host%%:*}"
+    fi
+    printf '%s' "${host:-${MYSQL_HOST:-host.docker.internal}}"
+}
+
+tenant_db_port() {
+    local port host_value
+    port="$(tenant_db_setting DB_PORT "")"
+    if [ -z "$port" ]; then
+        host_value="$(tenant_db_setting HOST "")"
+        if [[ "$host_value" == *:* ]]; then
+            port="${host_value##*:}"
+        fi
+    fi
+    printf '%s' "${port:-${MYSQL_PORT:-3306}}"
+}
+
+resolve_mysql_host_for_client() {
+    local host="$1"
+    if [ "$_MYSQL_VIA" = "host" ] && [ "$host" = "host.docker.internal" ]; then
+        echo "127.0.0.1"
+    else
+        echo "$host"
+    fi
+}
+
+run_tenant_mysql() {
+    local db="${1:-$TENANT_DB_NAME}"
+    shift || true
+
+    local user password host port
+    user="$(tenant_db_setting DB_USER "")"
+    [ -n "$user" ] || user="$(tenant_db_setting DBUSER "usr_${TENANT_NAME//-/_}")"
+    password="$(tenant_db_setting DB_PASSWORD "")"
+    [ -n "$password" ] || password="$(tenant_db_setting PASSWORD "")"
+    host="$(tenant_db_host)"
+    port="$(tenant_db_port)"
+
+    if [ -z "$password" ]; then
+        error "Tenant DB password is missing from ${BACKEND_APP} config; cannot import schema as tenant user."
+        exit 1
+    fi
+
+    if [ "$_MYSQL_VIA" = "host" ]; then
+        MYSQL_PWD="$password" mysql -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" "$db" "$@"
+    else
+        docker run --rm -i \
+            --add-host=host.docker.internal:host-gateway \
+            -e "MYSQL_PWD=$password" \
+            mysql:8.0 \
+            mysql -h "$host" -P "$port" -u "$user" "$db" "$@"
+    fi
+}
+
 find_image_dir() {
     local image="$1" path
     shift
@@ -315,7 +367,7 @@ apply_image_sql_file() {
     fi
     docker run --rm --entrypoint sh "$image" -c "cat $(shell_quote "$path")" \
         | sed -E 's#/\*!50013 DEFINER=`[^`]+`@`[^`]+` SQL SECURITY DEFINER \*/#/\*!50013 SQL SECURITY INVOKER \*/#g' \
-        | run_mysql "$TENANT_DB_NAME"
+        | run_tenant_mysql "$TENANT_DB_NAME"
 }
 
 list_image_migrations() {
@@ -325,7 +377,6 @@ list_image_migrations() {
 
 apply_schema() {
     ensure_tenant_database
-    ensure_schema_import_privileges
 
     local image count schema_path migrations_dir migration migrations_found
     image="$(resolve_backend_image)"

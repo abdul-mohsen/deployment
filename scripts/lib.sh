@@ -58,8 +58,59 @@ run_mysqldump() {
     fi
 }
 
+# Ensure the Dokku container exists and is running. If it's missing or
+# stopped, try to (re)create / start it via setup-dokku.sh, sourcing
+# install.env / config.env first so DOKKU_PORT and DOKKU_HOSTNAME come from
+# the operator's configuration. On failure, dump the last 200 lines of
+# `docker logs dokku` so the caller doesn't have to dig for the reason.
+#
+# Idempotent and cheap: a running container short-circuits in O(1).
+ensure_dokku_running() {
+    [ -n "${_DOKKU_ENSURED:-}" ] && return 0
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'dokku'; then
+        export _DOKKU_ENSURED=1
+        return 0
+    fi
+
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local repo_dir
+    repo_dir="$(dirname "$script_dir")"
+
+    # Source install.env / config.env so setup-dokku.sh sees the configured
+    # DOKKU_PORT / DOKKU_HOSTNAME instead of falling back to its defaults.
+    local f
+    for f in "$repo_dir/install.env" "$repo_dir/config.env"; do
+        if [ -f "$f" ]; then
+            # shellcheck disable=SC1090
+            set -a; . "$f"; set +a
+        fi
+    done
+
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'dokku'; then
+        echo "[+] dokku container exists but is not running — starting it..." >&2
+        if docker start dokku >/dev/null 2>&1; then
+            export _DOKKU_ENSURED=1
+            return 0
+        fi
+        echo "[✗] Failed to start existing dokku container. Last 200 log lines:" >&2
+        docker logs --tail 200 dokku 2>&1 | sed 's/^/    /' >&2
+        return 1
+    fi
+
+    echo "[+] dokku container not found — bootstrapping via setup-dokku.sh" >&2
+    if ! bash "$script_dir/setup-dokku.sh" >&2; then
+        echo "[✗] setup-dokku.sh failed. Last 200 log lines from dokku container (if any):" >&2
+        docker logs --tail 200 dokku 2>&1 | sed 's/^/    /' >&2 || true
+        return 1
+    fi
+    export _DOKKU_ENSURED=1
+    return 0
+}
+
 # Run a shell command inside the Dokku container
 dokku_shell() {
+    ensure_dokku_running || return 1
     _dokku_fix_hostname
     docker exec -i dokku bash -c "$*"
 }
@@ -71,6 +122,7 @@ dokku_shell() {
 # sudo). The function takes precedence over any binary on PATH within this
 # shell, so behavior stays consistent across hosts.
 dokku() {
+    ensure_dokku_running || return 1
     _dokku_fix_hostname
     docker exec -i dokku dokku "$@"
 }

@@ -358,6 +358,84 @@ find_image_dir() {
     return 1
 }
 
+mysql_compatible_sql_stream() {
+    sed -E 's#/\*!50013 DEFINER=`[^`]+`@`[^`]+` SQL SECURITY DEFINER \*/#/\*!50013 SQL SECURITY INVOKER \*/#g' \
+        | awk '
+            function sql_literal(value, escaped) {
+                escaped = value
+                gsub(/\047/, "\047\047", escaped)
+                return escaped
+            }
+
+            function capture_index_name(statement_line) {
+                if (match(statement_line, /`[^`]+`/)) {
+                    return substr(statement_line, RSTART + 1, RLENGTH - 2)
+                }
+                return ""
+            }
+
+            function capture_table_name(statement_line, table_name) {
+                table_name = statement_line
+                sub(/^.*[[:space:]]ON[[:space:]]+`/, "", table_name)
+                sub(/`.*$/, "", table_name)
+                return table_name
+            }
+
+            function emit_guarded_index(ddl) {
+                if (index_name == "" || index_table == "") {
+                    print index_statement
+                    return
+                }
+
+                ddl = index_statement
+                gsub(/[[:space:]]+/, " ", ddl)
+                sub(/[[:space:]]*;[[:space:]]*$/, "", ddl)
+                sub(/CREATE[[:space:]]+INDEX[[:space:]]+IF[[:space:]]+NOT[[:space:]]+EXISTS[[:space:]]+/, "CREATE INDEX ", ddl)
+
+                print "SET @idx_exists = (SELECT COUNT(1) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = \047" sql_literal(index_table) "\047 AND index_name = \047" sql_literal(index_name) "\047);"
+                print "SET @ddl = IF(@idx_exists = 0, \047" sql_literal(ddl) "\047, \047SELECT 1\047);"
+                print "PREPARE stmt FROM @ddl;"
+                print "EXECUTE stmt;"
+                print "DEALLOCATE PREPARE stmt;"
+            }
+
+            /^[[:space:]]*CREATE[[:space:]]+INDEX[[:space:]]+IF[[:space:]]+NOT[[:space:]]+EXISTS[[:space:]]+`/ {
+                in_index_statement = 1
+                index_statement = $0
+                index_name = capture_index_name($0)
+                index_table = ""
+                if ($0 ~ /[[:space:]]ON[[:space:]]+`/) {
+                    index_table = capture_table_name($0)
+                }
+                if ($0 ~ /;[[:space:]]*$/) {
+                    emit_guarded_index()
+                    in_index_statement = 0
+                }
+                next
+            }
+
+            in_index_statement {
+                index_statement = index_statement "\n" $0
+                if (index_table == "" && $0 ~ /[[:space:]]ON[[:space:]]+`/) {
+                    index_table = capture_table_name($0)
+                }
+                if ($0 ~ /;[[:space:]]*$/) {
+                    emit_guarded_index()
+                    in_index_statement = 0
+                }
+                next
+            }
+
+            { print }
+
+            END {
+                if (in_index_statement) {
+                    print index_statement
+                }
+            }
+        '
+}
+
 apply_image_sql_file() {
     local image="$1" path="$2" label="$3"
     log "Applying ${label}: ${image}:${path}"
@@ -366,7 +444,7 @@ apply_image_sql_file() {
         return 0
     fi
     docker run --rm --entrypoint sh "$image" -c "cat $(shell_quote "$path")" \
-        | sed -E 's#/\*!50013 DEFINER=`[^`]+`@`[^`]+` SQL SECURITY DEFINER \*/#/\*!50013 SQL SECURITY INVOKER \*/#g' \
+        | mysql_compatible_sql_stream \
         | run_tenant_mysql "$TENANT_DB_NAME"
 }
 

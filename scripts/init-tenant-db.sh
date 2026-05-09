@@ -37,7 +37,8 @@ Options:
   --config <path>         Path to config.env file (default: ../config.env)
 
 Environment overrides:
-  BACKEND_IMAGE                Backend image containing schema/migrations
+    BACKEND_IMAGE                Backend image containing schema/migrations
+    TENANT_IMAGE_PULL_POLICY     always | missing | never (default: always)
   TENANT_SCHEMA_IMAGE_PATH     Schema path inside backend image
   TENANT_MIGRATIONS_IMAGE_DIR  Migrations directory inside backend image
 EOF
@@ -103,6 +104,7 @@ DOKKU_PORT="${DOKKU_PORT:-8080}"
 MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
 TENANT_SCHEMA_IMAGE_PATH="${TENANT_SCHEMA_IMAGE_PATH:-/app/db/schema/schema.sql}"
 TENANT_MIGRATIONS_IMAGE_DIR="${TENANT_MIGRATIONS_IMAGE_DIR:-/app/db/migrations}"
+TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"
 
 if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
     error "MYSQL_ROOT_PASSWORD is not configured; cannot initialize tenant DB."
@@ -191,11 +193,29 @@ ensure_backend_image_available() {
         info "Would use backend image: $image"
         return 0
     fi
-    if docker image inspect "$image" >/dev/null 2>&1; then
-        return 0
-    fi
-    log "Pulling backend image: $image"
-    docker pull "$image" >/dev/null
+    case "$TENANT_IMAGE_PULL_POLICY" in
+        always)
+            log "Pulling backend image: $image"
+            docker pull "$image" >/dev/null
+            ;;
+        missing)
+            if docker image inspect "$image" >/dev/null 2>&1; then
+                return 0
+            fi
+            log "Pulling backend image: $image"
+            docker pull "$image" >/dev/null
+            ;;
+        never)
+            if ! docker image inspect "$image" >/dev/null 2>&1; then
+                error "Backend image is not present locally and TENANT_IMAGE_PULL_POLICY=never: $image"
+                exit 1
+            fi
+            ;;
+        *)
+            error "TENANT_IMAGE_PULL_POLICY must be 'always', 'missing', or 'never' (got: $TENANT_IMAGE_PULL_POLICY)"
+            exit 1
+            ;;
+    esac
 }
 
 image_has_file() {

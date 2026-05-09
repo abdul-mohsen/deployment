@@ -249,6 +249,14 @@ grep -q -- '--backend-image' scripts/init-tenant-db.sh \
     && grep -q 'docker run --rm --entrypoint sh "\$image"' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db reads schema from backend image" \
     || FAIL "init-tenant-db must stream schema/migrations from backend image"
+grep -q 'TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"' scripts/init-tenant-db.sh \
+    && grep -q 'docker pull "\$image"' scripts/init-tenant-db.sh \
+    && PASS "init-tenant-db refreshes backend image before schema read" \
+    || FAIL "init-tenant-db must pull backend image before reading schema"
+grep -q 'IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"' scripts/deploy-all.sh \
+    && grep -q 'docker pull "\$image"' scripts/deploy-all.sh \
+    && PASS "deploy-all refreshes image before deploy" \
+    || FAIL "deploy-all must pull image before dokku git:from-image"
 grep -q 'init-tenant-db.sh" "\$TENANT_NAME"' scripts/create-tenant.sh \
     && grep -q -- '--backend-image "\$BACKEND_IMAGE"' scripts/create-tenant.sh \
     && grep -q 'init-tenant-db.sh" "\${seed_args\[@\]}"' scripts/create-tenant.sh \

@@ -32,6 +32,8 @@ info()  { echo -e "${BLUE}[i]${NC} $*"; }
 ENV_NAME="dev"
 DOKKU_ONLY=false
 DASHBOARD_ONLY=false
+DOKKU_STOP_SECONDS="${DOKKU_STOP_SECONDS:-20}"
+COMMAND_TIMEOUT_SECONDS="${COMMAND_TIMEOUT_SECONDS:-60}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -90,6 +92,16 @@ dump_logs() {
     docker logs --tail 200 "$container" 2>&1 | sed 's/^/    /' >&2 || true
 }
 
+run_with_timeout() {
+    local seconds="$1"
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$seconds" "$@"
+    else
+        "$@"
+    fi
+}
+
 stop_dashboard_env() {
     local env_name="$1"
     local compose_file container
@@ -98,11 +110,12 @@ stop_dashboard_env() {
     [ -f "$compose_file" ] || { error "Compose file not found: $compose_file"; exit 1; }
 
     log "Stopping Dashboard (${env_name})..."
-    if ! (cd "${REPO_DIR}/dashboard" && docker compose -f "$compose_file" down --remove-orphans); then
+    if ! (cd "${REPO_DIR}/dashboard" && run_with_timeout "$COMMAND_TIMEOUT_SECONDS" docker compose -f "$compose_file" down --remove-orphans); then
         error "  docker compose down failed for $container. Last 200 log lines:"
         dump_logs "$container"
         exit 1
     fi
+    info "  dashboard stopped: $container"
 }
 
 start_dashboard_env() {
@@ -141,13 +154,42 @@ start_dashboard_env() {
 }
 
 dokku_exists() { docker ps -a --format '{{.Names}}' | grep -qx 'dokku'; }
-dokku_http_port() { docker port dokku 80/tcp 2>/dev/null | awk -F: 'NR == 1 { print $NF }'; }
-dokku_https_port() { docker port dokku 443/tcp 2>/dev/null | awk -F: 'NR == 1 { print $NF }'; }
+dokku_running() { docker ps --format '{{.Names}}' | grep -qx 'dokku'; }
+dokku_port() {
+    local container_port="$1"
+    local port_output
+    port_output="$(docker inspect dokku --format "{{range \$port, \$bindings := .HostConfig.PortBindings}}{{if eq \$port \"${container_port}\"}}{{range \$binding := \$bindings}}{{println \$binding.HostPort}}{{end}}{{end}}{{end}}" 2>/dev/null || true)"
+    if [ -n "$port_output" ]; then
+        awk 'NF { print; exit }' <<<"$port_output"
+        return 0
+    fi
+    port_output="$(docker port dokku "$container_port" 2>/dev/null || true)"
+    awk -F: 'NR == 1 { print $NF }' <<<"$port_output"
+}
+dokku_http_port() { dokku_port 80/tcp; }
+dokku_https_port() { dokku_port 443/tcp; }
 
 stop_dokku_if_present() {
     if dokku_exists; then
-        log "Stopping Dokku container..."
-        docker stop dokku >/dev/null 2>&1 || true
+        if ! dokku_running; then
+            info "Dokku container already stopped."
+            return 0
+        fi
+
+        log "Stopping Dokku container (timeout ${DOKKU_STOP_SECONDS}s)..."
+        if run_with_timeout "$((DOKKU_STOP_SECONDS + 15))" docker stop --time "$DOKKU_STOP_SECONDS" dokku >/dev/null 2>&1; then
+            info "  dokku stopped"
+            return 0
+        fi
+
+        warn "  docker stop did not finish cleanly; force-killing dokku..."
+        run_with_timeout 20 docker kill dokku >/dev/null 2>&1 || true
+        if dokku_running; then
+            error "  dokku is still running after stop/kill. Last 200 log lines:"
+            dump_logs dokku
+            exit 1
+        fi
+        info "  dokku force-stopped"
     fi
 }
 
@@ -187,7 +229,7 @@ start_or_recreate_dokku() {
             fi
         fi
     else
-        warn "Dokku container missing — bootstrapping via setup-dokku.sh"
+        warn "Dokku container missing — tenant app containers may still be running, but Dokku nginx/CLI is absent. Bootstrapping via setup-dokku.sh"
         if ! bash "${SCRIPT_DIR}/setup-dokku.sh"; then
             error "  bootstrap failed. Last 200 log lines from dokku container (if any):"
             dump_logs dokku

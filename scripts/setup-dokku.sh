@@ -25,7 +25,14 @@ DOKKU_PORT="${DOKKU_PORT:-8080}"
 DOKKU_HOSTNAME="${DOKKU_HOSTNAME:-localtest.me}"
 
 get_dokku_host_port() {
-  docker port dokku 80/tcp 2>/dev/null | awk -F: 'NR == 1 { print $NF }'
+  local port_output
+  port_output="$(docker inspect dokku --format '{{range $port, $bindings := .HostConfig.PortBindings}}{{if eq $port "80/tcp"}}{{range $binding := $bindings}}{{println $binding.HostPort}}{{end}}{{end}}{{end}}' 2>/dev/null || true)"
+  if [ -n "$port_output" ]; then
+    awk 'NF { print; exit }' <<<"$port_output"
+    return 0
+  fi
+  port_output="$(docker port dokku 80/tcp 2>/dev/null || true)"
+  awk -F: 'NR == 1 { print $NF }' <<<"$port_output"
 }
 
 get_dokku_container_hostname() {

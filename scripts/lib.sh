@@ -77,10 +77,10 @@ ensure_dokku_running() {
     local repo_dir
     repo_dir="$(dirname "$script_dir")"
 
-    # Source install.env / config.env so setup-dokku.sh sees the configured
-    # DOKKU_PORT / DOKKU_HOSTNAME instead of falling back to its defaults.
+    # Source config.env first then install.env so the operator's install.env
+    # wins over the auto-generated config.env (matches setup-dokku.sh).
     local f
-    for f in "$repo_dir/install.env" "$repo_dir/config.env"; do
+    for f in "$repo_dir/config.env" "$repo_dir/install.env"; do
         if [ -f "$f" ]; then
             # shellcheck disable=SC1090
             set -a; . "$f"; set +a

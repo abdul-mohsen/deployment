@@ -1,27 +1,20 @@
 #!/usr/bin/env bash
 # =============================================================================
-# restart-stack.sh — Restart the Dokku container + Dashboard for one env
+# restart-stack.sh — Stop, then start Dokku + Dashboard
 # =============================================================================
-# One command to bounce both pieces of the stack. Use this after editing
-# install.env / config.env / dashboard.env, after a host reboot, or to recover
-# from a wedged container.
+# One command to bounce the stack cleanly. It always stops selected dashboard
+# containers before touching Dokku, then starts Dokku, then starts dashboards.
+# If the existing Dokku container has the wrong HTTP port, no HTTP port, or an
+# old 443 publish, it is removed and recreated via setup-dokku.sh. Dokku state
+# survives because /var/lib/dokku is bind-mounted.
 #
 # Usage:
-#   sudo bash scripts/restart-stack.sh                # default: dev
+#   sudo bash scripts/restart-stack.sh                # default: dev dashboard + dokku
 #   sudo bash scripts/restart-stack.sh --env dev
 #   sudo bash scripts/restart-stack.sh --env prod
+#   sudo bash scripts/restart-stack.sh --env all      # dev + prod dashboards + dokku
 #   sudo bash scripts/restart-stack.sh --env prod --dokku-only
 #   sudo bash scripts/restart-stack.sh --env dev --dashboard-only
-#
-# Behavior:
-#   1. (Re)create the Dokku container if missing (via setup-dokku.sh, which
-#      reads DOKKU_PORT / DOKKU_HOSTNAME from install.env / config.env), or
-#      `docker restart dokku` if it exists.
-#   2. `docker compose -f dashboard/docker-compose.<env>.yml up -d` to bring
-#      the dashboard up. Uses --force-recreate so env-file changes are picked
-#      up. For prod, the binary is expected to be already built into the
-#      image; for dev, runs dashboard/dev-up.sh which rebuilds locally.
-#   3. On any failure, dumps the last 200 log lines of the offending container.
 # =============================================================================
 
 set -euo pipefail
@@ -33,7 +26,7 @@ source "${SCRIPT_DIR}/lib.sh"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 log()   { echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-error() { echo -e "${RED}[✗]${NC} $*" >&2; }
+error() { echo -e "${RED}[x]${NC} $*" >&2; }
 info()  { echo -e "${BLUE}[i]${NC} $*"; }
 
 ENV_NAME="dev"
@@ -45,96 +38,195 @@ while [[ $# -gt 0 ]]; do
         --env)            ENV_NAME="$2"; shift 2 ;;
         --dokku-only)     DOKKU_ONLY=true; shift ;;
         --dashboard-only) DASHBOARD_ONLY=true; shift ;;
-        -h|--help)        sed -n '1,30p' "$0"; exit 0 ;;
+        -h|--help)        sed -n '1,28p' "$0"; exit 0 ;;
         *)                error "Unknown flag: $1"; exit 1 ;;
     esac
 done
 
 case "$ENV_NAME" in
-    dev|prod) ;;
-    *)        error "--env must be 'dev' or 'prod' (got: $ENV_NAME)"; exit 1 ;;
+    dev|prod|all) ;;
+    *)            error "--env must be 'dev', 'prod', or 'all' (got: $ENV_NAME)"; exit 1 ;;
 esac
+
+if $DOKKU_ONLY && $DASHBOARD_ONLY; then
+    error "Use only one of --dokku-only or --dashboard-only."
+    exit 1
+fi
 
 if ! command -v docker &>/dev/null; then
     error "docker not installed"
     exit 1
 fi
 
-DASHBOARD_DIR="${REPO_DIR}/dashboard"
-COMPOSE_FILE="${DASHBOARD_DIR}/docker-compose.${ENV_NAME}.yml"
-DASHBOARD_CONTAINER="dokku-dashboard-${ENV_NAME}"
-
-# ---- 1. Dokku ------------------------------------------------------------
-if ! $DASHBOARD_ONLY; then
-    log "Restarting Dokku container..."
-    if docker ps -a --format '{{.Names}}' | grep -qx 'dokku'; then
-        if docker restart dokku >/dev/null; then
-            info "  dokku restarted"
-        else
-            error "  docker restart dokku failed. Last 200 log lines:"
-            docker logs --tail 200 dokku 2>&1 | sed 's/^/    /' >&2 || true
-            exit 1
-        fi
-        # Wait for the daemon to answer.
-        for i in $(seq 1 30); do
-            if docker exec dokku dokku version >/dev/null 2>&1; then
-                info "  dokku ready: $(docker exec dokku dokku version | head -1)"
-                break
-            fi
-            sleep 2
-            if [ "$i" -eq 30 ]; then
-                error "  dokku did not become ready in 60s. Last 200 log lines:"
-                docker logs --tail 200 dokku 2>&1 | sed 's/^/    /' >&2 || true
-                exit 1
-            fi
-        done
-    else
-        warn "  dokku container missing — bootstrapping via ensure_dokku_running"
-        if ! ensure_dokku_running; then
-            error "  bootstrap failed (see logs above)"
-            exit 1
-        fi
-    fi
-fi
-
-# ---- 2. Dashboard --------------------------------------------------------
-if ! $DOKKU_ONLY; then
-    [ -f "$COMPOSE_FILE" ] || { error "Compose file not found: $COMPOSE_FILE"; exit 1; }
-
-    log "Restarting Dashboard ($ENV_NAME)..."
-    cd "$DASHBOARD_DIR"
-
-    if [ "$ENV_NAME" = "dev" ] && [ -x "./dev-up.sh" ]; then
-        info "  using dev-up.sh (rebuilds binary + image)"
-        if ! bash ./dev-up.sh; then
-            error "  dev-up.sh failed. Last 200 log lines from $DASHBOARD_CONTAINER:"
-            docker logs --tail 200 "$DASHBOARD_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
-            exit 1
-        fi
-    else
-        if ! docker compose -f "$COMPOSE_FILE" up -d --force-recreate; then
-            error "  docker compose up failed. Last 200 log lines from $DASHBOARD_CONTAINER:"
-            docker logs --tail 200 "$DASHBOARD_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
-            exit 1
-        fi
-    fi
-
-    # Quick readiness probe.
-    for i in $(seq 1 15); do
-        if docker ps --format '{{.Names}}' | grep -qx "$DASHBOARD_CONTAINER"; then
-            info "  dashboard container is up: $DASHBOARD_CONTAINER"
-            break
-        fi
-        sleep 1
-        if [ "$i" -eq 15 ]; then
-            error "  dashboard container not running after 15s. Last 200 log lines:"
-            docker logs --tail 200 "$DASHBOARD_CONTAINER" 2>&1 | sed 's/^/    /' >&2 || true
-            exit 1
+load_stack_env() {
+    local caller_dokku_port="${DOKKU_PORT:-}"
+    local caller_dokku_hostname="${DOKKU_HOSTNAME:-}"
+    local env_file
+    for env_file in "${REPO_DIR}/config.env" "${REPO_DIR}/install.env"; do
+        if [ -f "$env_file" ]; then
+            # shellcheck disable=SC1090
+            set -a; . "$env_file"; set +a
         fi
     done
+    [ -n "$caller_dokku_port" ] && DOKKU_PORT="$caller_dokku_port"
+    [ -n "$caller_dokku_hostname" ] && DOKKU_HOSTNAME="$caller_dokku_hostname"
+    DOKKU_PORT="${DOKKU_PORT:-8080}"
+    DOKKU_HOSTNAME="${DOKKU_HOSTNAME:-${BASE_DOMAIN:-localtest.me}}"
+}
+
+dashboard_envs() {
+    if [ "$ENV_NAME" = "all" ]; then
+        printf '%s\n' dev prod
+    else
+        printf '%s\n' "$ENV_NAME"
+    fi
+}
+
+compose_file_for() { echo "${REPO_DIR}/dashboard/docker-compose.$1.yml"; }
+dashboard_container_for() { echo "dokku-dashboard-$1"; }
+
+dump_logs() {
+    local container="$1"
+    docker logs --tail 200 "$container" 2>&1 | sed 's/^/    /' >&2 || true
+}
+
+stop_dashboard_env() {
+    local env_name="$1"
+    local compose_file container
+    compose_file="$(compose_file_for "$env_name")"
+    container="$(dashboard_container_for "$env_name")"
+    [ -f "$compose_file" ] || { error "Compose file not found: $compose_file"; exit 1; }
+
+    log "Stopping Dashboard (${env_name})..."
+    if ! (cd "${REPO_DIR}/dashboard" && docker compose -f "$compose_file" down --remove-orphans); then
+        error "  docker compose down failed for $container. Last 200 log lines:"
+        dump_logs "$container"
+        exit 1
+    fi
+}
+
+start_dashboard_env() {
+    local env_name="$1"
+    local compose_file container
+    compose_file="$(compose_file_for "$env_name")"
+    container="$(dashboard_container_for "$env_name")"
+    [ -f "$compose_file" ] || { error "Compose file not found: $compose_file"; exit 1; }
+
+    log "Starting Dashboard (${env_name})..."
+    if [ "$env_name" = "dev" ] && [ -x "${REPO_DIR}/dashboard/dev-up.sh" ]; then
+        info "  using dev-up.sh (rebuilds binary + image)"
+        if ! (cd "${REPO_DIR}/dashboard" && bash ./dev-up.sh); then
+            error "  dev-up.sh failed. Last 200 log lines from $container:"
+            dump_logs "$container"
+            exit 1
+        fi
+    else
+        if ! (cd "${REPO_DIR}/dashboard" && docker compose -f "$compose_file" up -d --force-recreate); then
+            error "  docker compose up failed. Last 200 log lines from $container:"
+            dump_logs "$container"
+            exit 1
+        fi
+    fi
+
+    for i in $(seq 1 15); do
+        if docker ps --format '{{.Names}}' | grep -qx "$container"; then
+            info "  dashboard container is up: $container"
+            return 0
+        fi
+        sleep 1
+    done
+    error "  dashboard container not running after 15s. Last 200 log lines:"
+    dump_logs "$container"
+    exit 1
+}
+
+dokku_exists() { docker ps -a --format '{{.Names}}' | grep -qx 'dokku'; }
+dokku_http_port() { docker port dokku 80/tcp 2>/dev/null | awk -F: 'NR == 1 { print $NF }'; }
+dokku_https_port() { docker port dokku 443/tcp 2>/dev/null | awk -F: 'NR == 1 { print $NF }'; }
+
+stop_dokku_if_present() {
+    if dokku_exists; then
+        log "Stopping Dokku container..."
+        docker stop dokku >/dev/null 2>&1 || true
+    fi
+}
+
+start_or_recreate_dokku() {
+    local recreate=false
+    local reason=""
+    local current_http current_https
+
+    if dokku_exists; then
+        current_http="$(dokku_http_port)"
+        current_https="$(dokku_https_port)"
+        if [ -z "$current_http" ]; then
+            recreate=true
+            reason="missing ${DOKKU_PORT}->80 publish"
+        elif [ "$current_http" != "$DOKKU_PORT" ]; then
+            recreate=true
+            reason="mapped ${current_http}->80 but config requests ${DOKKU_PORT}->80"
+        elif [ -n "$current_https" ]; then
+            recreate=true
+            reason="old unsupported 443 publish detected (${current_https}->443)"
+        fi
+
+        if $recreate; then
+            warn "Recreating Dokku container: $reason"
+            docker rm dokku >/dev/null
+            if ! bash "${SCRIPT_DIR}/setup-dokku.sh"; then
+                error "  setup-dokku.sh failed. Last 200 log lines from dokku:"
+                dump_logs dokku
+                exit 1
+            fi
+        else
+            log "Starting Dokku container..."
+            if ! docker start dokku >/dev/null; then
+                error "  docker start dokku failed. Last 200 log lines:"
+                dump_logs dokku
+                exit 1
+            fi
+        fi
+    else
+        warn "Dokku container missing — bootstrapping via setup-dokku.sh"
+        if ! bash "${SCRIPT_DIR}/setup-dokku.sh"; then
+            error "  bootstrap failed. Last 200 log lines from dokku container (if any):"
+            dump_logs dokku
+            exit 1
+        fi
+    fi
+
+    for i in $(seq 1 30); do
+        if docker exec dokku dokku version >/dev/null 2>&1; then
+            info "  dokku ready: $(docker exec dokku dokku version | head -1)"
+            return 0
+        fi
+        sleep 2
+    done
+    error "  dokku did not become ready in 60s. Last 200 log lines:"
+    dump_logs dokku
+    exit 1
+}
+
+load_stack_env
+
+if ! $DOKKU_ONLY; then
+    while IFS= read -r env_name; do
+        stop_dashboard_env "$env_name"
+    done < <(dashboard_envs)
+fi
+
+if ! $DASHBOARD_ONLY; then
+    stop_dokku_if_present
+    start_or_recreate_dokku
+fi
+
+if ! $DOKKU_ONLY; then
+    while IFS= read -r env_name; do
+        start_dashboard_env "$env_name"
+    done < <(dashboard_envs)
 fi
 
 echo ""
 log "Stack restarted (env=$ENV_NAME)."
-docker ps --filter 'name=^dokku$' --filter "name=^${DASHBOARD_CONTAINER}$" \
-    --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' || true
+docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' \
+    | awk '$1 == "NAMES" || $1 == "dokku" || $1 == "dokku-dashboard-dev" || $1 == "dokku-dashboard-prod"'

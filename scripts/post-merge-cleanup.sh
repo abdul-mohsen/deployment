@@ -9,9 +9,12 @@
 #      from Dokku's nginx context and break `nginx:validate-config`.
 #   2. For every tenant pair (<name>-backend / <name>-frontend), creates
 #      tenant-<name> docker network (if missing) and attaches both apps.
-#   3. Sets BACKEND_URL / PORT / APP_DOMAIN on the frontend, BASEURL on the
+#   3. Removes the public domain/proxy from backend apps. Only frontend apps
+#      should own <tenant>.$BASE_DOMAIN; otherwise Dokku generates duplicate
+#      nginx server_name blocks.
+#   4. Sets BACKEND_URL / PORT / APP_DOMAIN on the frontend, BASEURL on the
 #      backend, then `ps:rebuild`s both apps so the new wiring is applied.
-#   4. Validates Dokku nginx config and rebuilds proxy config.
+#   5. Validates Dokku nginx config and rebuilds proxy config.
 #
 # Usage:
 #   sudo bash scripts/post-merge-cleanup.sh                 # all tenants
@@ -122,6 +125,12 @@ for t in "${TENANTS[@]}"; do
     # and attach-post-deploy to the same network on the same app.
     dk_dokku network:set "$be" attach-post-create "$net" >/dev/null || true
     dk_dokku network:set "$fe" attach-post-create "$net" >/dev/null || true
+
+    info "  domains: frontend owns $domain; backend is internal-only"
+    dk_dokku domains:clear "$be" >/dev/null || true
+    dk_dokku proxy:disable "$be" >/dev/null 2>&1 || true
+    dk_dokku domains:clear "$fe" >/dev/null || true
+    dk_dokku domains:add "$fe" "$domain" >/dev/null || true
 
     info "  config: backend BASEURL=$BASEURL"
     dk_dokku config:set --no-restart "$be" BASEURL="$BASEURL" >/dev/null

@@ -14,8 +14,8 @@
 # Flags (all map 1:1 to config.env keys):
 #   --base-domain        BASE_DOMAIN          (required)
 #   --acme-email         ACME_EMAIL           (default: admin@<domain>)
-#   --nginx-mode         NGINX_MODE           (standalone|behind-nginx, default: standalone)
-#   --dokku-port         DOKKU_PORT           (default: 8080, only behind-nginx)
+#   --nginx-mode         NGINX_MODE           (behind-nginx only; default: behind-nginx)
+#   --dokku-port         DOKKU_PORT           (default: 8080)
 #   --mysql-host         MYSQL_HOST           (default: host.docker.internal)
 #   --mysql-port         MYSQL_PORT           (default: 3306)
 #   --mysql-user         MYSQL_ROOT_USER      (default: root)
@@ -62,7 +62,7 @@ fi
 : "${BASE_DOMAIN:=}"
 : "${ACME_EMAIL:=}"
 : "${ENABLE_SSL:=false}"
-: "${NGINX_MODE:=standalone}"
+: "${NGINX_MODE:=behind-nginx}"
 : "${DOKKU_PORT:=8080}"
 : "${MYSQL_HOST:=host.docker.internal}"
 : "${MYSQL_PORT:=3306}"

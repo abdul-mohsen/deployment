@@ -49,26 +49,6 @@ validate_existing_dokku_container() {
   fi
 }
 
-ensure_default_http_vhost() {
-  docker exec -i dokku bash -s <<'DOKKU_DEFAULT_NGINX'
-set -euo pipefail
-cat > /etc/nginx/conf.d/00-dokku-default.conf <<'NGINX'
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
-
-    location / {
-        default_type text/plain;
-        return 200 "dokku ready\n";
-    }
-}
-NGINX
-nginx -t >/dev/null
-sv reload /etc/service/nginx >/dev/null || nginx -s reload >/dev/null
-DOKKU_DEFAULT_NGINX
-}
-
 echo "== Syntax check: scripts/setup.sh =="
 bash -n "${SCRIPT_DIR}/setup.sh" || { echo "SYNTAX-ERROR"; exit 1; }
 
@@ -86,20 +66,26 @@ if docker ps -a --format '{{.Names}}' | grep -q '^dokku$'; then
     docker start dokku || { echo "START-FAILED"; exit 3; }
   fi
 else
-  echo "ACTION: creating dokku container (ports ${DOKKU_PORT}->80, 443->443)"
-  docker run -d --name dokku --hostname dokku --restart always --privileged --add-host=host.docker.internal:host-gateway -p "${DOKKU_PORT}":80 -p 443:443 -v /var/lib/dokku:/mnt/dokku -v /var/run/docker.sock:/var/run/docker.sock -e DOKKU_HOSTNAME="${DOKKU_HOSTNAME}" dokku/dokku:latest || { echo "RUN-FAILED"; exit 4; }
+  echo "ACTION: creating dokku container (port ${DOKKU_PORT}->80)"
+  docker run -d --name dokku --hostname dokku --restart always --privileged --add-host=host.docker.internal:host-gateway -p "${DOKKU_PORT}":80 -v /var/lib/dokku:/mnt/dokku -v /var/run/docker.sock:/var/run/docker.sock -e DOKKU_HOSTNAME="${DOKKU_HOSTNAME}" dokku/dokku:latest || { echo "RUN-FAILED"; exit 4; }
 fi
 
 # Wait up to 60s for dokku to respond
+ready=false
 for i in $(seq 1 30); do
   if docker exec dokku dokku version >/dev/null 2>&1; then
     echo "DOKKU-READY: $(docker exec dokku dokku version | head -1)"
     docker exec dokku dokku domains:set-global "${DOKKU_HOSTNAME}" >/dev/null
-    ensure_default_http_vhost
+    ready=true
     break
   fi
   sleep 2
 done
+
+if [ "$ready" != "true" ]; then
+  echo "DOKKU-NOT-READY: dokku did not answer within 60s."
+  exit 6
+fi
 
 # Final status
 docker ps --filter name=dokku --format 'CONTAINER:\t{{.Names}}\tSTATUS:\t{{.Status}}\tPORTS:\t{{.Ports}}' || true

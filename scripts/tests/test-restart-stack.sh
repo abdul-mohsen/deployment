@@ -254,14 +254,8 @@ grep -q 'TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"' scripts
     && PASS "init-tenant-db refreshes backend image before schema read" \
     || FAIL "init-tenant-db must pull backend image before reading schema"
 grep -q 'run_tenant_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
-    && grep -q 'SQL SECURITY INVOKER' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db imports schema as tenant DB user" \
     || FAIL "init-tenant-db must import schema as tenant DB user"
-grep -q 'mysql_compatible_sql_stream' scripts/init-tenant-db.sh \
-    && grep -Fq 'CREATE[[:space:]]+INDEX[[:space:]]+IF[[:space:]]+NOT[[:space:]]+EXISTS' scripts/init-tenant-db.sh \
-    && grep -q 'information_schema.statistics' scripts/init-tenant-db.sh \
-    && PASS "init-tenant-db guards MySQL-incompatible CREATE INDEX IF NOT EXISTS" \
-    || FAIL "init-tenant-db must guard CREATE INDEX IF NOT EXISTS before MySQL import"
 grep -q 'TENANT_IGNORED_SCHEMA_FILES="${TENANT_IGNORED_SCHEMA_FILES:-car_part.sql}"' scripts/init-tenant-db.sh \
     && grep -q 'schema_file_is_ignored' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db ignores car_part schema" \

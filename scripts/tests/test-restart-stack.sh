@@ -256,6 +256,10 @@ grep -q 'TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"' scripts
 grep -q 'run_tenant_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db imports schema as tenant DB user" \
     || FAIL "init-tenant-db must import schema as tenant DB user"
+grep -q 'validate_tenant_schema' scripts/init-tenant-db.sh \
+    && grep -q 'tenant_missing_required_tables' scripts/init-tenant-db.sh \
+    && PASS "init-tenant-db verifies required base schema tables" \
+    || FAIL "init-tenant-db must verify required base schema tables"
 grep -q 'TENANT_IGNORED_SCHEMA_FILES="${TENANT_IGNORED_SCHEMA_FILES:-car_part.sql}"' scripts/init-tenant-db.sh \
     && grep -q 'schema_file_is_ignored' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db ignores car_part schema" \
@@ -266,6 +270,7 @@ grep -q 'IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"' scripts/deploy-all.sh
     || FAIL "deploy-all must pull image before dokku git:from-image"
 grep -q 'init-tenant-db.sh" "\$TENANT_NAME"' scripts/create-tenant.sh \
     && grep -q -- '--backend-image "\$BACKEND_IMAGE"' scripts/create-tenant.sh \
+    && grep -q -- '--env "DB_USER=\$TENANT_DB_USER"' scripts/create-tenant.sh \
     && grep -q 'init-tenant-db.sh" "\${seed_args\[@\]}"' scripts/create-tenant.sh \
     && PASS "create-tenant applies schema and seed phases" \
     || FAIL "create-tenant must call init-tenant-db.sh for schema and seed phases"

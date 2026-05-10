@@ -150,7 +150,33 @@ tenant_table_count() {
         echo 0
         return 0
     fi
-    run_mysql -N -B "$TENANT_DB_NAME" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE();" | awk 'NF { print $1; exit }'
+    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE();" | awk 'NF { print $1; exit }'
+}
+
+tenant_required_table_count() {
+    if $DRY_RUN; then
+        echo 0
+        return 0
+    fi
+    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name IN ('company','branches','store','user');" | awk 'NF { print $1; exit }'
+}
+
+tenant_missing_required_tables() {
+    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT required.name FROM (SELECT 'company' AS name UNION ALL SELECT 'branches' UNION ALL SELECT 'store' UNION ALL SELECT 'user') required LEFT JOIN information_schema.tables existing ON existing.table_schema=DATABASE() AND existing.table_name=required.name WHERE existing.table_name IS NULL;" \
+        | paste -sd ',' -
+}
+
+validate_tenant_schema() {
+    if $DRY_RUN; then
+        return 0
+    fi
+    local missing
+    missing="$(tenant_missing_required_tables)"
+    if [ -n "$missing" ]; then
+        error "Tenant schema is incomplete in ${TENANT_DB_NAME}; missing required tables: $missing"
+        exit 1
+    fi
+    info "Tenant schema verified: required base tables exist."
 }
 
 ensure_tenant_database() {
@@ -377,14 +403,20 @@ list_image_migrations() {
 apply_schema() {
     ensure_tenant_database
 
-    local image count schema_path migrations_dir migration migrations_found
+    local image count required_count schema_path migrations_dir migration migrations_found missing
     image="$(resolve_backend_image)"
     ensure_backend_image_available "$image"
 
     count="$(tenant_table_count)"
-    if [ "$count" != "0" ]; then
-        info "Tenant DB already has $count tables; skipping base schema to avoid destructive DROP statements."
+    required_count="$(tenant_required_table_count)"
+    if [ "$required_count" = "4" ]; then
+        info "Tenant DB already has required base schema tables; skipping base schema."
     else
+        if [ "$count" != "0" ]; then
+            missing="$(tenant_missing_required_tables)"
+            warn "Tenant DB has $count tables but is missing required base schema tables: $missing"
+            warn "Reapplying base schema from backend image."
+        fi
         schema_path="$(find_image_file "$image" \
             "$TENANT_SCHEMA_IMAGE_PATH" \
             /app/pkg/db/schema/schema.sql \
@@ -403,6 +435,7 @@ apply_schema() {
         /app/migrations)" || true
     if [ -z "$migrations_dir" ]; then
         warn "Backend image has no migrations directory; skipping migrations."
+        validate_tenant_schema
         return 0
     fi
 
@@ -422,6 +455,8 @@ apply_schema() {
     if ! $migrations_found; then
         warn "No *.sql migrations found in ${image}:${migrations_dir}."
     fi
+
+    validate_tenant_schema
 }
 
 seed_company_defaults() {
@@ -437,7 +472,7 @@ seed_company_defaults() {
         return 0
     fi
 
-    run_mysql "$TENANT_DB_NAME" <<SQLEOF
+    run_tenant_mysql "$TENANT_DB_NAME" <<SQLEOF
 INSERT INTO company (id, state, name, vat_number, vat_registration_number, commercial_registration_number, name_ar, business_category)
 VALUES (1, 0, '${company_sql}', '300000000000003', '300000000000003', '1010000000', '${company_sql}', 'Supply activities')
 ON DUPLICATE KEY UPDATE name=VALUES(name), name_ar=VALUES(name_ar);
@@ -481,13 +516,13 @@ set_user_role() {
     fi
 
     local user_id
-    user_id="$(run_mysql -N -B "$TENANT_DB_NAME" -e "SELECT id FROM \`user\` WHERE username='${username_sql}' LIMIT 1;" | awk 'NF { print $1; exit }')"
+    user_id="$(run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT id FROM \`user\` WHERE username='${username_sql}' LIMIT 1;" | awk 'NF { print $1; exit }')"
     if [ -z "$user_id" ]; then
         error "Seed user '$username' was not found after registration."
         exit 1
     fi
 
-    run_mysql "$TENANT_DB_NAME" <<SQLEOF
+    run_tenant_mysql "$TENANT_DB_NAME" <<SQLEOF
 UPDATE \`user\`
 SET role='${role}', is_active=1, company_id=1
 WHERE id=${user_id};

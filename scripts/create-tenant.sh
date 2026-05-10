@@ -385,7 +385,11 @@ SQLEOF
             bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
                 --schema-only \
                 --backend-image "$BACKEND_IMAGE" \
-                --config "$CONFIG_FILE"
+                --config "$CONFIG_FILE" \
+                --env "DB_HOST=$MYSQL_HOST" \
+                --env "DB_PORT=$MYSQL_PORT" \
+                --env "DB_USER=$TENANT_DB_USER" \
+                --env "DB_PASSWORD=$TENANT_DB_PASS"
             DB_PROVISIONED=true
         else
             warn "No backend image supplied; skipping schema initialization."
@@ -432,7 +436,11 @@ if $DB_PROVISIONED && ! $GIT_ONLY; then
     if [ -n "$ADMIN_USER$ADMIN_PASSWORD$MANAGER_USER$MANAGER_PASSWORD" ]; then
         if [ -n "$BACKEND_IMAGE" ] && [ -n "$FRONTEND_IMAGE" ]; then
             log "Seeding tenant users..."
-            seed_args=("$TENANT_NAME" --seed-only --config "$CONFIG_FILE")
+            seed_args=("$TENANT_NAME" --seed-only --config "$CONFIG_FILE" \
+                --env "DB_HOST=$MYSQL_HOST" \
+                --env "DB_PORT=$MYSQL_PORT" \
+                --env "DB_USER=$TENANT_DB_USER" \
+                --env "DB_PASSWORD=$TENANT_DB_PASS")
             [ -n "$ADMIN_USER" ] && seed_args+=(--env "ADMIN_USER=$ADMIN_USER")
             [ -n "$ADMIN_PASSWORD" ] && seed_args+=(--env "ADMIN_PASSWORD=$ADMIN_PASSWORD")
             [ -n "$MANAGER_USER" ] && seed_args+=(--env "MANAGER_USER=$MANAGER_USER")

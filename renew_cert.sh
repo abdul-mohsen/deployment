@@ -194,6 +194,16 @@ ensure_acme_sh() {
     fail "acme.sh install finished, but acme.sh was not found."
 }
 
+ensure_acme_account() {
+    local account_args
+    account_args=(--register-account -m "$ACME_EMAIL" --server letsencrypt)
+    if $STAGING || bool_true "${ACME_STAGING:-}"; then
+        account_args+=(--staging)
+    fi
+    info "Ensuring acme.sh account email: $ACME_EMAIL"
+    "$ACME_SH_BIN" "${account_args[@]}"
+}
+
 porkbun_ping() {
     local response status payload
     response="$(mktemp)"
@@ -328,6 +338,7 @@ main() {
     fi
 
     ensure_acme_sh
+    ensure_acme_account
     prepare_output_dirs
     porkbun_ping
     issue_certificate

@@ -44,8 +44,16 @@ Real output files:
   Public key:                PUBLIC_KEY_LOCATION
   Intermediate certificate:  INTERMEDITE_CERT_LOCATION
 
+Optional .env keys:
+  ACME_EMAIL=admin@example.com
+  ACME_AUTO_INSTALL=true
+  ACME_SH_BIN=/root/.acme.sh/acme.sh
+  ACME_KEY_LENGTH=2048
+  DNS_SLEEP=120
+
 Prerequisites:
-  acme.sh, curl, openssl
+  curl, openssl, sh
+  acme.sh is installed automatically when missing
 EOF
 }
 
@@ -143,7 +151,9 @@ load_env() {
     require_value COMMAND_TO_RELOAD_WEBSERVER
 
     ENDPOINT="${ENDPOINT%/}"
+    ACME_EMAIL="${ACME_EMAIL:-admin@${DOMAIN#*.}}"
     ACME_KEY_LENGTH="${ACME_KEY_LENGTH:-2048}"
+    ACME_AUTO_INSTALL="${ACME_AUTO_INSTALL:-true}"
     DNS_SLEEP="${DNS_SLEEP:-120}"
 }
 
@@ -165,9 +175,19 @@ find_acme_sh() {
 
 ensure_acme_sh() {
     if ACME_SH_BIN="$(find_acme_sh)"; then
+        info "Using acme.sh: $ACME_SH_BIN"
         return 0
     fi
-    fail "acme.sh is required. Install it first or set ACME_SH_BIN."
+    if ! bool_true "$ACME_AUTO_INSTALL"; then
+        fail "acme.sh is required. Set ACME_AUTO_INSTALL=true or set ACME_SH_BIN."
+    fi
+    info "acme.sh not found; installing it to $HOME/.acme.sh."
+    curl -fsSL https://get.acme.sh | sh -s email="$ACME_EMAIL"
+    if ACME_SH_BIN="$(find_acme_sh)"; then
+        info "Using acme.sh: $ACME_SH_BIN"
+        return 0
+    fi
+    fail "acme.sh install finished, but acme.sh was not found."
 }
 
 porkbun_ping() {
@@ -285,10 +305,10 @@ main() {
     require_command curl
     require_command openssl
     require_command install
+    require_command sh
 
     load_env
     build_domain_args
-    ensure_acme_sh
 
     info "Env file: $ENV_FILE"
     info "Porkbun endpoint: $ENDPOINT"
@@ -303,6 +323,7 @@ main() {
         exit 0
     fi
 
+    ensure_acme_sh
     prepare_output_dirs
     porkbun_ping
     issue_certificate

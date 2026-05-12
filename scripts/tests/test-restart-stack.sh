@@ -256,6 +256,13 @@ grep -q 'TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"' scripts
 grep -q 'run_tenant_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db imports schema as tenant DB user" \
     || FAIL "init-tenant-db must import schema as tenant DB user"
+grep -q 'INSERT INTO supplier' scripts/init-tenant-db.sh \
+    && grep -q 'SUP-DEFAULT' scripts/init-tenant-db.sh \
+    && PASS "init-tenant-db seeds default purchase-bill supplier" \
+    || FAIL "init-tenant-db must seed the minimum supplier for purchase bills"
+grep -q "'purchase_bills'" scripts/init-tenant-db.sh \
+    && PASS "seed users get purchase bill permissions" \
+    || FAIL "seed users must get purchase_bills permissions"
 grep -q 'validate_tenant_schema' scripts/init-tenant-db.sh \
     && grep -q 'tenant_missing_required_tables' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db verifies required base schema tables" \

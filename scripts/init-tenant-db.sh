@@ -484,6 +484,10 @@ ON DUPLICATE KEY UPDATE company_id=VALUES(company_id), is_active=VALUES(is_activ
 INSERT INTO store (id, company_id, branch_id, name, status)
 VALUES (1, 1, 1, 'Main Store', 0)
 ON DUPLICATE KEY UPDATE company_id=VALUES(company_id), branch_id=VALUES(branch_id), status=VALUES(status);
+
+INSERT INTO supplier (id, company_id, name, address, phone_number, number, vat_number, commercial_registration, is_deleted, is_postpaid, credit_limit, payment_terms_days, preferred_payment_method)
+VALUES (1, 1, 'Default Supplier', '', '', 'SUP-DEFAULT', '', '', 0, 0, 0.00, 0, 10)
+ON DUPLICATE KEY UPDATE company_id=VALUES(company_id), is_deleted=0;
 SQLEOF
 }
 
@@ -533,6 +537,7 @@ VALUES
   (${user_id}, 'products', 1, 1, 1, 1),
   (${user_id}, 'clients', 1, 1, 1, 1),
   (${user_id}, 'suppliers', 1, 1, 1, 1),
+    (${user_id}, 'purchase_bills', 1, 1, 1, 1),
   (${user_id}, 'stores', 1, 1, 1, 1),
   (${user_id}, 'orders', 1, 1, 1, 1),
   (${user_id}, 'users', 1, 1, 1, 1),

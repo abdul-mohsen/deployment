@@ -55,6 +55,7 @@ Real output files:
   Working directory copies:  ./server.crt and ./server.key
 
 Optional .env keys:
+  CERT_DOMAINS=ifritah.com,*.ifritah.com,dev.ifritah.com,*.dev.ifritah.com
   CERTBOT_EMAIL=admin@example.com
   CERTBOT_BIN=certbot
   CERTBOT_CONFIG_DIR=/etc/letsencrypt
@@ -300,12 +301,17 @@ build_domain_args() {
         fi
         return 0
     fi
+    local dev_domain
     if [[ "$DOMAIN" == \*.* ]]; then
         PRIMARY_DOMAIN="$(normalize_domain "$DOMAIN")"
         DOMAIN_ARGS=("-d" "$PRIMARY_DOMAIN" "-d" "$DOMAIN")
     else
         PRIMARY_DOMAIN="$DOMAIN"
         DOMAIN_ARGS=("-d" "$DOMAIN" "-d" "*.$DOMAIN")
+    fi
+    if [ "$PRIMARY_DOMAIN" = "$PORKBUN_DNS_ZONE" ]; then
+        dev_domain="dev.$PRIMARY_DOMAIN"
+        DOMAIN_ARGS+=("-d" "$dev_domain" "-d" "*.$dev_domain")
     fi
 }
 

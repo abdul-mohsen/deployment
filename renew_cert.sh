@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
+ORIGINAL_WORKING_DIR="$(pwd)"
 ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/.env}"
 FORCE=false
 STAGING=false
@@ -51,6 +52,7 @@ Real output files:
   Private key:               PRIVATE_KEY_LOCATION
   Public key:                PUBLIC_KEY_LOCATION
   Intermediate certificate:  INTERMEDITE_CERT_LOCATION
+  Working directory copies:  ./server.crt and ./server.key
 
 Optional .env keys:
   CERTBOT_EMAIL=admin@example.com
@@ -366,6 +368,24 @@ install_certbot_files() {
     verify_cert_files
 }
 
+install_working_dir_server_files() {
+    local cert_target="$ORIGINAL_WORKING_DIR/server.crt"
+    local key_target="$ORIGINAL_WORKING_DIR/server.key"
+    local cert_source key_source
+
+    cert_source="$(resolve_path "$DOMAIN_CERT_LOCATION")"
+    key_source="$(resolve_path "$PRIVATE_KEY_LOCATION")"
+
+    if [ "$cert_source" != "$cert_target" ]; then
+        install -m 0644 "$cert_source" "$cert_target"
+    fi
+    if [ "$key_source" != "$key_target" ]; then
+        install -m 0600 "$key_source" "$key_target"
+    fi
+    info "Working-directory certificate copy: $cert_target"
+    info "Working-directory private key copy: $key_target"
+}
+
 run_reload_command() {
     if $NO_RELOAD; then
         warn "Skipped webserver reload because --no-reload was set."
@@ -614,6 +634,7 @@ main() {
     before_fp="$(certificate_fingerprint "$DOMAIN_CERT_LOCATION" || true)"
     issue_certificate
     install_certbot_files "$CERTBOT_LIVE_DIR"
+    install_working_dir_server_files
     after_fp="$(certificate_fingerprint "$DOMAIN_CERT_LOCATION" || true)"
 
     if [ -n "${RENEW_CERT_DEPLOY_MARKER:-}" ] && [ -f "$RENEW_CERT_DEPLOY_MARKER" ]; then

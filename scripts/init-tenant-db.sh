@@ -403,10 +403,10 @@ apply_image_sql_file() {
         info "Would stream ${image}:${path} into ${TENANT_DB_NAME}"
         return 0
     fi
-    # Schema can include privileged DDL such as triggers. Import with the
-    # configured MySQL admin user, then validate the tenant user can read it.
+    # Import with the tenant DB user so schema setup uses the same scoped
+    # permissions as the app runtime connection.
     docker run --rm --entrypoint sh "$image" -c "cat $(shell_quote "$path")" \
-        | run_mysql "$TENANT_DB_NAME"
+        | run_tenant_mysql "$TENANT_DB_NAME"
 }
 
 list_image_migrations() {

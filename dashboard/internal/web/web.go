@@ -33,12 +33,13 @@ var staticFS embed.FS
 const sessionName = "dashboard"
 
 type server struct {
-	cfg     config.Config
-	dokku   *dokku.Client
-	logs    *logbuf.Store
-	runner  *scripts.Runner
-	pages   map[string]*template.Template
-	store   *sessions.CookieStore
+	cfg       config.Config
+	dokku     *dokku.Client
+	logs      *logbuf.Store
+	runner    *scripts.Runner
+	pages     map[string]*template.Template
+	store     *sessions.CookieStore
+	snapshots *snapshotCache
 }
 
 // Router builds the HTTP handler.
@@ -70,6 +71,8 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 	}
 
 	s := &server{cfg: cfg, dokku: d, logs: l, runner: runner, pages: pages, store: store}
+	s.snapshots = newSnapshotCache(60*time.Second, s.collectSnapshot)
+	s.snapshots.Start(context.Background())
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -154,13 +157,14 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // ---- Pages ------------------------------------------------------------------
 
 func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	apps := s.collect(r.Context())
-	healthy := s.dokku.DokkuContainerHealthy(r.Context())
+	snap, _ := s.snapshots.Snapshot()
 	data := map[string]any{
-		"Env":     s.cfg.EnvName,
-		"Base":    s.cfg.BaseDomain,
-		"Apps":    apps,
-		"Healthy": healthy,
+		"Env":        s.cfg.EnvName,
+		"Base":       s.cfg.BaseDomain,
+		"Apps":       snap.Apps,
+		"Healthy":    snap.Healthy,
+		"UpdatedAt":  snap.UpdatedAt,
+		"Refreshing": snap.Refreshing,
 	}
 	if r.Header.Get("HX-Request") == "true" {
 		s.renderPartial(w, "apps_table.html", data)
@@ -193,6 +197,7 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	out, err := s.dokku.Action(ctx, name, verb)
+	s.snapshots.RefreshSoon()
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
@@ -237,24 +242,12 @@ func (s *server) handleLogDump(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleAPIApps(w http.ResponseWriter, r *http.Request) {
-	apps := s.collect(r.Context())
+	snap, _ := s.snapshots.Snapshot()
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprint(w, "[")
-	for i, a := range apps {
-		if i > 0 {
-			fmt.Fprint(w, ",")
-		}
-		fmt.Fprintf(w,
-			`{"name":%q,"role":%q,"tenant":%q,"state":%q,"image":%q,"http":%q,"int_port":%q,"host_ports":%q,"procs":%q,"domains":%q}`,
-			a.Name, a.Role, a.Tenant, a.State, a.Image, a.HTTPCode, a.IntPort, a.HostPorts,
-			strings.Join(a.Procs, ","), strings.Join(a.Domains, ","))
-	}
-	fmt.Fprint(w, "]")
+	fmt.Fprint(w, appsJSON(snap.Apps))
 }
 
-// handleEvents pushes a server-sent events stream that emits a JSON snapshot
-// of all apps every 3s. The browser merges deltas into the DOM with smooth
-// transitions, avoiding the table-flicker of full polled re-renders.
+// handleEvents pushes cached snapshots as the background collector refreshes.
 func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -262,28 +255,8 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
 
-	push := func() bool {
-		apps := s.collect(r.Context())
-		healthy := s.dokku.DokkuContainerHealthy(r.Context())
-		var b strings.Builder
-		b.WriteString(`{"healthy":`)
-		if healthy {
-			b.WriteString("true")
-		} else {
-			b.WriteString("false")
-		}
-		b.WriteString(`,"apps":[`)
-		for i, a := range apps {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			fmt.Fprintf(&b,
-				`{"name":%q,"role":%q,"tenant":%q,"state":%q,"image":%q,"http":%q,"int_port":%q,"host_ports":%q,"procs":%q,"domains":%q}`,
-				a.Name, a.Role, a.Tenant, a.State, a.Image, a.HTTPCode, a.IntPort, a.HostPorts,
-				strings.Join(a.Procs, ","), strings.Join(a.Domains, ","))
-		}
-		b.WriteString("]}")
-		if _, err := fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", b.String()); err != nil {
+	push := func(snap appSnapshot) bool {
+		if _, err := fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", snapshotJSON(snap)); err != nil {
 			return false
 		}
 		if flusher != nil {
@@ -292,19 +265,18 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return true
 	}
 
-	if !push() {
+	snap, seq := s.snapshots.Snapshot()
+	if !push(snap) {
 		return
 	}
-	t := time.NewTicker(3 * time.Second)
-	defer t.Stop()
 	for {
-		select {
-		case <-r.Context().Done():
+		next, nextSeq, ok := s.snapshots.Wait(r.Context(), seq)
+		if !ok {
 			return
-		case <-t.C:
-			if !push() {
-				return
-			}
+		}
+		seq = nextSeq
+		if !push(next) {
+			return
 		}
 	}
 }
@@ -326,8 +298,8 @@ func (s *server) handleScriptPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, "script.html", map[string]any{
-		"Env":             s.cfg.EnvName,
-		"Script":          sc,
+		"Env":              s.cfg.EnvName,
+		"Script":           sc,
 		"RunnerConfigured": s.cfg.ScriptsHostPath != "",
 	})
 }
@@ -453,14 +425,21 @@ func displayArgv(sc *scripts.Script, argv []string) []string {
 	return out
 }
 
-func (s *server) collect(ctx context.Context) []dokku.App {
-	names, _ := s.dokku.AppsList(ctx)
+func (s *server) collectSnapshot(ctx context.Context) appSnapshot {
+	names, err := s.dokku.AppsList(ctx)
 	out := make([]dokku.App, 0, len(names))
 	for _, n := range names {
 		out = append(out, s.dokku.AppDetails(ctx, n))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+	snap := appSnapshot{
+		Apps:    out,
+		Healthy: s.dokku.DokkuContainerHealthy(ctx),
+	}
+	if err != nil {
+		snap.Error = err.Error()
+	}
+	return snap
 }
 
 func (s *server) render(w http.ResponseWriter, name string, data any) {

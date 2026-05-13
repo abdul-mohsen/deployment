@@ -254,9 +254,18 @@ grep -q 'TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"' scripts
     && PASS "init-tenant-db refreshes backend image before schema read" \
     || FAIL "init-tenant-db must pull backend image before reading schema"
 grep -q '| run_tenant_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
-    && ! grep -q '| run_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
-    && PASS "init-tenant-db imports schema as tenant DB user" \
-    || FAIL "init-tenant-db must import schema as tenant DB user"
+    && PASS "init-tenant-db imports default schema paths as tenant DB user" \
+    || FAIL "init-tenant-db must import default schema paths as tenant DB user"
+grep -q 'TENANT_ADMIN_MIGRATION_FILES="${TENANT_ADMIN_MIGRATION_FILES:-0005_bill_total_triggers.sql}"' scripts/init-tenant-db.sh \
+    && grep -q 'migration_requires_admin' scripts/init-tenant-db.sh \
+    && grep -q '| run_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
+    && PASS "init-tenant-db applies only configured privileged migrations as MySQL admin" \
+    || FAIL "init-tenant-db must restrict MySQL admin imports to configured privileged migrations"
+if grep -R -n -E 'log_bin_trust_function_creators|GRANT[[:space:]]+SUPER' scripts/init-tenant-db.sh scripts/create-tenant.sh; then
+    FAIL "tenant trigger fix must not enable log_bin_trust_function_creators or grant SUPER"
+else
+    PASS "tenant trigger fix avoids unsafe binlog trust and SUPER grants"
+fi
 grep -q 'validate_tenant_schema' scripts/init-tenant-db.sh \
     && grep -q 'tenant_missing_required_tables' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db verifies required base schema tables" \

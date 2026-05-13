@@ -164,6 +164,17 @@
   }
 
   function applySnapshot(snap) {
+    const apps = snap.apps || [];
+    const initialRefresh = snap.refreshing && !apps.length && (!snap.updated_at || snap.updated_at.startsWith('0001-'));
+    if (initialRefresh) {
+      if (dokkuPill) {
+        dokkuPill.innerHTML = 'Dokku <b class="ml-1">refreshing</b>';
+        dokkuPill.style.color = '#a1a1aa';
+      }
+      pulse?.classList.add('opacity-100');
+      setTimeout(() => pulse?.classList.remove('opacity-100'), 400);
+      return;
+    }
     paletteApps = snap.apps || [];
     let total=0, running=0, degraded=0, down=0;
     const seen = new Set();

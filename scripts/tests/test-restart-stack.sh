@@ -253,9 +253,10 @@ grep -q 'TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"' scripts
     && grep -q 'docker pull "\$image"' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db refreshes backend image before schema read" \
     || FAIL "init-tenant-db must pull backend image before reading schema"
-grep -q 'run_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
-    && PASS "init-tenant-db imports schema as MySQL admin user" \
-    || FAIL "init-tenant-db must import schema as MySQL admin user"
+grep -q '| run_tenant_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
+    && ! grep -q '| run_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
+    && PASS "init-tenant-db imports schema as tenant DB user" \
+    || FAIL "init-tenant-db must import schema as tenant DB user"
 grep -q 'validate_tenant_schema' scripts/init-tenant-db.sh \
     && grep -q 'tenant_missing_required_tables' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db verifies required base schema tables" \

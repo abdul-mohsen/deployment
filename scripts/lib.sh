@@ -9,12 +9,28 @@
 #   source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # =============================================================================
 
-# Detect whether host has mysql client
-if command -v mysql &>/dev/null; then
-    _MYSQL_VIA="host"
-else
-    _MYSQL_VIA="docker"
-fi
+# Detect whether this shell should use a local mysql client or a mysql helper
+# container. MYSQL_CLIENT_MODE=docker is used by the dashboard runner so MySQL
+# grants scoped to Docker bridge clients keep working even if the runner image
+# happens to include a mysql binary.
+case "${MYSQL_CLIENT_MODE:-auto}" in
+    host|docker) _MYSQL_VIA="$MYSQL_CLIENT_MODE" ;;
+    auto|"")
+        if command -v mysql &>/dev/null; then
+            _MYSQL_VIA="host"
+        else
+            _MYSQL_VIA="docker"
+        fi
+        ;;
+    *)
+        echo "[!] Unknown MYSQL_CLIENT_MODE='${MYSQL_CLIENT_MODE}'; using auto detection." >&2
+        if command -v mysql &>/dev/null; then
+            _MYSQL_VIA="host"
+        else
+            _MYSQL_VIA="docker"
+        fi
+        ;;
+esac
 
 # Resolve the MySQL host for the *current* execution context.
 # `host.docker.internal` is a Docker-only DNS name and does NOT resolve on
@@ -22,39 +38,65 @@ fi
 # translate it to a loopback address. Inside a container the original name
 # is preserved (with `--add-host=host.docker.internal:host-gateway`).
 _resolve_mysql_host() {
-    local h="${MYSQL_HOST:-127.0.0.1}"
-    if [ "$_MYSQL_VIA" = "host" ] && [ "$h" = "host.docker.internal" ]; then
-        echo "127.0.0.1"
-    else
-        echo "$h"
-    fi
+    local h="${1:-${MYSQL_HOST:-127.0.0.1}}"
+    case "$h" in
+        localhost|127.0.0.1|::1)
+            if [ "$_MYSQL_VIA" = "docker" ]; then
+                echo "host.docker.internal"
+            else
+                echo "127.0.0.1"
+            fi
+            ;;
+        host.docker.internal)
+            if [ "$_MYSQL_VIA" = "host" ]; then
+                echo "127.0.0.1"
+            else
+                echo "host.docker.internal"
+            fi
+            ;;
+        *) echo "$h" ;;
+    esac
+}
+
+# Hostname to inject into app containers. A container's localhost is the app
+# container itself, so local host aliases must become Docker's host gateway.
+mysql_host_for_container() {
+    local h="${1:-${MYSQL_HOST:-host.docker.internal}}"
+    case "$h" in
+        localhost|127.0.0.1|::1) echo "host.docker.internal" ;;
+        *) echo "$h" ;;
+    esac
 }
 
 # MySQL client (supports stdin/heredocs)
 run_mysql() {
+    local host
+    host="$(_resolve_mysql_host)"
     if [ "$_MYSQL_VIA" = "host" ]; then
         MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-}" \
-            mysql -h "$(_resolve_mysql_host)" -P "${MYSQL_PORT:-3306}" -u "${MYSQL_ROOT_USER:-root}" "$@"
+            mysql --protocol=TCP -h "$host" -P "${MYSQL_PORT:-3306}" -u "${MYSQL_ROOT_USER:-root}" "$@"
     else
         docker run --rm -i \
             --add-host=host.docker.internal:host-gateway \
             -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD:-}" \
             mysql:8.0 \
-            mysql -h "${MYSQL_HOST:-host.docker.internal}" -P "${MYSQL_PORT:-3306}" -u "${MYSQL_ROOT_USER:-root}" "$@"
+            mysql --protocol=TCP -h "$host" -P "${MYSQL_PORT:-3306}" -u "${MYSQL_ROOT_USER:-root}" "$@"
     fi
 }
 
 # mysqldump (stdout flows to host for piping)
 run_mysqldump() {
+    local host
+    host="$(_resolve_mysql_host)"
     if [ "$_MYSQL_VIA" = "host" ]; then
         MYSQL_PWD="${MYSQL_ROOT_PASSWORD:-}" \
-            mysqldump -h "$(_resolve_mysql_host)" -P "${MYSQL_PORT:-3306}" -u "${MYSQL_ROOT_USER:-root}" "$@"
+            mysqldump --protocol=TCP -h "$host" -P "${MYSQL_PORT:-3306}" -u "${MYSQL_ROOT_USER:-root}" "$@"
     else
         docker run --rm \
             --add-host=host.docker.internal:host-gateway \
             -e "MYSQL_PWD=${MYSQL_ROOT_PASSWORD:-}" \
             mysql:8.0 \
-            mysqldump -h "${MYSQL_HOST:-host.docker.internal}" -P "${MYSQL_PORT:-3306}" -u "${MYSQL_ROOT_USER:-root}" "$@"
+            mysqldump --protocol=TCP -h "$host" -P "${MYSQL_PORT:-3306}" -u "${MYSQL_ROOT_USER:-root}" "$@"
     fi
 }
 

@@ -333,11 +333,23 @@ tenant_db_port() {
 
 resolve_mysql_host_for_client() {
     local host="$1"
-    if [ "$_MYSQL_VIA" = "host" ] && [ "$host" = "host.docker.internal" ]; then
-        echo "127.0.0.1"
-    else
-        echo "$host"
-    fi
+    case "$host" in
+        localhost|127.0.0.1|::1)
+            if [ "$_MYSQL_VIA" = "docker" ]; then
+                echo "host.docker.internal"
+            else
+                echo "127.0.0.1"
+            fi
+            ;;
+        host.docker.internal)
+            if [ "$_MYSQL_VIA" = "host" ]; then
+                echo "127.0.0.1"
+            else
+                echo "host.docker.internal"
+            fi
+            ;;
+        *) echo "$host" ;;
+    esac
 }
 
 run_tenant_mysql() {
@@ -358,13 +370,13 @@ run_tenant_mysql() {
     fi
 
     if [ "$_MYSQL_VIA" = "host" ]; then
-        MYSQL_PWD="$password" mysql -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" "$db" "$@"
+        MYSQL_PWD="$password" mysql --protocol=TCP -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" "$db" "$@"
     else
         docker run --rm -i \
             --add-host=host.docker.internal:host-gateway \
             -e "MYSQL_PWD=$password" \
             mysql:8.0 \
-            mysql -h "$host" -P "$port" -u "$user" "$db" "$@"
+            mysql --protocol=TCP -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" "$db" "$@"
     fi
 }
 

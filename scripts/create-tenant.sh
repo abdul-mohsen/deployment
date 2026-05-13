@@ -332,6 +332,7 @@ MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
 # Restrict tenant DB users to the docker bridge subnet (defaults to 172.%).
 # Override with MYSQL_TENANT_HOST in config.env if your bridge is elsewhere.
 MYSQL_TENANT_HOST="${MYSQL_TENANT_HOST:-172.%}"
+MYSQL_APP_HOST="$(mysql_host_for_container "${MYSQL_HOST:-host.docker.internal}")"
 
 TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
 TENANT_DB_USER="usr_${TENANT_NAME//-/_}"
@@ -365,15 +366,15 @@ SQLEOF
         # Inject DB env vars into the backend container.
         # Both naming conventions: modern (DB_HOST/DB_USER/...) and legacy
         # ifritah-go (HOST/DBUSER/PASSWORD/DBNAME — HOST is host:port).
-        DATABASE_URL="mysql://${TENANT_DB_USER}:${TENANT_DB_PASS}@${MYSQL_HOST}:${MYSQL_PORT}/${TENANT_DB_NAME}"
+        DATABASE_URL="mysql://${TENANT_DB_USER}:${TENANT_DB_PASS}@${MYSQL_APP_HOST}:${MYSQL_PORT}/${TENANT_DB_NAME}"
         dokku config:set --no-restart "$BACKEND_APP" \
             DATABASE_URL="$DATABASE_URL" \
-            DB_HOST="$MYSQL_HOST" \
+            DB_HOST="$MYSQL_APP_HOST" \
             DB_PORT="$MYSQL_PORT" \
             DB_NAME="$TENANT_DB_NAME" \
             DB_USER="$TENANT_DB_USER" \
             DB_PASSWORD="$TENANT_DB_PASS" \
-            HOST="${MYSQL_HOST}:${MYSQL_PORT}" \
+            HOST="${MYSQL_APP_HOST}:${MYSQL_PORT}" \
             DBUSER="$TENANT_DB_USER" \
             PASSWORD="$TENANT_DB_PASS" \
             DBNAME="$TENANT_DB_NAME"
@@ -386,7 +387,7 @@ SQLEOF
                 --schema-only \
                 --backend-image "$BACKEND_IMAGE" \
                 --config "$CONFIG_FILE" \
-                --env "DB_HOST=$MYSQL_HOST" \
+                --env "DB_HOST=$MYSQL_APP_HOST" \
                 --env "DB_PORT=$MYSQL_PORT" \
                 --env "DB_USER=$TENANT_DB_USER" \
                 --env "DB_PASSWORD=$TENANT_DB_PASS"
@@ -437,7 +438,7 @@ if $DB_PROVISIONED && ! $GIT_ONLY; then
         if [ -n "$BACKEND_IMAGE" ] && [ -n "$FRONTEND_IMAGE" ]; then
             log "Seeding tenant users..."
             seed_args=("$TENANT_NAME" --seed-only --config "$CONFIG_FILE" \
-                --env "DB_HOST=$MYSQL_HOST" \
+                --env "DB_HOST=$MYSQL_APP_HOST" \
                 --env "DB_PORT=$MYSQL_PORT" \
                 --env "DB_USER=$TENANT_DB_USER" \
                 --env "DB_PASSWORD=$TENANT_DB_PASS")

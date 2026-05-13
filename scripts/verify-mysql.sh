@@ -48,13 +48,24 @@ trap 'rm -f "$ENV_FILE"' EXIT
 chmod 600 "$ENV_FILE"
 printf 'MYSQL_PWD=%s\n' "$MYSQL_ROOT_PASSWORD" > "$ENV_FILE"
 
-log "Testing ${MYSQL_ROOT_USER}@${MYSQL_HOST}:${MYSQL_PORT}..."
+mysql_client_host() {
+    case "${MYSQL_HOST}" in
+        localhost|127.0.0.1|::1) echo "host.docker.internal" ;;
+        *) echo "$MYSQL_HOST" ;;
+    esac
+}
+
+MYSQL_CLIENT_HOST="$(mysql_client_host)"
+log "Testing ${MYSQL_ROOT_USER}@${MYSQL_CLIENT_HOST}:${MYSQL_PORT}..."
+if [ "$MYSQL_CLIENT_HOST" != "$MYSQL_HOST" ]; then
+    info "Configured MYSQL_HOST=${MYSQL_HOST}; using ${MYSQL_CLIENT_HOST} from the Docker verifier container."
+fi
 
 set +e
 docker run --rm --env-file "$ENV_FILE" \
     --add-host=host.docker.internal:host-gateway \
     mysql:8.0 mysql \
-        -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_ROOT_USER" \
+        --protocol=TCP -h "$MYSQL_CLIENT_HOST" -P "$MYSQL_PORT" -u "$MYSQL_ROOT_USER" \
         --connect-timeout=5 --batch --skip-column-names \
         -e "SELECT user(), @@hostname, @@version;"
 RC=$?
@@ -76,7 +87,7 @@ log "Checking grants..."
 docker run --rm --env-file "$ENV_FILE" \
     --add-host=host.docker.internal:host-gateway \
     mysql:8.0 mysql \
-        -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u "$MYSQL_ROOT_USER" \
+        --protocol=TCP -h "$MYSQL_CLIENT_HOST" -P "$MYSQL_PORT" -u "$MYSQL_ROOT_USER" \
         --batch --skip-column-names \
         -e "SHOW GRANTS FOR CURRENT_USER();"
 

@@ -256,22 +256,21 @@ grep -q 'TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"' scripts
 grep -q '| run_tenant_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db imports default schema paths as tenant DB user" \
     || FAIL "init-tenant-db must import default schema paths as tenant DB user"
-grep -q 'TENANT_ADMIN_MIGRATION_FILES="${TENANT_ADMIN_MIGRATION_FILES:-0005_bill_total_triggers.sql}"' scripts/init-tenant-db.sh \
-    && grep -q 'migration_requires_admin' scripts/init-tenant-db.sh \
-    && grep -q '| run_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
-    && PASS "init-tenant-db applies only configured privileged migrations as MySQL admin" \
-    || FAIL "init-tenant-db must restrict MySQL admin imports to configured privileged migrations"
+if grep -q 'TENANT_ADMIN_MIGRATION_FILES\|migration_requires_admin\|apply_image_sql_file_as_admin\|verify_admin_trigger_privilege' scripts/init-tenant-db.sh; then
+    FAIL "init-tenant-db must not special-case privileged trigger migrations"
+else
+    PASS "init-tenant-db applies migrations as tenant DB user only"
+fi
 if grep -R -n -E 'log_bin_trust_function_creators|GRANT[[:space:]]+SUPER' scripts/init-tenant-db.sh scripts/create-tenant.sh; then
     FAIL "tenant trigger fix must not enable log_bin_trust_function_creators or grant SUPER"
 else
     PASS "tenant trigger fix avoids unsafe binlog trust and SUPER grants"
 fi
-grep -q 'SET_USER_ID' install.env.example \
-    && grep -q 'SET_USER_ID' REQUIREMENTS.md \
-    && grep -q 'SET_USER_ID' scripts/verify-mysql.sh \
-    && grep -q 'verify_admin_trigger_privilege' scripts/init-tenant-db.sh \
-    && PASS "MySQL admin SET_USER_ID requirement is documented and verified" \
-    || FAIL "trigger migrations must document and verify SET_USER_ID for MySQL 8 binary logging"
+if grep -R -n 'SET_USER_ID' install.env.example REQUIREMENTS.md scripts/init-tenant-db.sh scripts/verify-mysql.sh; then
+    FAIL "deployment must not require global SET_USER_ID when backend migrations avoid triggers"
+else
+    PASS "deployment no longer requires SET_USER_ID"
+fi
 grep -q 'validate_tenant_schema' scripts/init-tenant-db.sh \
     && grep -q 'tenant_missing_required_tables' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db verifies required base schema tables" \

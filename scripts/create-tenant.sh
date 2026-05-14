@@ -97,7 +97,7 @@ env_value() {
     return 0
 }
 
-ensure_tenant_network() {
+validate_docker_network_name() {
     local network="$1"
     case "$network" in
         *[!A-Za-z0-9_.-]*)
@@ -105,13 +105,25 @@ ensure_tenant_network() {
             exit 1
             ;;
     esac
+}
+
+find_existing_tenant_network() {
+    dokku_shell "docker network ls --format '{{.Name}}' | awk '\$1 == \"web\" || /^tenant-/ { print; exit }'"
+}
+
+ensure_tenant_network() {
+    local network="$1"
+    local create_error=""
+    local fallback_network=""
+    validate_docker_network_name "$network"
+    TENANT_NETWORK="$network"
 
     if dokku_shell "docker network inspect $network >/dev/null 2>&1"; then
         info "Network $network already exists"
         return 0
     fi
 
-    log "Creating per-tenant docker network: $network"
+    log "Creating shared tenant docker network: $network"
     if ! dokku network:create "$network"; then
         warn "dokku network:create did not create $network; verifying Docker network state."
     fi
@@ -122,16 +134,32 @@ ensure_tenant_network() {
     fi
 
     warn "Creating Docker network directly: $network"
-    if ! dokku_shell "docker network create $network >/dev/null"; then
-        error "Failed to create Docker network: $network"
-        exit 1
+    if dokku_shell "docker network create $network >/dev/null"; then
+        if ! dokku_shell "docker network inspect $network >/dev/null 2>&1"; then
+            error "Docker network was not created: $network"
+            exit 1
+        fi
+        info "Network $network is ready"
+        return 0
     fi
 
-    if ! dokku_shell "docker network inspect $network >/dev/null 2>&1"; then
-        error "Docker network was not created: $network"
-        exit 1
+    create_error="$(dokku_shell "docker network create $network" 2>&1 || true)"
+    if [ -n "$create_error" ]; then
+        warn "docker network create failed for $network: $create_error"
     fi
-    info "Network $network is ready"
+
+    fallback_network="$(find_existing_tenant_network 2>/dev/null || true)"
+    if [ -n "$fallback_network" ]; then
+        validate_docker_network_name "$fallback_network"
+        if dokku_shell "docker network inspect $fallback_network >/dev/null 2>&1"; then
+            warn "Docker cannot allocate a new network; reusing existing tenant network: $fallback_network"
+            TENANT_NETWORK="$fallback_network"
+            return 0
+        fi
+    fi
+
+    error "Failed to create Docker network: $network"
+    exit 1
 }
 
 while [[ $# -gt 0 ]]; do
@@ -201,6 +229,7 @@ fi
 BACKEND_APP="${TENANT_NAME}-backend"
 FRONTEND_APP="${TENANT_NAME}-frontend"
 TENANT_DOMAIN="${TENANT_NAME}.${BASE_DOMAIN}"
+TENANT_NETWORK="${TENANT_APP_NETWORK:-web}"
 
 if [ -n "$BACKEND_IMAGE" ] && ! $HAS_DATABASE_URL && ! $HAS_DB_PARTS; then
     if $NO_DATABASE; then
@@ -228,6 +257,7 @@ info "  Tenant:         $TENANT_NAME"
 info "  Domain:         $TENANT_DOMAIN"
 info "  Backend app:    $BACKEND_APP  → internal only (${BACKEND_APP}.web:${BACKEND_PORT})"
 info "  Frontend app:   $FRONTEND_APP → $TENANT_DOMAIN"
+info "  Docker network: $TENANT_NETWORK"
 info "  Backend port:   $BACKEND_PORT"
 info "  Frontend port:  $FRONTEND_PORT"
 info "  Storage:        $STORAGE_ROOT/$TENANT_NAME/{uploads,data}"
@@ -283,12 +313,11 @@ dokku domains:add "$FRONTEND_APP" "$TENANT_DOMAIN"
 # `nginx:validate-config` (the upstream alias doesn't resolve from the
 # dokku-nginx context), which silently blocks reloads for ALL tenants.
 #
-# Instead: attach both apps to a per-tenant docker network so the frontend
+# Instead: attach both apps to a shared tenant docker network so the frontend
 # container can reach the backend by Dokku's auto-alias "<app>.web".
 
 DOKKU_PORT="${DOKKU_PORT:-8080}"
 NGINX_CLIENT_MAX_BODY_SIZE="${NGINX_CLIENT_MAX_BODY_SIZE:-50m}"
-TENANT_NETWORK="tenant-${TENANT_NAME}"
 
 ensure_tenant_network "$TENANT_NETWORK"
 

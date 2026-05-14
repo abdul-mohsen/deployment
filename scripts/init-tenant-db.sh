@@ -109,6 +109,7 @@ TENANT_MIGRATIONS_IMAGE_DIR="${TENANT_MIGRATIONS_IMAGE_DIR:-/app/db/migrations}"
 TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"
 TENANT_IGNORED_SCHEMA_FILES="${TENANT_IGNORED_SCHEMA_FILES:-car_part.sql}"
 TENANT_ADMIN_MIGRATION_FILES="${TENANT_ADMIN_MIGRATION_FILES:-0005_bill_total_triggers.sql}"
+MYSQL_ADMIN_HOST="${MYSQL_ADMIN_HOST:-${MYSQL_TENANT_HOST:-172.%}}"
 
 if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
     error "MYSQL_ROOT_PASSWORD is not configured; cannot initialize tenant DB."
@@ -300,6 +301,27 @@ migration_requires_admin() {
     esac
 }
 
+verify_admin_trigger_privilege() {
+    if $DRY_RUN; then
+        return 0
+    fi
+
+    local log_bin grants
+    log_bin="$(run_mysql -N -B -e "SELECT @@log_bin;" | awk 'NF { print $1; exit }')"
+    if [ "$log_bin" != "1" ]; then
+        return 0
+    fi
+
+    grants="$(run_mysql -N -B -e "SHOW GRANTS FOR CURRENT_USER();")"
+    if grep -Eq '(^|[,[:space:]])(SET_USER_ID|SUPER)([,[:space:]]|$)|ALL PRIVILEGES ON \*\.\*' <<<"$grants"; then
+        return 0
+    fi
+
+    error "MySQL admin user lacks SET_USER_ID on *.*; cannot create triggers while binary logging is enabled."
+    error "Grant only the deployment admin, not tenant DB users: GRANT SET_USER_ID ON *.* TO '${MYSQL_ROOT_USER:-dokku_admin}'@'${MYSQL_ADMIN_HOST}';"
+    exit 1
+}
+
 backend_config_value() {
     local key="$1"
     dokku config:get "$BACKEND_APP" "$key" 2>/dev/null | awk 'NF { print; exit }' || true
@@ -487,6 +509,7 @@ apply_schema() {
         migrations_found=true
         if migration_requires_admin "$migration"; then
             warn "Migration $(basename "$migration") requires MySQL admin for privileged DDL such as CREATE TRIGGER under binary logging."
+            verify_admin_trigger_privilege
             apply_image_sql_file_as_admin "$image" "$migration" "migration $(basename "$migration")"
         else
             apply_image_sql_file "$image" "$migration" "migration $(basename "$migration")"

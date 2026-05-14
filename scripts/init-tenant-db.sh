@@ -42,6 +42,7 @@ Environment overrides:
     TENANT_SCHEMA_IMAGE_PATH     Schema path inside backend image
     TENANT_MIGRATIONS_IMAGE_DIR  Migrations directory inside backend image
     TENANT_IGNORED_SCHEMA_FILES  Comma-separated schema files to skip
+    TENANT_ADMIN_MIGRATION_FILES Comma-separated migration files to run as MySQL admin
 EOF
 }
 
@@ -107,6 +108,7 @@ TENANT_SCHEMA_IMAGE_PATH="${TENANT_SCHEMA_IMAGE_PATH:-/app/db/schema/schema.sql}
 TENANT_MIGRATIONS_IMAGE_DIR="${TENANT_MIGRATIONS_IMAGE_DIR:-/app/db/migrations}"
 TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"
 TENANT_IGNORED_SCHEMA_FILES="${TENANT_IGNORED_SCHEMA_FILES:-car_part.sql}"
+TENANT_ADMIN_MIGRATION_FILES="${TENANT_ADMIN_MIGRATION_FILES:-0005_bill_total_triggers.sql}"
 
 if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
     error "MYSQL_ROOT_PASSWORD is not configured; cannot initialize tenant DB."
@@ -289,6 +291,15 @@ schema_file_is_ignored() {
     esac
 }
 
+migration_requires_admin() {
+    local base
+    base="$(basename "$1")"
+    case ",$TENANT_ADMIN_MIGRATION_FILES," in
+        *,"$base",*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 backend_config_value() {
     local key="$1"
     dokku config:get "$BACKEND_APP" "$key" 2>/dev/null | awk 'NF { print; exit }' || true
@@ -409,6 +420,17 @@ apply_image_sql_file() {
         | run_tenant_mysql "$TENANT_DB_NAME"
 }
 
+apply_image_sql_file_as_admin() {
+    local image="$1" path="$2" label="$3"
+    log "Applying ${label} with MySQL admin: ${image}:${path}"
+    if $DRY_RUN; then
+        info "Would stream ${image}:${path} into ${TENANT_DB_NAME} with MySQL admin"
+        return 0
+    fi
+    docker run --rm --entrypoint sh "$image" -c "cat $(shell_quote "$path")" \
+        | run_mysql "$TENANT_DB_NAME"
+}
+
 list_image_migrations() {
     local image="$1" dir="$2"
     docker run --rm --entrypoint sh "$image" -c "find $(shell_quote "$dir") -maxdepth 1 -type f -name '*.sql' | sort"
@@ -463,7 +485,12 @@ apply_schema() {
     while IFS= read -r migration; do
         [ -n "$migration" ] || continue
         migrations_found=true
-        apply_image_sql_file "$image" "$migration" "migration $(basename "$migration")"
+        if migration_requires_admin "$migration"; then
+            warn "Migration $(basename "$migration") requires MySQL admin for privileged DDL such as CREATE TRIGGER under binary logging."
+            apply_image_sql_file_as_admin "$image" "$migration" "migration $(basename "$migration")"
+        else
+            apply_image_sql_file "$image" "$migration" "migration $(basename "$migration")"
+        fi
     done < <(list_image_migrations "$image" "$migrations_dir")
 
     if ! $migrations_found; then

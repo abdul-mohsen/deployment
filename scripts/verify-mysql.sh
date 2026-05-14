@@ -36,6 +36,7 @@ done
 : "${MYSQL_ROOT_USER:=dokku_admin}"
 : "${MYSQL_ROOT_PASSWORD:=}"
 : "${MYSQL_MASTER_DB:=zatca_master}"
+: "${MYSQL_ADMIN_HOST:=${MYSQL_TENANT_HOST:-172.%}}"
 
 if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
     error "MYSQL_ROOT_PASSWORD not set (looked in install.env and config.env)"
@@ -84,11 +85,33 @@ log "Admin connection OK ✓"
 
 # Verify expected privileges exist
 log "Checking grants..."
-docker run --rm --env-file "$ENV_FILE" \
+GRANTS="$(docker run --rm --env-file "$ENV_FILE" \
     --add-host=host.docker.internal:host-gateway \
     mysql:8.0 mysql \
         --protocol=TCP -h "$MYSQL_CLIENT_HOST" -P "$MYSQL_PORT" -u "$MYSQL_ROOT_USER" \
         --batch --skip-column-names \
-        -e "SHOW GRANTS FOR CURRENT_USER();"
+        -e "SHOW GRANTS FOR CURRENT_USER();")"
+printf '%s\n' "$GRANTS"
+
+BINLOG_ENABLED="$(docker run --rm --env-file "$ENV_FILE" \
+    --add-host=host.docker.internal:host-gateway \
+    mysql:8.0 mysql \
+        --protocol=TCP -h "$MYSQL_CLIENT_HOST" -P "$MYSQL_PORT" -u "$MYSQL_ROOT_USER" \
+        --batch --skip-column-names \
+        -e "SELECT @@log_bin;")"
+info "Binary logging enabled: ${BINLOG_ENABLED:-unknown}"
+
+if [ "$BINLOG_ENABLED" = "1" ] && ! grep -Eq '(^|[,[:space:]])(SET_USER_ID|SUPER)([,[:space:]]|$)|ALL PRIVILEGES ON \*\.\*' <<<"$GRANTS"; then
+    error "Missing SET_USER_ID on *.* for ${MYSQL_ROOT_USER}."
+    error "MySQL 8 with binary logging requires SET_USER_ID for the deployment admin to create tenant triggers."
+    error "Run as MySQL root: GRANT SET_USER_ID ON *.* TO '${MYSQL_ROOT_USER}'@'${MYSQL_ADMIN_HOST}';"
+    exit 1
+fi
+
+if [ "$BINLOG_ENABLED" = "1" ]; then
+    log "Trigger creation privilege OK ✓"
+else
+    warn "Binary logging is disabled; SET_USER_ID is not required for trigger creation on this MySQL server."
+fi
 
 log "All checks passed."

@@ -11,7 +11,7 @@ PASS() { echo "PASS: $*"; }
 FAIL() { echo "FAIL: $*"; exit 1; }
 
 echo "=== 1. bash -n on changed scripts ==="
-for f in scripts/lib.sh scripts/setup-dokku.sh scripts/setup.sh scripts/restart-stack.sh scripts/create-tenant.sh scripts/init-tenant-db.sh scripts/list-tenants.sh scripts/tail-logs.sh scripts/update-tenant.sh scripts/rollback-tenant.sh scripts/post-merge-cleanup.sh; do
+for f in scripts/lib.sh scripts/setup-dokku.sh scripts/setup.sh scripts/restart-stack.sh scripts/create-tenant.sh scripts/init-tenant-db.sh scripts/verify-mysql.sh scripts/list-tenants.sh scripts/tail-logs.sh scripts/update-tenant.sh scripts/rollback-tenant.sh scripts/post-merge-cleanup.sh; do
     bash -n "$f" && PASS "syntax $f" || FAIL "syntax $f"
 done
 
@@ -266,6 +266,12 @@ if grep -R -n -E 'log_bin_trust_function_creators|GRANT[[:space:]]+SUPER' script
 else
     PASS "tenant trigger fix avoids unsafe binlog trust and SUPER grants"
 fi
+grep -q 'SET_USER_ID' install.env.example \
+    && grep -q 'SET_USER_ID' REQUIREMENTS.md \
+    && grep -q 'SET_USER_ID' scripts/verify-mysql.sh \
+    && grep -q 'verify_admin_trigger_privilege' scripts/init-tenant-db.sh \
+    && PASS "MySQL admin SET_USER_ID requirement is documented and verified" \
+    || FAIL "trigger migrations must document and verify SET_USER_ID for MySQL 8 binary logging"
 grep -q 'validate_tenant_schema' scripts/init-tenant-db.sh \
     && grep -q 'tenant_missing_required_tables' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db verifies required base schema tables" \

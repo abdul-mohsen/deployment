@@ -90,12 +90,17 @@ Required for the dokku-side admin user to create per-tenant DBs/users:
 GRANT ALL PRIVILEGES ON `tenant_%`.* TO 'dokku_admin'@'172.%' WITH GRANT OPTION;
 GRANT ALL PRIVILEGES ON `zatca_master`.* TO 'dokku_admin'@'172.%';
 GRANT CREATE USER ON *.* TO 'dokku_admin'@'172.%';
+GRANT SET_USER_ID ON *.* TO 'dokku_admin'@'172.%';
 ```
 
 Rules learned the hard way:
 - Use **backticks** for `tenant_%`, never single quotes.
 - `.*` is mandatory in `GRANT \`tenant_%\`.*` — without it MySQL treats it as a
   table-level grant in the current database.
+- `SET_USER_ID` is required on MySQL 8 when binary logging is enabled and tenant
+  migrations create triggers. This keeps trigger creation on the deployment
+  admin account without granting `SUPER` or enabling
+  `log_bin_trust_function_creators` globally.
 - No `FLUSH PRIVILEGES` — needs `RELOAD` priv and isn't required in MySQL 8 for
   `CREATE USER` / `GRANT`.
 - `CREATE USER IF NOT EXISTS` does **not** update an existing password — always

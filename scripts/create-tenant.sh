@@ -97,6 +97,43 @@ env_value() {
     return 0
 }
 
+ensure_tenant_network() {
+    local network="$1"
+    case "$network" in
+        *[!A-Za-z0-9_.-]*)
+            error "Invalid Docker network name: $network"
+            exit 1
+            ;;
+    esac
+
+    if dokku_shell "docker network inspect $network >/dev/null 2>&1"; then
+        info "Network $network already exists"
+        return 0
+    fi
+
+    log "Creating per-tenant docker network: $network"
+    if ! dokku network:create "$network"; then
+        warn "dokku network:create did not create $network; verifying Docker network state."
+    fi
+
+    if dokku_shell "docker network inspect $network >/dev/null 2>&1"; then
+        info "Network $network is ready"
+        return 0
+    fi
+
+    warn "Creating Docker network directly: $network"
+    if ! dokku_shell "docker network create $network >/dev/null"; then
+        error "Failed to create Docker network: $network"
+        exit 1
+    fi
+
+    if ! dokku_shell "docker network inspect $network >/dev/null 2>&1"; then
+        error "Docker network was not created: $network"
+        exit 1
+    fi
+    info "Network $network is ready"
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --backend-image)  BACKEND_IMAGE="$2"; shift 2 ;;
@@ -253,8 +290,7 @@ DOKKU_PORT="${DOKKU_PORT:-8080}"
 NGINX_CLIENT_MAX_BODY_SIZE="${NGINX_CLIENT_MAX_BODY_SIZE:-50m}"
 TENANT_NETWORK="tenant-${TENANT_NAME}"
 
-log "Creating per-tenant docker network: $TENANT_NETWORK"
-dokku network:create "$TENANT_NETWORK" 2>/dev/null || info "Network $TENANT_NETWORK already exists"
+ensure_tenant_network "$TENANT_NETWORK"
 
 log "Attaching apps to $TENANT_NETWORK"
 # Dokku 0.30+ rejects setting attach-post-create AND attach-post-deploy for the

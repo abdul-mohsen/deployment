@@ -85,6 +85,12 @@ grep -q 'domains:clear "$be"' scripts/post-merge-cleanup.sh \
     && grep -q 'proxy:disable "$be"' scripts/post-merge-cleanup.sh \
     && PASS "cleanup removes existing backend public proxy" \
     || FAIL "cleanup must remove existing backend public proxy"
+grep -q 'ensure_tenant_network "$TENANT_NETWORK"' scripts/create-tenant.sh \
+    && grep -q 'docker network inspect \$network' scripts/create-tenant.sh \
+    && grep -q 'docker network create \$network' scripts/create-tenant.sh \
+    && ! grep -q 'network:create "\$TENANT_NETWORK" 2>/dev/null || info "Network \$TENANT_NETWORK already exists"' scripts/create-tenant.sh \
+    && PASS "create-tenant verifies per-tenant Docker network exists" \
+    || FAIL "create-tenant must verify/create the Docker network instead of hiding network:create failures"
 
 echo
 echo "=== 6. restart-stack.sh --help prints usage ==="

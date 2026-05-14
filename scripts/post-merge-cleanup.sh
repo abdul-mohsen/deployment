@@ -7,8 +7,8 @@
 #      /home/dokku/<frontend>/nginx.conf.d/api-proxy.conf inside the dokku
 #      container. These reference <backend>-web:<port> which doesn't resolve
 #      from Dokku's nginx context and break `nginx:validate-config`.
-#   2. For every tenant pair (<name>-backend / <name>-frontend), creates
-#      tenant-<name> docker network (if missing) and attaches both apps.
+#   2. For every tenant pair (<name>-backend / <name>-frontend), attaches
+#      both apps to one shared tenant docker network.
 #   3. Removes the public domain/proxy from backend apps. Only frontend apps
 #      should own <tenant>.$BASE_DOMAIN; otherwise Dokku generates duplicate
 #      nginx server_name blocks.
@@ -21,7 +21,8 @@
 #   sudo bash scripts/post-merge-cleanup.sh qa-7k4m foo     # specific tenants
 #
 # Env overrides: DOKKU_CONTAINER (default: dokku), BACKEND_PORT (8090),
-#                FRONTEND_PORT (8000), BASEURL (/api/v2), BASE_DOMAIN, DRY_RUN=1
+#                TENANT_APP_NETWORK (web), FRONTEND_PORT (8000),
+#                BASEURL (/api/v2), BASE_DOMAIN, DRY_RUN=1
 # =============================================================================
 
 set -euo pipefail
@@ -30,6 +31,7 @@ DOKKU_CONTAINER="${DOKKU_CONTAINER:-dokku}"
 BACKEND_PORT="${BACKEND_PORT:-8090}"
 FRONTEND_PORT="${FRONTEND_PORT:-8000}"
 BASEURL="${BASEURL:-/api/v2}"
+TENANT_NETWORK="${TENANT_APP_NETWORK:-web}"
 DRY_RUN="${DRY_RUN:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,6 +68,71 @@ dk() {
 
 dk_dokku() { dk dokku "$@"; }
 
+validate_docker_network_name() {
+    local network="$1"
+    case "$network" in
+        *[!A-Za-z0-9_.-]*)
+            error "Invalid Docker network name: $network"
+            exit 1
+            ;;
+    esac
+}
+
+find_existing_tenant_network() {
+    dk bash -lc "docker network ls --format '{{.Name}}' | awk '\$1 == \"web\" || /^tenant-/ { print; exit }'"
+}
+
+ensure_tenant_network() {
+    local network="$1"
+    local create_error=""
+    local fallback_network=""
+    validate_docker_network_name "$network"
+    TENANT_NETWORK="$network"
+
+    if dk bash -lc "docker network inspect $network >/dev/null 2>&1"; then
+        info "Network $network already exists"
+        return 0
+    fi
+
+    log "Creating shared tenant docker network: $network"
+    if ! dk_dokku network:create "$network"; then
+        warn "dokku network:create did not create $network; verifying Docker network state."
+    fi
+
+    if dk bash -lc "docker network inspect $network >/dev/null 2>&1"; then
+        info "Network $network is ready"
+        return 0
+    fi
+
+    warn "Creating Docker network directly: $network"
+    if dk bash -lc "docker network create $network >/dev/null"; then
+        if ! dk bash -lc "docker network inspect $network >/dev/null 2>&1"; then
+            error "Docker network was not created: $network"
+            exit 1
+        fi
+        info "Network $network is ready"
+        return 0
+    fi
+
+    create_error="$(dk bash -lc "docker network create $network" 2>&1 || true)"
+    if [ -n "$create_error" ]; then
+        warn "docker network create failed for $network: $create_error"
+    fi
+
+    fallback_network="$(find_existing_tenant_network 2>/dev/null || true)"
+    if [ -n "$fallback_network" ]; then
+        validate_docker_network_name "$fallback_network"
+        if dk bash -lc "docker network inspect $fallback_network >/dev/null 2>&1"; then
+            warn "Docker cannot allocate a new network; reusing existing tenant network: $fallback_network"
+            TENANT_NETWORK="$fallback_network"
+            return 0
+        fi
+    fi
+
+    error "Failed to create Docker network: $network"
+    exit 1
+}
+
 # Tenant list: from CLI args, else derive from `dokku apps:list`
 declare -a TENANTS=()
 if [ $# -gt 0 ]; then
@@ -85,6 +152,7 @@ if [ ${#TENANTS[@]} -eq 0 ]; then
 fi
 
 log "Tenants to process: ${TENANTS[*]}"
+ensure_tenant_network "$TENANT_NETWORK"
 
 # ---------------------------------------------------------------------------
 # 1. Remove broken /api nginx snippets across every frontend app
@@ -104,7 +172,7 @@ done
 # ---------------------------------------------------------------------------
 for t in "${TENANTS[@]}"; do
     be="${t}-backend"; fe="${t}-frontend"
-    net="tenant-${t}"
+    net="$TENANT_NETWORK"
     domain="${t}.${BASE_DOMAIN}"
 
     log "=== ${t} ==="
@@ -120,7 +188,6 @@ for t in "${TENANTS[@]}"; do
     fi
 
     info "  network: $net"
-    dk_dokku network:create "$net" >/dev/null 2>&1 || true
     # Use only attach-post-create: Dokku rejects setting both attach-post-create
     # and attach-post-deploy to the same network on the same app.
     dk_dokku network:set "$be" attach-post-create "$net" >/dev/null || true

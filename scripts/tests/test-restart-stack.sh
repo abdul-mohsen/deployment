@@ -88,9 +88,39 @@ grep -q 'domains:clear "$be"' scripts/post-merge-cleanup.sh \
 grep -q 'ensure_tenant_network "$TENANT_NETWORK"' scripts/create-tenant.sh \
     && grep -q 'docker network inspect \$network' scripts/create-tenant.sh \
     && grep -q 'docker network create \$network' scripts/create-tenant.sh \
+    && grep -q 'TENANT_NETWORK="${TENANT_APP_NETWORK:-web}"' scripts/create-tenant.sh \
+    && grep -q 'find_existing_tenant_network' scripts/create-tenant.sh \
+    && ! grep -q 'TENANT_NETWORK="tenant-${TENANT_NAME}"' scripts/create-tenant.sh \
     && ! grep -q 'network:create "\$TENANT_NETWORK" 2>/dev/null || info "Network \$TENANT_NETWORK already exists"' scripts/create-tenant.sh \
-    && PASS "create-tenant verifies per-tenant Docker network exists" \
-    || FAIL "create-tenant must verify/create the Docker network instead of hiding network:create failures"
+    && PASS "create-tenant uses a reusable tenant Docker network" \
+    || FAIL "create-tenant must use one reusable Docker network and handle pool exhaustion"
+OUT="$({
+    awk '/^validate_docker_network_name\(\)/ {printing=1} /^while \[\[/ {exit} printing {print}' scripts/create-tenant.sh
+    cat <<'STUB'
+log() { echo "[+] $*"; }
+warn() { echo "[!] $*"; }
+info() { echo "[i] $*"; }
+error() { echo "[x] $*" >&2; }
+dokku() { [ "$1" = "network:create" ] && return 1; return 1; }
+dokku_shell() {
+    case "$*" in
+        *"docker network inspect tenant-smoke"*) return 1 ;;
+        *"docker network create tenant-smoke"*) echo "Error response from daemon: all predefined address pools have been fully subnetted" >&2; return 1 ;;
+        *"docker network ls"*) echo "web"; return 0 ;;
+        *"docker network inspect web"*) return 0 ;;
+        *) echo "unexpected dokku_shell: $*" >&2; return 1 ;;
+    esac
+}
+TENANT_NETWORK=tenant-smoke
+ensure_tenant_network "$TENANT_NETWORK"
+echo "TENANT_NETWORK=$TENANT_NETWORK"
+STUB
+} | bash 2>&1)"
+echo "$OUT" | grep -q 'all predefined address pools have been fully subnetted' \
+    && echo "$OUT" | grep -q 'TENANT_NETWORK=web' \
+    && PASS "create-tenant reuses an existing tenant network when Docker pools are exhausted" \
+    || { echo "$OUT"; FAIL "create-tenant must locally reproduce and handle Docker address-pool exhaustion"; }
+
 
 echo
 echo "=== 6. restart-stack.sh --help prints usage ==="

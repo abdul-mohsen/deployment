@@ -140,6 +140,21 @@ func Catalog() []Script {
 			},
 		},
 		{
+			Name:    "cleanup-broken-tenant.sh",
+			Title:   "Cleanup broken tenant",
+			Summary: "Repair Dokku storage registry permissions and force-remove a half-created tenant.",
+			Danger:  true,
+			Fields: []Field{
+				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true, Placeholder: "test5"},
+				{Name: "delete_data", Label: "Delete data", Flag: "--delete-data", Type: "checkbox", Boolean: true,
+					Help: "Deletes persistent tenant files under STORAGE_ROOT/<tenant>."},
+				{Name: "force", Label: "Force", Flag: "--force", Type: "checkbox", Boolean: true,
+					Help: "Required for unattended dashboard cleanup."},
+				{Name: "skip_storage_repair", Label: "Skip storage registry repair", Flag: "--skip-storage-repair", Type: "checkbox", Boolean: true},
+				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
+			},
+		},
+		{
 			Name: "deploy-all.sh", Title: "Deploy image",
 			Summary: "Roll an image to all tenants (canary-first), or a single tenant.",
 			Danger:  true,

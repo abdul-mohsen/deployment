@@ -107,6 +107,42 @@ validate_docker_network_name() {
     esac
 }
 
+ensure_tenant_image_available() {
+    local image="$1"
+    local policy="${TENANT_IMAGE_PULL_POLICY:-${IMAGE_PULL_POLICY:-always}}"
+    case "$policy" in
+        always)
+            log "Pulling image: $image"
+            docker pull "$image" >/dev/null
+            ;;
+        missing)
+            if docker image inspect "$image" >/dev/null 2>&1; then
+                return 0
+            fi
+            log "Pulling image: $image"
+            docker pull "$image" >/dev/null
+            ;;
+        never)
+            if ! docker image inspect "$image" >/dev/null 2>&1; then
+                error "Image is not present locally and TENANT_IMAGE_PULL_POLICY=never: $image"
+                exit 1
+            fi
+            ;;
+        *)
+            error "TENANT_IMAGE_PULL_POLICY must be 'always', 'missing', or 'never' (got: $policy)"
+            exit 1
+            ;;
+    esac
+}
+
+image_tag() {
+    local image="$1"
+    local tail="${image##*/}"
+    if [[ "$tail" == *:* ]]; then
+        printf '%s' "${tail##*:}"
+    fi
+}
+
 find_existing_tenant_network() {
     dokku_shell "docker network ls --format '{{.Name}}' | awk '\$1 == \"web\" || /^tenant-/ { print; exit }'"
 }
@@ -478,14 +514,22 @@ dokku_shell "mkdir -p /home/dokku/${FRONTEND_APP} && echo '/' > /home/dokku/${FR
 if ! $GIT_ONLY; then
     if [ -n "$BACKEND_IMAGE" ]; then
         log "Deploying backend from image: $BACKEND_IMAGE"
-        dokku git:from-image "$BACKEND_APP" "$BACKEND_IMAGE"
+        ensure_tenant_image_available "$BACKEND_IMAGE"
+        dokku config:set --no-restart "$BACKEND_APP" \
+            APP_IMAGE_VERSION="$(image_tag "$BACKEND_IMAGE")" \
+            APP_IMAGE_REF="$BACKEND_IMAGE"
+        dokku_git_from_image "$BACKEND_APP" "$BACKEND_IMAGE"
     else
         info "No backend image — deploy later with: git push dokku@${BASE_DOMAIN}:${BACKEND_APP} main"
     fi
 
     if [ -n "$FRONTEND_IMAGE" ]; then
         log "Deploying frontend from image: $FRONTEND_IMAGE"
-        dokku git:from-image "$FRONTEND_APP" "$FRONTEND_IMAGE"
+        ensure_tenant_image_available "$FRONTEND_IMAGE"
+        dokku config:set --no-restart "$FRONTEND_APP" \
+            APP_IMAGE_VERSION="$(image_tag "$FRONTEND_IMAGE")" \
+            APP_IMAGE_REF="$FRONTEND_IMAGE"
+        dokku_git_from_image "$FRONTEND_APP" "$FRONTEND_IMAGE"
     else
         info "No frontend image — deploy later with: git push dokku@${BASE_DOMAIN}:${FRONTEND_APP} main"
     fi

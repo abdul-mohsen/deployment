@@ -4,6 +4,8 @@ Argo-CD-style web UI for the Dokku tenants on this server.
 
 - Live status grid (SSE; updates every 3s with smooth state-change animations)
 - Per-app actions: start / stop / restart / rebuild
+- Tenant-first actions: select a tenant, then update version / restart / stop / delete
+- Compatible version picker: one tag maps to backend and frontend images
 - Live log streaming (SSE) + ring-buffer log aggregation + downloadable dump
 - Form-driven scripts (`/scripts/<name>`) with streamed output
 - Command palette (Ctrl/Cmd+K)
@@ -30,6 +32,29 @@ runtime besides the docker socket.
 | `SESSION_KEY`         | no       | random per boot |
 | `LOG_BUFFER_LINES`    | no       | `2000`          |
 | `COOKIE_SECURE`       | no       | `false`         |
+| `DASHBOARD_SNAPSHOT_WORKERS` | no | `8`             |
+| `DASHBOARD_ENV_FILE`  | no       | —               |
+
+Version picker values come from the deployment env (`config.env` / `install.env`):
+
+```sh
+BACKEND_IMAGE=ssdawweq/ifritah-api
+FRONTEND_IMAGE=ssdawweq/ifritah-web
+APP_IMAGE_VERSIONS=dev,latest,stable
+APP_IMAGE_VERSION_DEFAULT=dev
+```
+
+Publishing `BACKEND_IMAGE:v1` and `FRONTEND_IMAGE:v1` makes `v1` selectable as a compatible pair. Re-pushing only the frontend with the same tag is supported; update deploys pull before applying the image.
+
+## Local perf check
+
+With a local Dokku container and at least 10 tenant pairs:
+
+```sh
+DASHBOARD_LOCAL_DOKKU_PERF=1 go test ./internal/web -run TestLocalDokkuSnapshotTenTenants -count=1 -v
+```
+
+The dashboard grid uses cached snapshots and a bounded parallel summary collector. Increase `DASHBOARD_SNAPSHOT_WORKERS` only if the host can handle more concurrent Docker inspect work.
 
 Generate a password hash:
 
@@ -37,6 +62,8 @@ Generate a password hash:
 go run ./cmd/hashpw 'your-password'
 # -> $2a$10$....
 ```
+
+Set `DASHBOARD_ENV_FILE` to a writable mounted copy of `dashboard.env` to enable password changes from the UI. The production compose file mounts `./dashboard.env` at `/app/dashboard.env` and writes the new `ADMIN_PASSWORD_HASH` there.
 
 Generate a session key (so sessions survive restarts):
 
@@ -90,5 +117,7 @@ dokku letsencrypt:enable admin-prod
   dashboard like sudo: strong password, short-lived sessions, TLS in front.
 - `SESSION_KEY` controls cookie integrity — set it to a stable 32-byte hex
   value or every restart logs everyone out.
+- Password changes rewrite `ADMIN_PASSWORD_HASH` in `DASHBOARD_ENV_FILE`; keep
+  that file writable only by the dashboard container and server admins.
 - The container does not need its own `dokku` user; commands execute inside
   the dokku container via `docker exec`.

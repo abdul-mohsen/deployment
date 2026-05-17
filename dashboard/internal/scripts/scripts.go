@@ -37,6 +37,129 @@ type Field struct {
 	Default     string   // default value pre-filled into the input on render (and used as the hidden value)
 }
 
+// ImageVersion describes one compatible backend/frontend image pair. The tag is
+// shared by both images so operators choose a version instead of pasting image
+// names into forms.
+type ImageVersion struct {
+	Tag           string
+	BackendImage  string
+	FrontendImage string
+}
+
+func VersionCatalog() []ImageVersion {
+	backendRepo := imageRepo("BACKEND_IMAGE", "ifritah-api", "ssdawweq/ifritah-api")
+	frontendRepo := imageRepo("FRONTEND_IMAGE", "ifritah-web", "ssdawweq/ifritah-web")
+	versions := versionOptions()
+	out := make([]ImageVersion, 0, len(versions))
+	for _, tag := range versions {
+		out = append(out, ImageVersion{
+			Tag:           tag,
+			BackendImage:  backendRepo + ":" + tag,
+			FrontendImage: frontendRepo + ":" + tag,
+		})
+	}
+	return out
+}
+
+func VersionOptions() []string {
+	versions := versionOptions()
+	out := make([]string, len(versions))
+	copy(out, versions)
+	return out
+}
+
+func DefaultImageVersion() string {
+	versions := versionOptions()
+	if v := strings.TrimSpace(os.Getenv("APP_IMAGE_VERSION_DEFAULT")); v != "" {
+		for _, candidate := range versions {
+			if candidate == v {
+				return v
+			}
+		}
+	}
+	if len(versions) == 0 {
+		return "dev"
+	}
+	return versions[0]
+}
+
+func ResolveImageVersion(tag string) (ImageVersion, bool) {
+	tag = strings.TrimSpace(tag)
+	for _, v := range VersionCatalog() {
+		if v.Tag == tag {
+			return v, true
+		}
+	}
+	return ImageVersion{}, false
+}
+
+func imageVersionField(required bool) Field {
+	f := Field{
+		Name:     "image_version",
+		Label:    "Version",
+		Type:     "select",
+		Required: required,
+		Options:  VersionOptions(),
+		Help:     "Selects a compatible backend/frontend image pair that uses the same tag.",
+	}
+	if required {
+		f.Default = DefaultImageVersion()
+	}
+	return f
+}
+
+func imageRepo(envKey, suffix, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(envKey)); v != "" {
+		return trimImageTag(v)
+	}
+	if user := strings.TrimSpace(os.Getenv("DOCKERHUB_USERNAME")); user != "" {
+		return user + "/" + suffix
+	}
+	return fallback
+}
+
+func trimImageTag(image string) string {
+	lastSlash := strings.LastIndex(image, "/")
+	lastColon := strings.LastIndex(image, ":")
+	if lastColon > lastSlash {
+		return image[:lastColon]
+	}
+	return image
+}
+
+func versionOptions() []string {
+	if raw := strings.TrimSpace(os.Getenv("APP_IMAGE_VERSIONS")); raw != "" {
+		return splitUnique(raw)
+	}
+	return uniqueNonEmpty([]string{
+		strings.TrimSpace(os.Getenv("APP_IMAGE_VERSION_DEFAULT")),
+		strings.TrimSpace(os.Getenv("DEV_TAG")),
+		strings.TrimSpace(os.Getenv("PULL_TAG")),
+		"dev",
+		"latest",
+		"stable",
+	})
+}
+
+func splitUnique(raw string) []string {
+	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == '\n' || r == ' ' || r == '\t' })
+	return uniqueNonEmpty(parts)
+}
+
+func uniqueNonEmpty(in []string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, v := range in {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
+}
+
 // Script is a registered orchestration script the UI can invoke.
 type Script struct {
 	Name    string // script file name in scripts/ (e.g. "create-tenant.sh")
@@ -89,13 +212,9 @@ func Catalog() []Script {
 					Placeholder: "Strong password for the manager user",
 					Help:        "Optional. Sent as MANAGER_PASSWORD to the backend; required if a Manager username is provided."},
 				{Name: "company_name", Label: "Company name", Flag: "--env", Type: "text", Required: true, Placeholder: "ACME Corp"},
-				{Name: "backend_image", Label: "Backend image", Flag: "--backend-image", Type: "text", Placeholder: "ssdawweq/ifritah-api:dev",
-					Default: "ssdawweq/ifritah-api:dev",
-					Suggest: []string{"ssdawweq/ifritah-api:dev", "ssdawweq/ifritah-api:latest", "ssdawweq/ifritah-api:stable"},
-					Help:    "Requires database provisioning to be configured in config.env, or explicit DATABASE_URL/DB_* env vars below."},
-				{Name: "frontend_image", Label: "Frontend image", Flag: "--frontend-image", Type: "text", Placeholder: "ssdawweq/ifritah-web:dev",
-					Default: "ssdawweq/ifritah-web:dev",
-					Suggest: []string{"ssdawweq/ifritah-web:dev", "ssdawweq/ifritah-web:latest", "ssdawweq/ifritah-web:stable"}},
+				imageVersionField(true),
+				{Name: "backend_image", Flag: "--backend-image", Type: "hidden"},
+				{Name: "frontend_image", Flag: "--frontend-image", Type: "hidden"},
 				// Ports are intentionally hidden — operators should not change container ports
 				// from the UI; defaults match the upstream images.
 				{Name: "backend_port", Flag: "--backend-port", Type: "hidden", Default: "8090"},
@@ -114,9 +233,8 @@ func Catalog() []Script {
 			Danger:  true,
 			Fields: []Field{
 				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true, Placeholder: "acme"},
-				{Name: "backend_image", Label: "Backend image", Flag: "--backend-image", Type: "text", Placeholder: "ssdawweq/ifritah-api:dev",
-					Default: "ssdawweq/ifritah-api:dev",
-					Suggest: []string{"ssdawweq/ifritah-api:dev", "ssdawweq/ifritah-api:latest", "ssdawweq/ifritah-api:stable"}},
+				imageVersionField(true),
+				{Name: "backend_image", Flag: "--backend-image", Type: "hidden"},
 				{Name: "admin_user", Label: "Admin username", Flag: "--env", Type: "text", Placeholder: "admin",
 					Default: "admin", Suggest: []string{"admin"}},
 				{Name: "admin_password", Label: "Admin password", Flag: "--env", Type: "password", Secret: true,
@@ -155,11 +273,12 @@ func Catalog() []Script {
 			},
 		},
 		{
-			Name: "deploy-all.sh", Title: "Deploy image",
-			Summary: "Roll an image to all tenants (canary-first), or a single tenant.",
+			Name: "deploy-all.sh", Title: "Deploy version image",
+			Summary: "Roll one versioned backend or frontend image to all tenants (canary-first), or a single tenant.",
 			Danger:  true,
 			Fields: []Field{
-				{Name: "_pos_image", Label: "Image", Type: "text", Required: true, Placeholder: "ssdawweq/ifritah-api:dev"},
+				imageVersionField(true),
+				{Name: "_pos_image", Type: "hidden"},
 				{Name: "type", Label: "App type", Flag: "--type", Type: "select", Options: []string{"backend", "frontend"}},
 				{Name: "tenant", Label: "Single tenant", Flag: "--tenant", Type: "text"},
 				{Name: "skip_canary", Label: "Skip canary", Flag: "--skip-canary", Type: "checkbox", Boolean: true},
@@ -171,7 +290,8 @@ func Catalog() []Script {
 			Fields: []Field{
 				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true},
 				{Name: "type", Label: "App type", Flag: "--type", Type: "select", Options: []string{"backend", "frontend"}},
-				{Name: "to", Label: "Image to roll back to", Flag: "--to", Type: "text"},
+				imageVersionField(false),
+				{Name: "to", Flag: "--to", Type: "hidden"},
 				{Name: "list", Label: "List recent deploys", Flag: "--list", Type: "checkbox", Boolean: true},
 			},
 		},
@@ -180,18 +300,20 @@ func Catalog() []Script {
 			Summary: "Pin (or unpin) a tenant to a specific image.",
 			Fields: []Field{
 				{Name: "_pos_name", Label: "Tenant name", Type: "text", Placeholder: "(omit with --list)"},
-				{Name: "backend", Label: "Backend image", Flag: "--backend", Type: "text"},
-				{Name: "frontend", Label: "Frontend image", Flag: "--frontend", Type: "text"},
+				imageVersionField(false),
+				{Name: "backend", Flag: "--backend", Type: "hidden"},
+				{Name: "frontend", Flag: "--frontend", Type: "hidden"},
 				{Name: "unpin", Label: "Unpin", Flag: "--unpin", Type: "checkbox", Boolean: true},
 				{Name: "list", Label: "List pins", Flag: "--list", Type: "checkbox", Boolean: true},
 			},
 		},
 		{
-			Name: "update-tenant.sh", Title: "Update tenant", Summary: "Update images, env, scale, restart.",
+			Name: "update-tenant.sh", Title: "Update tenant", Summary: "Update version, env, scale, restart.",
 			Fields: []Field{
 				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true},
-				{Name: "backend_image", Label: "Backend image", Flag: "--backend-image", Type: "text"},
-				{Name: "frontend_image", Label: "Frontend image", Flag: "--frontend-image", Type: "text"},
+				imageVersionField(false),
+				{Name: "backend_image", Flag: "--backend-image", Type: "hidden"},
+				{Name: "frontend_image", Flag: "--frontend-image", Type: "hidden"},
 				{Name: "scale", Label: "Backend scale", Flag: "--scale", Type: "text", Placeholder: "1"},
 				{Name: "restart", Label: "Restart", Flag: "--restart", Type: "checkbox", Boolean: true},
 				{Name: "envs", Label: "Env vars", Flag: "--env", Type: "kv"},

@@ -1,0 +1,132 @@
+{{define "content"}}
+<a href="/" class="text-xs text-zinc-400 hover:text-zinc-100">&larr; tenants</a>
+<section class="mt-3 flex items-start justify-between gap-3 flex-wrap">
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight">{{.Tenant}}</h1>
+    <p class="text-sm text-zinc-400">Tenant actions and compatible version deploys</p>
+  </div>
+  {{with .Frontend}}{{if and .Domains (eq .State "running")}}
+  <a href="http://{{index .Domains 0}}" target="_blank" rel="noopener"
+     class="text-sm px-3 py-1.5 rounded ring-1 ring-blue-500/30 text-blue-400 hover:bg-blue-500/10">Open tenant</a>
+  {{end}}{{end}}
+</section>
+
+<dl class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+  {{with .Backend}}
+  <div class="rounded-lg bg-zinc-900/60 ring-1 ring-zinc-800 p-4">
+    <div class="flex items-center justify-between gap-3">
+      <dt class="text-xs text-zinc-500 uppercase">Backend</dt>
+      <span class="text-xs px-2 py-1 rounded ring-1 {{stateClr .State}}">{{.State}}</span>
+    </div>
+    <dd class="mt-2 font-mono text-xs truncate" title="{{.Image}}">{{or .Image "-"}}</dd>
+    <dd class="mt-2 text-xs text-zinc-500">HTTP {{.HTTPCode}} · port {{or .IntPort "-"}}</dd>
+  </div>
+  {{end}}
+  {{with .Frontend}}
+  <div class="rounded-lg bg-zinc-900/60 ring-1 ring-zinc-800 p-4">
+    <div class="flex items-center justify-between gap-3">
+      <dt class="text-xs text-zinc-500 uppercase">Frontend</dt>
+      <span class="text-xs px-2 py-1 rounded ring-1 {{stateClr .State}}">{{.State}}</span>
+    </div>
+    <dd class="mt-2 font-mono text-xs truncate" title="{{.Image}}">{{or .Image "-"}}</dd>
+    <dd class="mt-2 text-xs text-zinc-500">{{join .Domains " "}}</dd>
+  </div>
+  {{end}}
+</dl>
+
+<section class="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-4">
+  <div class="lg:col-span-2 rounded-lg bg-zinc-900/60 ring-1 ring-zinc-800 p-4">
+    <h2 class="text-sm font-semibold">Update Version</h2>
+    <p class="text-xs text-zinc-500 mt-1">Deploys backend and frontend images with the same selected tag.</p>
+    <form id="tenant-version-form" class="mt-4 flex flex-col sm:flex-row gap-2">
+      <input type="hidden" name="_pos_name" value="{{.Tenant}}">
+      <select name="image_version" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 outline-none focus:border-emerald-500">
+        {{range .Versions}}
+        <option value="{{.Tag}}" {{if eq .Tag $.DefaultVersion}}selected{{end}}>{{.Tag}}</option>
+        {{end}}
+      </select>
+      <button class="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-sm transition">Update</button>
+    </form>
+  </div>
+
+  <div class="rounded-lg bg-zinc-900/60 ring-1 ring-zinc-800 p-4">
+    <h2 class="text-sm font-semibold">Lifecycle</h2>
+    <div class="mt-4 flex flex-wrap gap-2">
+      <button data-tenant-act="start" class="tenant-act text-sm px-3 py-1.5 rounded ring-1 ring-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10">Start</button>
+      <button data-tenant-act="stop" class="tenant-act text-sm px-3 py-1.5 rounded ring-1 ring-amber-500/30 text-amber-400 hover:bg-amber-500/10">Stop</button>
+      <button data-tenant-act="restart" class="tenant-act text-sm px-3 py-1.5 rounded ring-1 ring-zinc-700 hover:ring-emerald-500/50 hover:text-emerald-300">Restart</button>
+      <button data-tenant-act="rebuild" class="tenant-act text-sm px-3 py-1.5 rounded ring-1 ring-zinc-700 hover:ring-emerald-500/50 hover:text-emerald-300">Rebuild</button>
+    </div>
+  </div>
+</section>
+
+<section class="mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
+  <a href="/scripts/update-tenant?_pos_name={{.Tenant}}" class="rounded-lg bg-zinc-900/60 ring-1 ring-zinc-800 hover:ring-emerald-500/40 p-4 transition">Update config</a>
+  <a href="/scripts/backup-tenant?_pos_name={{.Tenant}}" class="rounded-lg bg-zinc-900/60 ring-1 ring-zinc-800 hover:ring-emerald-500/40 p-4 transition">Backup</a>
+  <a href="/scripts/tail-logs?tenant={{.Tenant}}" class="rounded-lg bg-zinc-900/60 ring-1 ring-zinc-800 hover:ring-emerald-500/40 p-4 transition">Tail logs</a>
+  <a href="/scripts/remove-tenant?_pos_name={{.Tenant}}" class="rounded-lg bg-zinc-900/60 ring-1 ring-rose-500/30 hover:ring-rose-400/60 text-rose-300 p-4 transition">Delete tenant</a>
+</section>
+
+<section class="mt-8">
+  <h2 class="text-xs uppercase tracking-widest text-zinc-400 mb-2">Action Output</h2>
+  <div id="tenant-out" class="bg-zinc-950 ring-1 ring-zinc-800 rounded-xl p-4 h-[22rem] overflow-y-auto text-xs leading-5 whitespace-pre-wrap font-mono"></div>
+</section>
+
+<script>
+(function () {
+  const tenant = '{{.Tenant}}';
+  const out = document.getElementById('tenant-out');
+  const form = document.getElementById('tenant-version-form');
+
+  function append(line) {
+    out.textContent += line + '\n';
+    out.scrollTop = out.scrollHeight;
+  }
+
+  async function streamScript(slug, fd) {
+    append('');
+    append('--- run ' + new Date().toISOString() + ' ---');
+    const res = await fetch('/scripts/' + slug + '/run', { method: 'POST', body: new URLSearchParams(fd) });
+    if (!res.ok) {
+      append('FAILED ' + res.status + ' ' + await res.text());
+      return;
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const ln of block.split('\n')) {
+          if (ln.startsWith('data: ')) append(ln.slice(6));
+          if (ln.startsWith('event: error')) append('FAILED');
+        }
+      }
+    }
+  }
+
+  form.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    streamScript('update-tenant', new FormData(form));
+  });
+
+  document.querySelectorAll('.tenant-act').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const verb = btn.dataset.tenantAct;
+      if ((verb === 'stop' || verb === 'restart' || verb === 'rebuild') && !confirm(verb + ' ' + tenant + '?')) return;
+      append('');
+      append('--- ' + verb + ' ' + tenant + ' ---');
+      const res = await fetch('/tenants/' + tenant + '/' + verb, { method: 'POST' });
+      append(await res.text());
+    });
+  });
+})();
+</script>
+{{end}}
+
+{{define "tenant.html"}}{{template "_layout.html" .}}{{end}}

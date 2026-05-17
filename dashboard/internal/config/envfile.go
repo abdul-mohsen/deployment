@@ -2,7 +2,9 @@ package config
 
 import (
 	"bufio"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -14,9 +16,10 @@ import (
 // admin credentials the deployment scripts use.
 //
 // Quoting:
-//   FOO=bar         -> bar
-//   FOO="bar baz"   -> bar baz
-//   FOO='bar baz'   -> bar baz
+//
+//	FOO=bar         -> bar
+//	FOO="bar baz"   -> bar baz
+//	FOO='bar baz'   -> bar baz
 //
 // Missing files are silently skipped.
 func LoadEnvFiles(paths ...string) {
@@ -49,4 +52,68 @@ func LoadEnvFiles(paths ...string) {
 		}
 		_ = f.Close()
 	}
+}
+
+// UpdateEnvFileValue sets key=value in a simple KEY=VALUE env file, preserving
+// unrelated lines. Values are single-quoted so bcrypt hashes containing '$' are
+// not treated as shell expansions by operators who source the file manually.
+func UpdateEnvFileValue(path, key, value string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("env file path is required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	updated := false
+	encoded := key + "=" + quoteEnvValue(value)
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "export ") {
+			trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "export "))
+		}
+		if strings.HasPrefix(trimmed, key+"=") {
+			prefix := ""
+			if strings.HasPrefix(strings.TrimSpace(line), "export ") {
+				prefix = "export "
+			}
+			lines[i] = prefix + encoded
+			updated = true
+		}
+	}
+	if !updated {
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines[len(lines)-1] = encoded
+		} else {
+			lines = append(lines, encoded)
+		}
+		lines = append(lines, "")
+	}
+	out := []byte(strings.Join(lines, "\n"))
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".env-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(out); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, info.Mode().Perm()); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+func quoteEnvValue(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }

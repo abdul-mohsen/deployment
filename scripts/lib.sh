@@ -169,6 +169,26 @@ dokku() {
     docker exec -i dokku dokku "$@"
 }
 
+# Deploy an app from a Docker image. Dokku's git:from-image returns non-zero
+# when the image reference string did not change, even if the tag was re-pushed
+# and already pulled locally. In that case, rebuild the existing image source so
+# same-version rollouts are still deployable.
+dokku_git_from_image() {
+    local app="$1" image="$2" out rc
+    if out="$(dokku git:from-image "$app" "$image" 2>&1)"; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    rc=$?
+    printf '%s\n' "$out"
+    if printf '%s\n' "$out" | grep -qi 'No changes detected'; then
+        echo "[!] No source image ref change for $app; rebuilding existing Dokku image source." >&2
+        dokku ps:rebuild "$app"
+        return $?
+    fi
+    return "$rc"
+}
+
 # Silence the harmless but noisy "sudo: unable to resolve host <containerid>"
 # warning that Dokku's internal sudo calls produce when the dokku container
 # was started without --hostname. Idempotent: only writes /etc/hosts once per

@@ -61,6 +61,15 @@ if [ "$MYSQL_CLIENT_HOST" != "$MYSQL_HOST" ]; then
     info "Configured MYSQL_HOST=${MYSQL_HOST}; using ${MYSQL_CLIENT_HOST} from the Docker verifier container."
 fi
 
+mysql_client_host() {
+    case "${MYSQL_HOST}" in
+        localhost|127.0.0.1|::1) echo "host.docker.internal" ;;
+        *) echo "$MYSQL_HOST" ;;
+    esac
+}
+
+MYSQL_CLIENT_HOST="$(mysql_client_host)"
+
 set +e
 docker run --rm --env-file "$ENV_FILE" \
     --add-host=host.docker.internal:host-gateway \

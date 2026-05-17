@@ -148,8 +148,8 @@ func writeAppsJSONArray(b *strings.Builder, apps []dokku.App) {
 			b.WriteByte(',')
 		}
 		fmt.Fprintf(b,
-			`{"name":%q,"role":%q,"tenant":%q,"state":%q,"image":%q,"http":%q,"int_port":%q,"host_ports":%q,"procs":%q,"domains":%q}`,
-			a.Name, a.Role, a.Tenant, a.State, a.Image, a.HTTPCode, a.IntPort, a.HostPorts,
+			`{"name":%q,"role":%q,"tenant":%q,"state":%q,"image":%q,"version":%q,"http":%q,"int_port":%q,"host_ports":%q,"procs":%q,"domains":%q}`,
+			a.Name, a.Role, a.Tenant, a.State, a.Image, a.Version, a.HTTPCode, a.IntPort, a.HostPorts,
 			strings.Join(a.Procs, ","), strings.Join(a.Domains, ","))
 	}
 	b.WriteByte(']')

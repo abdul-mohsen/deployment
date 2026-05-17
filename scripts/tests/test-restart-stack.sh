@@ -290,6 +290,7 @@ grep -q 'TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"' scripts
     && PASS "init-tenant-db refreshes backend image before schema read" \
     || FAIL "init-tenant-db must pull backend image before reading schema"
 grep -q '| run_tenant_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
+    && ! grep -q '| run_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db imports default schema paths as tenant DB user" \
     || FAIL "init-tenant-db must import default schema paths as tenant DB user"
 if grep -q 'TENANT_ADMIN_MIGRATION_FILES\|migration_requires_admin\|apply_image_sql_file_as_admin\|verify_admin_trigger_privilege' scripts/init-tenant-db.sh; then
@@ -317,8 +318,10 @@ grep -q 'TENANT_IGNORED_SCHEMA_FILES="${TENANT_IGNORED_SCHEMA_FILES:-car_part.sq
     || FAIL "init-tenant-db must ignore car_part schema"
 grep -q 'IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"' scripts/deploy-all.sh \
     && grep -q 'docker pull "\$image"' scripts/deploy-all.sh \
-    && PASS "deploy-all refreshes image before deploy" \
-    || FAIL "deploy-all must pull image before dokku git:from-image"
+    && grep -q 'dokku_git_from_image "\$app" "\$image"' scripts/deploy-all.sh \
+    && grep -q 'No changes detected' scripts/lib.sh \
+    && PASS "deploy-all refreshes image and rebuilds same-ref deploys" \
+    || FAIL "deploy-all must pull image and handle same-ref git:from-image deploys"
 grep -q 'init-tenant-db.sh" "\$TENANT_NAME"' scripts/create-tenant.sh \
     && grep -q -- '--backend-image "\$BACKEND_IMAGE"' scripts/create-tenant.sh \
     && grep -q -- '--env "DB_USER=\$TENANT_DB_USER"' scripts/create-tenant.sh \

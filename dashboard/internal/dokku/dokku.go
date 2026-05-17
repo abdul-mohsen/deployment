@@ -36,6 +36,7 @@ type App struct {
 	Tenant      string
 	State       string // running / stopped / not-deployed / restarting / mixed / unknown
 	Image       string
+	Version     string
 	RestartCnt  string
 	Procs       []string
 	IntPort     string
@@ -43,6 +44,13 @@ type App struct {
 	Domains     []string
 	HTTPCode    string
 	ContainerID string
+}
+
+type containerSummary struct {
+	State      string
+	Image      string
+	Version    string
+	RestartCnt string
 }
 
 var nameLine = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
@@ -63,6 +71,110 @@ func (c *Client) AppsList(ctx context.Context) ([]string, error) {
 	return apps, nil
 }
 
+// AppSummary is optimized for the dashboard grid. It avoids expensive per-app
+// Dokku reports and uses Docker metadata plus domains, which keeps large tenant
+// lists responsive.
+func (c *Client) AppSummary(ctx context.Context, name string) App {
+	return c.AppSummaryFrom(ctx, name, c.ContainerIDsByApp(ctx)[name], c.DomainMap(ctx)[name])
+}
+
+func (c *Client) AppSummaryFrom(ctx context.Context, name, containerID string, domains []string) App {
+	app := App{Name: name, Role: roleOf(name), Tenant: tenantOf(name), HTTPCode: "000", Domains: domains}
+	app.ContainerID = containerID
+	if app.ContainerID == "" {
+		app.State = "not-deployed"
+		return app
+	}
+	container := c.containerSummary(ctx, app.ContainerID)
+	switch container.State {
+	case "running":
+		app.State = "running"
+	case "exited":
+		app.State = "stopped"
+	case "":
+		app.State = "unknown"
+	default:
+		app.State = container.State
+	}
+	app.Image = container.Image
+	app.Version = container.Version
+	if app.Version == "" {
+		app.Version = imageTag(app.Image)
+	}
+	app.RestartCnt = container.RestartCnt
+	return app
+}
+
+func (c *Client) containerSummary(ctx context.Context, cid string) containerSummary {
+	out, _ := c.exec(ctx, c.dockerBin, "inspect", "-f", `{{.State.Status}}
+{{.Config.Image}}
+{{.RestartCount}}
+{{range .Config.Env}}{{println .}}{{end}}`, cid)
+	lines := strings.Split(out, "\n")
+	summary := containerSummary{}
+	if len(lines) > 0 {
+		summary.State = strings.TrimSpace(lines[0])
+	}
+	if len(lines) > 1 {
+		summary.Image = strings.TrimSpace(lines[1])
+	}
+	if len(lines) > 2 {
+		summary.RestartCnt = strings.TrimSpace(lines[2])
+	}
+	for _, line := range lines[3:] {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "APP_IMAGE_VERSION=") {
+			summary.Version = strings.TrimPrefix(line, "APP_IMAGE_VERSION=")
+			break
+		}
+	}
+	return summary
+}
+
+func (c *Client) ContainerIDsByApp(ctx context.Context) map[string]string {
+	out, _ := c.exec(ctx, c.dockerBin, "ps", "-a",
+		"--filter", "label=com.dokku.app-name",
+		"--format", `{{.ID}} {{.Label "com.dokku.app-name"}} {{.Label "com.dokku.process-type"}}`)
+	containers := map[string]string{}
+	processTypes := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		containerID := fields[0]
+		appName := fields[1]
+		processType := ""
+		if len(fields) > 2 {
+			processType = fields[2]
+		}
+		if containers[appName] == "" || (processTypes[appName] != "web" && processType == "web") {
+			containers[appName] = containerID
+			processTypes[appName] = processType
+		}
+	}
+	return containers
+}
+
+func (c *Client) DomainMap(ctx context.Context) map[string][]string {
+	script := `for app_dir in /home/dokku/*; do
+  [ -f "$app_dir/VHOST" ] || continue
+  app="${app_dir##*/}"
+  domains="$(tr '\n' ' ' < "$app_dir/VHOST" | xargs)"
+  printf '%s\t%s\n' "$app" "$domains"
+done`
+	out, _ := c.exec(ctx, c.dockerBin, "exec", "-i", c.dokkuName, "bash", "-lc", script)
+	domains := map[string][]string{}
+	for _, line := range strings.Split(out, "\n") {
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" {
+			continue
+		}
+		domains[strings.TrimSpace(parts[0])] = strings.Fields(parts[1])
+	}
+	return domains
+}
+
 // AppDetails populates an App with current state from docker + dokku.
 func (c *Client) AppDetails(ctx context.Context, name string) App {
 	a := App{Name: name, Role: roleOf(name), Tenant: tenantOf(name)}
@@ -70,6 +182,10 @@ func (c *Client) AppDetails(ctx context.Context, name string) App {
 	a.State = c.appState(ctx, name, a.ContainerID)
 	if a.ContainerID != "" {
 		a.Image = c.inspectField(ctx, a.ContainerID, "{{.Config.Image}}")
+		a.Version = c.envField(ctx, a.ContainerID, "APP_IMAGE_VERSION")
+		if a.Version == "" {
+			a.Version = imageTag(a.Image)
+		}
 		a.RestartCnt = c.inspectField(ctx, a.ContainerID, "{{.RestartCount}}")
 		a.HostPorts = c.hostPorts(ctx, a.ContainerID)
 	}
@@ -86,6 +202,21 @@ func (c *Client) AppDetails(ctx context.Context, name string) App {
 		a.HTTPCode = "000"
 	}
 	return a
+}
+
+func (c *Client) containerIDAny(ctx context.Context, app string) string {
+	id, _ := c.exec(ctx, c.dockerBin, "ps", "-a",
+		"--filter", "label=com.dokku.app-name="+app,
+		"--filter", "label=com.dokku.process-type=web",
+		"--format", "{{.ID}}")
+	id = firstLine(id)
+	if id == "" {
+		id, _ = c.exec(ctx, c.dockerBin, "ps", "-a",
+			"--filter", "label=com.dokku.app-name="+app,
+			"--format", "{{.ID}}")
+		id = firstLine(id)
+	}
+	return id
 }
 
 func (c *Client) containerID(ctx context.Context, app string) string {
@@ -141,6 +272,36 @@ func (c *Client) hostPorts(ctx context.Context, cid string) string {
 	tmpl := `{{range $p, $b := .NetworkSettings.Ports}}{{range $b}}{{.HostPort}}->{{$p}} {{end}}{{end}}`
 	out, _ := c.exec(ctx, c.dockerBin, "inspect", "-f", tmpl, cid)
 	return strings.TrimSpace(out)
+}
+
+func (c *Client) exposedPort(ctx context.Context, cid string) string {
+	tmpl := `{{range $p, $_ := .Config.ExposedPorts}}{{println $p}}{{end}}`
+	out, _ := c.exec(ctx, c.dockerBin, "inspect", "-f", tmpl, cid)
+	port := firstLine(out)
+	port = strings.TrimSuffix(port, "/tcp")
+	port = strings.TrimSuffix(port, "/udp")
+	return strings.TrimSpace(port)
+}
+
+func (c *Client) envField(ctx context.Context, cid, key string) string {
+	out, _ := c.exec(ctx, c.dockerBin, "inspect", "-f", `{{range .Config.Env}}{{println .}}{{end}}`, cid)
+	prefix := key + "="
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimPrefix(line, prefix)
+		}
+	}
+	return ""
+}
+
+func imageTag(image string) string {
+	lastSlash := strings.LastIndex(image, "/")
+	lastColon := strings.LastIndex(image, ":")
+	if lastColon > lastSlash {
+		return image[lastColon+1:]
+	}
+	return ""
 }
 
 func (c *Client) intPort(ctx context.Context, app string) string {

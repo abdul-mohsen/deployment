@@ -1,13 +1,13 @@
 {{define "content"}}
 <section class="mb-6 flex items-end justify-between flex-wrap gap-3">
   <div>
-    <h1 class="text-2xl font-semibold tracking-tight">Applications</h1>
+    <h1 class="text-2xl font-semibold tracking-tight">Tenants</h1>
     <p class="text-sm text-zinc-400">Base domain <code class="text-zinc-300">*.{{.Base}}</code></p>
   </div>
 
   <div id="metrics" class="flex items-center gap-2 text-xs">
     <span class="ring-1 ring-zinc-800 rounded-lg px-3 py-1.5 bg-zinc-900/60">
-      Total <b id="m-total" class="ml-1 text-zinc-100 tabular-nums">·</b>
+      Tenants <b id="m-total" class="ml-1 text-zinc-100 tabular-nums">·</b>
     </span>
     <span class="ring-1 ring-emerald-500/30 text-emerald-300 rounded-lg px-3 py-1.5 bg-emerald-500/5">
       Running <b id="m-running" class="ml-1 tabular-nums">·</b>
@@ -23,7 +23,7 @@
 </section>
 
 <div class="mb-4 flex items-center gap-2">
-  <input id="filter" placeholder="Filter apps…" autocomplete="off"
+  <input id="filter" placeholder="Filter tenants…" autocomplete="off"
          class="w-64 bg-zinc-900/60 ring-1 ring-zinc-800 focus:ring-emerald-500/50 outline-none rounded-lg px-3 py-1.5 text-sm">
   <span class="text-xs text-zinc-500">Cached live state · refreshed in background</span>
   <span id="pulse" class="h-1.5 w-1.5 rounded-full bg-emerald-500 opacity-0 transition-opacity duration-500"></span>
@@ -45,23 +45,23 @@
             <span class="js-ping absolute inline-flex h-full w-full rounded-full opacity-60 animate-ping"></span>
             <span class="js-dot relative inline-flex h-3 w-3 rounded-full"></span>
           </span>
-          <h3 class="font-semibold truncate js-name">app-name</h3>
+          <h3 class="font-semibold truncate js-name">tenant-name</h3>
         </div>
-        <div class="text-xs text-zinc-500 mt-0.5"><span class="js-role">role</span> · tenant <span class="js-tenant text-zinc-300">t</span></div>
+        <div class="text-xs text-zinc-500 mt-0.5"><span class="js-domain text-zinc-300">domain</span></div>
       </div>
       <span class="js-state text-[10px] uppercase tracking-widest px-2 py-0.5 rounded ring-1">state</span>
     </div>
     <dl class="mt-4 grid grid-cols-2 gap-2 text-xs">
-      <div><dt class="text-zinc-500">HTTP</dt><dd class="js-http font-mono">·</dd></div>
-      <div><dt class="text-zinc-500">Port</dt><dd class="js-port font-mono">·</dd></div>
-      <div class="col-span-2"><dt class="text-zinc-500">Image</dt><dd class="js-image font-mono truncate">·</dd></div>
-      <div class="col-span-2"><dt class="text-zinc-500">Domains</dt><dd class="js-domains text-zinc-400 truncate">·</dd></div>
+      <div><dt class="text-zinc-500">Backend</dt><dd class="js-backend font-mono">·</dd></div>
+      <div><dt class="text-zinc-500">Frontend</dt><dd class="js-frontend font-mono">·</dd></div>
+      <div class="col-span-2"><dt class="text-zinc-500">Version</dt><dd class="js-version font-mono truncate">·</dd></div>
+      <div class="col-span-2"><dt class="text-zinc-500">Apps</dt><dd class="js-apps text-zinc-400 truncate">·</dd></div>
     </dl>
     <div class="mt-4 flex items-center gap-1.5">
       <button data-act="restart" class="act text-[11px] px-2 py-1 rounded ring-1 ring-zinc-700 hover:ring-emerald-500/50 hover:text-emerald-300 transition">restart</button>
       <button data-act="stop"    class="act text-[11px] px-2 py-1 rounded ring-1 ring-zinc-700 hover:ring-amber-500/50 hover:text-amber-300 transition">stop</button>
       <button data-act="start"   class="act text-[11px] px-2 py-1 rounded ring-1 ring-zinc-700 hover:ring-emerald-500/50 hover:text-emerald-300 transition">start</button>
-      <a class="js-open ml-auto text-[11px] text-blue-500 hover:text-blue-400 transition hidden" target="_blank" rel="noopener">open ↗</a>
+      <span class="ml-auto text-[11px] text-emerald-400 group-hover:text-emerald-300 transition">actions →</span>
     </div>
   </a>
 </template>

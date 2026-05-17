@@ -1,8 +1,6 @@
 // app.js — live SSE updates, command palette, action requests, animations.
 (() => {
   const $ = (s, r = document) => r.querySelector(s);
-  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
-
   // ---- Toast notifications ------------------------------------------------
   const toastBox = $('#toast');
   function toast(msg, kind = 'ok') {
@@ -18,7 +16,7 @@
   const palette = $('#palette');
   const paletteInput = $('#palette-input');
   const paletteList = $('#palette-list');
-  let paletteApps = [];
+  let paletteTenants = [];
   let paletteIdx = 0;
 
   function openPalette() {
@@ -35,16 +33,16 @@
     const items = [];
     if (q.startsWith('>')) {
       const rest = q.slice(1).trim().toLowerCase();
-      const cmds = ['Go to Apps:/', 'Open Scripts:/scripts'];
+      const cmds = ['Go to Tenants:/', 'Open Scripts:/scripts'];
       for (const it of cmds) {
         const [label, href] = it.split(':');
         if (!rest || label.toLowerCase().includes(rest)) items.push({label, href});
       }
     } else {
       const ql = q.toLowerCase();
-      for (const a of paletteApps) {
-        if (!ql || a.name.toLowerCase().includes(ql) || (a.tenant||'').toLowerCase().includes(ql)) {
-          items.push({label: a.name + '  ·  ' + a.role + ' / ' + (a.state||'?'), href: '/apps/' + a.name});
+      for (const tenant of paletteTenants) {
+        if (!ql || tenant.name.toLowerCase().includes(ql) || tenant.apps.some((a) => a.name.toLowerCase().includes(ql))) {
+          items.push({label: tenant.name + '  ·  ' + tenant.state + ' / ' + tenant.version, href: '/tenants/' + tenant.name});
         }
       }
     }
@@ -81,14 +79,14 @@
   });
   palette?.addEventListener('click', (e) => { if (e.target === palette) closePalette(); });
 
-  // ---- Apps grid (live via SSE) ------------------------------------------
+  // ---- Tenants grid (live via SSE) ---------------------------------------
   const grid = $('#grid');
   const filter = $('#filter');
   const tpl = $('#card-tpl');
   const pulse = $('#pulse');
   const dokkuPill = $('#dokku-pill');
   const m = { total: $('#m-total'), running: $('#m-running'), degraded: $('#m-degraded'), down: $('#m-down') };
-  const cards = new Map(); // name -> {el, last:state}
+  const cards = new Map(); // tenant -> {el, last:state}
 
   function setMetric(node, val) {
     if (!node || node.textContent === String(val)) return;
@@ -106,38 +104,65 @@
     ping.style.display = state === 'running' ? '' : 'none';
   }
 
-  function buildCard(a) {
+  function appVersion(image) {
+    if (!image) return '';
+    const slash = image.lastIndexOf('/');
+    const colon = image.lastIndexOf(':');
+    return colon > slash ? image.slice(colon + 1) : '';
+  }
+
+  function tenantState(t) {
+    const states = t.apps.map((a) => a.state || 'unknown');
+    if (states.length && states.every((s) => s === 'running')) return 'running';
+    if (states.some((s) => s === 'running' || s === 'restarting' || s === 'mixed' || s === 'created')) return 'mixed';
+    if (states.some((s) => s === 'unknown' || s === 'not-deployed')) return 'unknown';
+    return 'stopped';
+  }
+
+  function groupTenants(apps) {
+    const grouped = new Map();
+    for (const app of apps) {
+      const tenantName = app.tenant || app.name;
+      if (!grouped.has(tenantName)) grouped.set(tenantName, { name: tenantName, apps: [], backend: null, frontend: null });
+      const tenant = grouped.get(tenantName);
+      tenant.apps.push(app);
+      if (app.role === 'backend') tenant.backend = app;
+      if (app.role === 'frontend') tenant.frontend = app;
+    }
+    const tenants = Array.from(grouped.values()).sort((a, b) => a.name.localeCompare(b.name));
+    for (const tenant of tenants) {
+      tenant.state = tenantState(tenant);
+      const backendVersion = tenant.backend?.version || appVersion(tenant.backend?.image);
+      const frontendVersion = tenant.frontend?.version || appVersion(tenant.frontend?.image);
+      tenant.version = backendVersion && frontendVersion && backendVersion === frontendVersion
+        ? backendVersion
+        : [backendVersion || 'backend?', frontendVersion || 'frontend?'].join(' / ');
+      tenant.domain = (tenant.frontend?.domains || '').split(',').find(Boolean)?.trim() || '';
+    }
+    return tenants;
+  }
+
+  function buildCard(t) {
     const node = tpl.content.firstElementChild.cloneNode(true);
-    node.href = '/apps/' + a.name;
-    node.dataset.name = a.name;
-    node.querySelector('.js-name').textContent = a.name;
-    node.querySelector('.js-role').textContent = a.role;
-    node.querySelector('.js-tenant').textContent = a.tenant;
+    node.href = '/tenants/' + t.name;
+    node.dataset.name = t.name;
+    node.querySelector('.js-name').textContent = t.name;
     node.querySelectorAll('.act').forEach(b => {
       b.addEventListener('click', (ev) => {
         ev.preventDefault(); ev.stopPropagation();
-        runAction(a.name, b.dataset.act, node);
+        runTenantAction(t.name, b.dataset.act, node);
       });
     });
     return node;
   }
 
-  function paintCard(node, a) {
-    node.querySelector('.js-image').textContent = a.image || '—';
-    node.querySelector('.js-image').title = a.image || '';
-    node.querySelector('.js-http').textContent = a.http || '000';
-    node.querySelector('.js-port').textContent = a.int_port || '—';
-    node.querySelector('.js-domains').textContent = (a.domains || '').split(',').filter(Boolean).join(' ') || '—';
-    const openLink = node.querySelector('.js-open');
-    if (openLink) {
-      if (a.state === 'running' && a.domains) {
-        const domain = a.domains.split(',')[0]?.trim();
-        openLink.href = 'http://' + domain;
-        openLink.classList.remove('hidden');
-      } else {
-        openLink.classList.add('hidden');
-      }
-    }
+  function paintCard(node, t) {
+    node.querySelector('.js-domain').textContent = t.domain || 'no public domain';
+    node.querySelector('.js-backend').textContent = t.backend ? t.backend.state || 'unknown' : 'missing';
+    node.querySelector('.js-frontend').textContent = t.frontend ? t.frontend.state || 'unknown' : 'missing';
+    node.querySelector('.js-version').textContent = t.version || '—';
+    node.querySelector('.js-version').title = [t.backend?.image || '', t.frontend?.image || ''].filter(Boolean).join('\n');
+    node.querySelector('.js-apps').textContent = t.apps.map((a) => a.name).join('  ');
   }
 
   function applyFilter() {
@@ -148,13 +173,13 @@
   }
   filter?.addEventListener('input', applyFilter);
 
-  async function runAction(name, verb, card) {
+  async function runTenantAction(name, verb, card) {
     if ((verb === 'stop' || verb === 'restart' || verb === 'rebuild') &&
         !confirm(verb + ' ' + name + '?')) return;
     card.classList.add('flash-ok');
     setTimeout(() => card.classList.remove('flash-ok'), 900);
     try {
-      const res = await fetch('/apps/' + name + '/' + verb, { method: 'POST' });
+      const res = await fetch('/tenants/' + name + '/' + verb, { method: 'POST' });
       const txt = await res.text();
       toast((res.ok ? '✓ ' : '✖ ') + verb + ' ' + name, res.ok ? 'ok' : 'err');
       if (!res.ok) console.warn(txt);
@@ -175,36 +200,37 @@
       setTimeout(() => pulse?.classList.remove('opacity-100'), 400);
       return;
     }
-    paletteApps = snap.apps || [];
+    const tenants = groupTenants(snap.apps || []);
+    paletteTenants = tenants;
     let total=0, running=0, degraded=0, down=0;
     const seen = new Set();
-    for (const a of snap.apps || []) {
-      seen.add(a.name);
+    for (const tenant of tenants) {
+      seen.add(tenant.name);
       total++;
-      switch (a.state) {
+      switch (tenant.state) {
         case 'running': running++; break;
         case 'restarting': case 'mixed': case 'created': degraded++; break;
         case 'stopped': case 'exited': case 'dead': case 'paused': down++; break;
       }
-      let entry = cards.get(a.name);
+      let entry = cards.get(tenant.name);
       if (!entry) {
-        const el = buildCard(a);
+        const el = buildCard(tenant);
         grid.appendChild(el);
         entry = { el, last: '' };
-        cards.set(a.name, entry);
+        cards.set(tenant.name, entry);
       }
-      paintCard(entry.el, a);
-      if (entry.last !== a.state) {
-        applyState(entry.el, a.state);
+      paintCard(entry.el, tenant);
+      if (entry.last !== tenant.state) {
+        applyState(entry.el, tenant.state);
         if (entry.last) {
-          const cls = a.state === 'running' ? 'flash-ok' : 'flash-warn';
+          const cls = tenant.state === 'running' ? 'flash-ok' : 'flash-warn';
           entry.el.classList.add(cls);
           setTimeout(() => entry.el.classList.remove(cls), 900);
         }
-        entry.last = a.state;
+        entry.last = tenant.state;
       }
     }
-    // remove gone apps
+    // remove gone tenants
     for (const [name, {el}] of cards) {
       if (!seen.has(name)) { el.remove(); cards.delete(name); }
     }

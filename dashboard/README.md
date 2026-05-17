@@ -4,6 +4,8 @@ Argo-CD-style web UI for the Dokku tenants on this server.
 
 - Live status grid (SSE; updates every 3s with smooth state-change animations)
 - Per-app actions: start / stop / restart / rebuild
+- Tenant-first actions: select a tenant, then update version / restart / stop / delete
+- Compatible version picker: one tag maps to backend and frontend images
 - Live log streaming (SSE) + ring-buffer log aggregation + downloadable dump
 - Form-driven scripts (`/scripts/<name>`) with streamed output
 - Command palette (Ctrl/Cmd+K)
@@ -30,6 +32,28 @@ runtime besides the docker socket.
 | `SESSION_KEY`         | no       | random per boot |
 | `LOG_BUFFER_LINES`    | no       | `2000`          |
 | `COOKIE_SECURE`       | no       | `false`         |
+| `DASHBOARD_SNAPSHOT_WORKERS` | no | `8`             |
+
+Version picker values come from the deployment env (`config.env` / `install.env`):
+
+```sh
+BACKEND_IMAGE=ssdawweq/ifritah-api
+FRONTEND_IMAGE=ssdawweq/ifritah-web
+APP_IMAGE_VERSIONS=dev,latest,stable
+APP_IMAGE_VERSION_DEFAULT=dev
+```
+
+Publishing `BACKEND_IMAGE:v1` and `FRONTEND_IMAGE:v1` makes `v1` selectable as a compatible pair. Re-pushing only the frontend with the same tag is supported; update deploys pull before applying the image.
+
+## Local perf check
+
+With a local Dokku container and at least 10 tenant pairs:
+
+```sh
+DASHBOARD_LOCAL_DOKKU_PERF=1 go test ./internal/web -run TestLocalDokkuSnapshotTenTenants -count=1 -v
+```
+
+The dashboard grid uses cached snapshots and a bounded parallel summary collector. Increase `DASHBOARD_SNAPSHOT_WORKERS` only if the host can handle more concurrent Docker inspect work.
 
 Generate a password hash:
 

@@ -93,6 +93,14 @@ ensure_deploy_image_available() {
     esac
 }
 
+image_tag() {
+    local image="$1"
+    local tail="${image##*/}"
+    if [[ "$tail" == *:* ]]; then
+        printf '%s' "${tail##*:}"
+    fi
+}
+
 # Returns the per-tenant image override (or empty string if none)
 get_tenant_override() {
     local tenant="$1"
@@ -115,6 +123,12 @@ deploy_one() {
     if [ -n "$override" ] && [ "$override" != "$IMAGE" ]; then
         warn "${tenant}: pinned to '${override}' — skipping global deploy"
         return 0
+    fi
+
+    if ! dokku config:set --no-restart "$app" \
+            APP_IMAGE_VERSION="$(image_tag "$image")" \
+            APP_IMAGE_REF="$image"; then
+        return 1
     fi
 
     if ! dokku git:from-image "$app" "$image"; then

@@ -35,9 +35,10 @@
         <input type="checkbox" name="{{.Name}}" value="1" class="accent-emerald-500"> Enabled
       </label>
     {{else if eq .Type "select"}}
+      {{$default := .Default}}
       <select name="{{.Name}}" class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 outline-none focus:border-emerald-500">
-        <option value=""></option>
-        {{range .Options}}<option>{{.}}</option>{{end}}
+        {{if not .Required}}<option value=""></option>{{end}}
+        {{range .Options}}<option value="{{.}}" {{if eq . $default}}selected{{end}}>{{.}}</option>{{end}}
       </select>
     {{else if eq .Type "kv"}}
       <textarea name="{{.Name}}" rows="3"
@@ -120,6 +121,27 @@
   }
 
   restoreSaved();
+
+  function applyQueryPrefill() {
+    const params = new URLSearchParams(window.location.search);
+    const aliases = new Map([
+      ['tenant', ['_pos_name', 'tenant', 'name']],
+    ]);
+    params.forEach((value, key) => {
+      const names = aliases.get(key) || [key];
+      for (const name of names) {
+        const el = form.elements[name];
+        if (!el || el.type === 'hidden') continue;
+        if (el.type === 'checkbox') {
+          el.checked = value === '1' || value === 'true' || value === 'on';
+        } else {
+          el.value = value;
+        }
+      }
+    });
+  }
+
+  applyQueryPrefill();
 
   function escapeHtml(s) {
     return s

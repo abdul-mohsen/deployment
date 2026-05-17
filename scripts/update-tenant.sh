@@ -31,6 +31,7 @@ for i in $(seq 1 $#); do
 done
 
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-${IMAGE_PULL_POLICY:-always}}"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -46,6 +47,41 @@ FRONTEND_IMAGE=""
 RESTART=false
 SCALE=""
 declare -a ENV_VARS=()
+
+ensure_update_image_available() {
+    local image="$1"
+    case "$IMAGE_PULL_POLICY" in
+        always)
+            log "Pulling image: $image"
+            docker pull "$image" >/dev/null
+            ;;
+        missing)
+            if docker image inspect "$image" >/dev/null 2>&1; then
+                return 0
+            fi
+            log "Pulling image: $image"
+            docker pull "$image" >/dev/null
+            ;;
+        never)
+            if ! docker image inspect "$image" >/dev/null 2>&1; then
+                error "Image is not present locally and IMAGE_PULL_POLICY=never: $image"
+                exit 1
+            fi
+            ;;
+        *)
+            error "IMAGE_PULL_POLICY must be 'always', 'missing', or 'never' (got: $IMAGE_PULL_POLICY)"
+            exit 1
+            ;;
+    esac
+}
+
+image_tag() {
+    local image="$1"
+    local tail="${image##*/}"
+    if [[ "$tail" == *:* ]]; then
+        printf '%s' "${tail##*:}"
+    fi
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -79,11 +115,19 @@ done
 # ---- Deploy new images ----
 if [ -n "$BACKEND_IMAGE" ]; then
     log "Deploying backend: $BACKEND_IMAGE"
+    ensure_update_image_available "$BACKEND_IMAGE"
+    dokku config:set --no-restart "$BACKEND_APP" \
+        APP_IMAGE_VERSION="$(image_tag "$BACKEND_IMAGE")" \
+        APP_IMAGE_REF="$BACKEND_IMAGE"
     dokku git:from-image "$BACKEND_APP" "$BACKEND_IMAGE"
 fi
 
 if [ -n "$FRONTEND_IMAGE" ]; then
     log "Deploying frontend: $FRONTEND_IMAGE"
+    ensure_update_image_available "$FRONTEND_IMAGE"
+    dokku config:set --no-restart "$FRONTEND_APP" \
+        APP_IMAGE_VERSION="$(image_tag "$FRONTEND_IMAGE")" \
+        APP_IMAGE_REF="$FRONTEND_IMAGE"
     dokku git:from-image "$FRONTEND_APP" "$FRONTEND_IMAGE"
 fi
 

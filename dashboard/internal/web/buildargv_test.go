@@ -1,14 +1,25 @@
 package web
 
 import (
+	"html/template"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/abdul-mohsen/deployment/dashboard/internal/scripts"
 )
 
+func setVersionTestEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("BACKEND_IMAGE", "ssdawweq/ifritah-api")
+	t.Setenv("FRONTEND_IMAGE", "ssdawweq/ifritah-web")
+	t.Setenv("APP_IMAGE_VERSIONS", "dev,2026.05.17")
+	t.Setenv("APP_IMAGE_VERSION_DEFAULT", "dev")
+}
+
 func TestBuildArgv_CreateTenant_FullFlow(t *testing.T) {
+	setVersionTestEnv(t)
 	sc := scripts.Find("create-tenant.sh")
 	if sc == nil {
 		t.Fatal("create-tenant.sh not in catalog")
@@ -34,6 +45,8 @@ func TestBuildArgv_CreateTenant_FullFlow(t *testing.T) {
 		"--env MANAGER_USER=manager",
 		"--env MANAGER_PASSWORD=M4nager!",
 		"--env COMPANY_NAME=ACME",
+		"--backend-image ssdawweq/ifritah-api:dev",
+		"--frontend-image ssdawweq/ifritah-web:dev",
 		"--backend-port 8090",
 		"--frontend-port 8000",
 	} {
@@ -44,6 +57,7 @@ func TestBuildArgv_CreateTenant_FullFlow(t *testing.T) {
 }
 
 func TestBuildArgv_CreateTenant_ManagerUserRequiresPassword(t *testing.T) {
+	setVersionTestEnv(t)
 	sc := scripts.Find("create-tenant.sh")
 	form := url.Values{
 		"_pos_name":      {"acme"},
@@ -58,6 +72,7 @@ func TestBuildArgv_CreateTenant_ManagerUserRequiresPassword(t *testing.T) {
 }
 
 func TestBuildArgv_CreateTenant_ManagerOptional(t *testing.T) {
+	setVersionTestEnv(t)
 	sc := scripts.Find("create-tenant.sh")
 	form := url.Values{
 		"_pos_name":      {"acme"},
@@ -76,6 +91,7 @@ func TestBuildArgv_CreateTenant_ManagerOptional(t *testing.T) {
 }
 
 func TestDisplayArgv_MasksSecrets(t *testing.T) {
+	setVersionTestEnv(t)
 	sc := scripts.Find("create-tenant.sh")
 	argv := []string{
 		"acme",
@@ -95,5 +111,70 @@ func TestDisplayArgv_MasksSecrets(t *testing.T) {
 	}
 	if !strings.Contains(joined, "ADMIN_USER=admin") || !strings.Contains(joined, "COMPANY_NAME=ACME") {
 		t.Fatalf("non-secret env values were unexpectedly altered: %s", joined)
+	}
+}
+
+func TestBuildArgv_UpdateTenant_VersionExpandsPair(t *testing.T) {
+	setVersionTestEnv(t)
+	sc := scripts.Find("update-tenant.sh")
+	form := url.Values{
+		"_pos_name":     {"fresh"},
+		"image_version": {"2026.05.17"},
+	}
+	argv, err := buildArgv(sc, form)
+	if err != nil {
+		t.Fatalf("buildArgv: %v", err)
+	}
+	joined := strings.Join(argv, " ")
+	for _, want := range []string{
+		"fresh",
+		"--backend-image ssdawweq/ifritah-api:2026.05.17",
+		"--frontend-image ssdawweq/ifritah-web:2026.05.17",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("argv missing %q\nfull: %s", want, joined)
+		}
+	}
+}
+
+func TestBuildArgv_DeployAll_FrontendVersionExpandsPosImage(t *testing.T) {
+	setVersionTestEnv(t)
+	sc := scripts.Find("deploy-all.sh")
+	form := url.Values{
+		"image_version": {"2026.05.17"},
+		"type":          {"frontend"},
+		"tenant":        {"fresh"},
+	}
+	argv, err := buildArgv(sc, form)
+	if err != nil {
+		t.Fatalf("buildArgv: %v", err)
+	}
+	joined := strings.Join(argv, " ")
+	for _, want := range []string{
+		"ssdawweq/ifritah-web:2026.05.17",
+		"--type frontend",
+		"--tenant fresh",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("argv missing %q\nfull: %s", want, joined)
+		}
+	}
+}
+
+func TestDashboardTemplatesParse(t *testing.T) {
+	funcs := template.FuncMap{
+		"join":     strings.Join,
+		"now":      func() string { return time.Now().Format("2006-01-02 15:04:05") },
+		"stateClr": stateClass,
+		"httpClr":  httpClass,
+	}
+	for _, name := range []string{"index.html", "app.html", "tenant.html", "scripts.html", "script.html"} {
+		if _, err := template.New("").Funcs(funcs).ParseFS(tplFS,
+			"templates/_layout.html",
+			"templates/palette.html",
+			"templates/"+name,
+		); err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
 	}
 }

@@ -42,6 +42,7 @@ type server struct {
 	pages     map[string]*template.Template
 	store     *sessions.CookieStore
 	snapshots *snapshotCache
+	authMu    sync.RWMutex
 }
 
 // Router builds the HTTP handler.
@@ -53,7 +54,7 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		"httpClr":  httpClass,
 	}
 	pages := map[string]*template.Template{}
-	layoutPages := []string{"index.html", "app.html", "tenant.html", "scripts.html", "script.html"}
+	layoutPages := []string{"index.html", "app.html", "tenant.html", "scripts.html", "script.html", "password.html"}
 	for _, name := range layoutPages {
 		pages[name] = template.Must(template.New("").Funcs(funcs).ParseFS(tplFS,
 			"templates/_layout.html",
@@ -100,6 +101,8 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		r.Get("/apps/{name}/logs.txt", s.handleLogDump)
 		r.Get("/api/apps", s.handleAPIApps)
 		r.Get("/events", s.handleEvents)
+		r.Get("/settings/password", s.handlePasswordPage)
+		r.Post("/settings/password", s.handlePasswordSubmit)
 		r.Get("/scripts", s.handleScriptsPage)
 		r.Get("/scripts/{name}", s.handleScriptPage)
 		r.Post("/scripts/{name}/run", s.handleScriptRun)
@@ -136,8 +139,7 @@ func (s *server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	user := strings.TrimSpace(r.FormValue("user"))
 	pass := strings.TrimSpace(r.FormValue("pass"))
-	if user != s.cfg.AdminUser ||
-		bcrypt.CompareHashAndPassword([]byte(s.cfg.AdminHash), []byte(pass)) != nil {
+	if user != s.cfg.AdminUser || !s.passwordMatches(pass) {
 		http.Redirect(w, r, "/login?e=invalid", http.StatusSeeOther)
 		return
 	}
@@ -148,6 +150,67 @@ func (s *server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/?from=login", http.StatusSeeOther)
+}
+
+func (s *server) handlePasswordPage(w http.ResponseWriter, r *http.Request) {
+	s.render(w, "password.html", map[string]any{
+		"Env":     s.cfg.EnvName,
+		"Saved":   r.URL.Query().Get("saved") == "1",
+		"Error":   r.URL.Query().Get("e"),
+		"CanSave": strings.TrimSpace(s.cfg.DashboardEnvFile) != "",
+		"EnvFile": s.cfg.DashboardEnvFile,
+	})
+}
+
+func (s *server) handlePasswordSubmit(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	current := r.FormValue("current_password")
+	newPassword := r.FormValue("new_password")
+	confirm := r.FormValue("confirm_password")
+	if !s.passwordMatches(current) {
+		http.Redirect(w, r, "/settings/password?e=current", http.StatusSeeOther)
+		return
+	}
+	if len(newPassword) < 8 {
+		http.Redirect(w, r, "/settings/password?e=short", http.StatusSeeOther)
+		return
+	}
+	if newPassword != confirm {
+		http.Redirect(w, r, "/settings/password?e=match", http.StatusSeeOther)
+		return
+	}
+	if strings.TrimSpace(s.cfg.DashboardEnvFile) == "" {
+		http.Redirect(w, r, "/settings/password?e=envfile", http.StatusSeeOther)
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 10)
+	if err != nil {
+		http.Error(w, "failed to hash password", http.StatusInternalServerError)
+		return
+	}
+	if err := config.UpdateEnvFileValue(s.cfg.DashboardEnvFile, "ADMIN_PASSWORD_HASH", string(hash)); err != nil {
+		http.Error(w, "failed to update dashboard env file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.setPasswordHash(string(hash))
+	_ = os.Setenv("ADMIN_PASSWORD_HASH", string(hash))
+	http.Redirect(w, r, "/settings/password?saved=1", http.StatusSeeOther)
+}
+
+func (s *server) passwordMatches(password string) bool {
+	s.authMu.RLock()
+	hash := s.cfg.AdminHash
+	s.authMu.RUnlock()
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
+}
+
+func (s *server) setPasswordHash(hash string) {
+	s.authMu.Lock()
+	s.cfg.AdminHash = hash
+	s.authMu.Unlock()
 }
 
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {

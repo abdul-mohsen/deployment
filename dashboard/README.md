@@ -33,6 +33,7 @@ runtime besides the docker socket.
 | `LOG_BUFFER_LINES`    | no       | `2000`          |
 | `COOKIE_SECURE`       | no       | `false`         |
 | `DASHBOARD_SNAPSHOT_WORKERS` | no | `8`             |
+| `DASHBOARD_ENV_FILE`  | no       | —               |
 
 Version picker values come from the deployment env (`config.env` / `install.env`):
 
@@ -61,6 +62,8 @@ Generate a password hash:
 go run ./cmd/hashpw 'your-password'
 # -> $2a$10$....
 ```
+
+Set `DASHBOARD_ENV_FILE` to a writable mounted copy of `dashboard.env` to enable password changes from the UI. The production compose file mounts `./dashboard.env` at `/app/dashboard.env` and writes the new `ADMIN_PASSWORD_HASH` there.
 
 Generate a session key (so sessions survive restarts):
 
@@ -114,5 +117,7 @@ dokku letsencrypt:enable admin-prod
   dashboard like sudo: strong password, short-lived sessions, TLS in front.
 - `SESSION_KEY` controls cookie integrity — set it to a stable 32-byte hex
   value or every restart logs everyone out.
+- Password changes rewrite `ADMIN_PASSWORD_HASH` in `DASHBOARD_ENV_FILE`; keep
+  that file writable only by the dashboard container and server admins.
 - The container does not need its own `dokku` user; commands execute inside
   the dokku container via `docker exec`.

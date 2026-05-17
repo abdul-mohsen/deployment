@@ -22,8 +22,10 @@ services:
       SCRIPTS_HOST_PATH: ${SCRIPTS_HOST_PATH:-/opt/deployment}
       SCRIPT_RUNNER_IMAGE: ${SCRIPT_RUNNER_IMAGE:-dokku/dokku:latest}
       DEPLOY_CONFIG_FILE: ${DEPLOY_CONFIG_FILE:-/opt/deployment/config.env}
+      DASHBOARD_ENV_FILE: /app/dashboard.env
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./dashboard.env:/app/dashboard.env
     logging:
       driver: json-file
       options:

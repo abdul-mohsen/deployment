@@ -168,7 +168,7 @@ func TestDashboardTemplatesParse(t *testing.T) {
 		"stateClr": stateClass,
 		"httpClr":  httpClass,
 	}
-	for _, name := range []string{"index.html", "app.html", "tenant.html", "scripts.html", "script.html"} {
+	for _, name := range []string{"index.html", "app.html", "tenant.html", "scripts.html", "script.html", "password.html"} {
 		if _, err := template.New("").Funcs(funcs).ParseFS(tplFS,
 			"templates/_layout.html",
 			"templates/palette.html",

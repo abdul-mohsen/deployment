@@ -318,8 +318,10 @@ grep -q 'TENANT_IGNORED_SCHEMA_FILES="${TENANT_IGNORED_SCHEMA_FILES:-car_part.sq
     || FAIL "init-tenant-db must ignore car_part schema"
 grep -q 'IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"' scripts/deploy-all.sh \
     && grep -q 'docker pull "\$image"' scripts/deploy-all.sh \
-    && PASS "deploy-all refreshes image before deploy" \
-    || FAIL "deploy-all must pull image before dokku git:from-image"
+    && grep -q 'dokku_git_from_image "\$app" "\$image"' scripts/deploy-all.sh \
+    && grep -q 'No changes detected' scripts/lib.sh \
+    && PASS "deploy-all refreshes image and rebuilds same-ref deploys" \
+    || FAIL "deploy-all must pull image and handle same-ref git:from-image deploys"
 grep -q 'init-tenant-db.sh" "\$TENANT_NAME"' scripts/create-tenant.sh \
     && grep -q -- '--backend-image "\$BACKEND_IMAGE"' scripts/create-tenant.sh \
     && grep -q -- '--env "DB_USER=\$TENANT_DB_USER"' scripts/create-tenant.sh \

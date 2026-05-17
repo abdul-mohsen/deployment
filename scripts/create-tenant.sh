@@ -518,7 +518,7 @@ if ! $GIT_ONLY; then
         dokku config:set --no-restart "$BACKEND_APP" \
             APP_IMAGE_VERSION="$(image_tag "$BACKEND_IMAGE")" \
             APP_IMAGE_REF="$BACKEND_IMAGE"
-        dokku git:from-image "$BACKEND_APP" "$BACKEND_IMAGE"
+        dokku_git_from_image "$BACKEND_APP" "$BACKEND_IMAGE"
     else
         info "No backend image — deploy later with: git push dokku@${BASE_DOMAIN}:${BACKEND_APP} main"
     fi
@@ -529,7 +529,7 @@ if ! $GIT_ONLY; then
         dokku config:set --no-restart "$FRONTEND_APP" \
             APP_IMAGE_VERSION="$(image_tag "$FRONTEND_IMAGE")" \
             APP_IMAGE_REF="$FRONTEND_IMAGE"
-        dokku git:from-image "$FRONTEND_APP" "$FRONTEND_IMAGE"
+        dokku_git_from_image "$FRONTEND_APP" "$FRONTEND_IMAGE"
     else
         info "No frontend image — deploy later with: git push dokku@${BASE_DOMAIN}:${FRONTEND_APP} main"
     fi

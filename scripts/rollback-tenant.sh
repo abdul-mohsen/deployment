@@ -116,7 +116,7 @@ rollback_app() {
     info "  From: $current_image"
     info "  To:   $image"
 
-    if dokku git:from-image "$app" "$image"; then
+    if dokku_git_from_image "$app" "$image"; then
         log "$app rolled back successfully ✓"
     else
         error "$app rollback FAILED"

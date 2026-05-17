@@ -119,7 +119,7 @@ if [ -n "$BACKEND_IMAGE" ]; then
     dokku config:set --no-restart "$BACKEND_APP" \
         APP_IMAGE_VERSION="$(image_tag "$BACKEND_IMAGE")" \
         APP_IMAGE_REF="$BACKEND_IMAGE"
-    dokku git:from-image "$BACKEND_APP" "$BACKEND_IMAGE"
+    dokku_git_from_image "$BACKEND_APP" "$BACKEND_IMAGE"
 fi
 
 if [ -n "$FRONTEND_IMAGE" ]; then
@@ -128,7 +128,7 @@ if [ -n "$FRONTEND_IMAGE" ]; then
     dokku config:set --no-restart "$FRONTEND_APP" \
         APP_IMAGE_VERSION="$(image_tag "$FRONTEND_IMAGE")" \
         APP_IMAGE_REF="$FRONTEND_IMAGE"
-    dokku git:from-image "$FRONTEND_APP" "$FRONTEND_IMAGE"
+    dokku_git_from_image "$FRONTEND_APP" "$FRONTEND_IMAGE"
 fi
 
 # ---- Scale ----

@@ -131,7 +131,7 @@ deploy_one() {
         return 1
     fi
 
-    if ! dokku git:from-image "$app" "$image"; then
+    if ! dokku_git_from_image "$app" "$image"; then
         return 1
     fi
 

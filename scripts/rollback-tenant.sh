@@ -62,6 +62,10 @@ if [ -z "$TENANT_NAME" ] && ! $ALL_TENANTS; then
     exit 1
 fi
 
+if [ -n "$TENANT_NAME" ]; then
+    TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
+fi
+
 APP_SUFFIX="-${APP_TYPE}"
 
 # ---- List mode: show deploy history ----
@@ -127,6 +131,12 @@ rollback_app() {
 if $ALL_TENANTS; then
     # Rollback all tenants of this type
     APPS=$(dokku apps:list 2>/dev/null | tail -n +2 | grep -- "${APP_SUFFIX}$" || true)
+    if [ -n "$(tenant_name_prefix)" ]; then
+        APPS=$(while IFS= read -r app; do
+            tenant="${app%${APP_SUFFIX}}"
+            tenant_in_scope "$tenant" && printf '%s\n' "$app"
+        done <<< "$APPS")
+    fi
 
     if [ -z "$APPS" ]; then
         error "No ${APP_TYPE} apps found."

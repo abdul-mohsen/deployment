@@ -86,12 +86,6 @@ if [ -z "$TENANT_NAME" ]; then
     exit 1
 fi
 
-TENANT_NAME="$(echo "$TENANT_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/^-//;s/-$//')"
-if [ -z "$TENANT_NAME" ] || [ ${#TENANT_NAME} -gt 63 ]; then
-    error "Invalid tenant name (must be 1-63 chars, lowercase alphanumeric + hyphens)."
-    exit 1
-fi
-
 if [ -f "$CONFIG_FILE" ]; then
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
@@ -99,6 +93,8 @@ else
     error "Config file not found: $CONFIG_FILE"
     exit 1
 fi
+
+TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
 
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"
 DOKKU_PORT="${DOKKU_PORT:-8080}"

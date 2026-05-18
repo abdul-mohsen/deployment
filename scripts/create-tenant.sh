@@ -53,6 +53,17 @@ info()  { echo -e "${BLUE}[i]${NC} $*"; }
 
 # ---- Load config ----
 CONFIG_FILE="${CONFIG_FILE:-$PROJECT_DIR/config.env}"
+for i in $(seq 1 $#); do
+    if [ "${!i}" = "--config" ]; then
+        j=$((i+1))
+        if [ "$j" -gt "$#" ]; then
+            error "--config requires a path"
+            exit 1
+        fi
+        CONFIG_FILE="${!j}"
+        break
+    fi
+done
 if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 else
@@ -231,8 +242,7 @@ if [ -z "$TENANT_NAME" ]; then
     exit 1
 fi
 
-# Sanitize: lowercase, alphanumeric + hyphens
-TENANT_NAME="$(echo "$TENANT_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/^-//;s/-$//')"
+TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
 
 if [ -z "$TENANT_NAME" ] || [ ${#TENANT_NAME} -gt 63 ]; then
     error "Invalid tenant name (must be 1-63 chars, lowercase alphanumeric + hyphens)."
@@ -290,6 +300,9 @@ fi
 echo ""
 info "=== Tenant Provisioning Plan ==="
 info "  Tenant:         $TENANT_NAME"
+if [ -n "${TENANT_NAME_PREFIX:-}" ]; then
+    info "  Tenant prefix:  $(tenant_name_prefix)"
+fi
 info "  Domain:         $TENANT_DOMAIN"
 info "  Backend app:    $BACKEND_APP  → internal only (${BACKEND_APP}.web:${BACKEND_PORT})"
 info "  Frontend app:   $FRONTEND_APP → $TENANT_DOMAIN"

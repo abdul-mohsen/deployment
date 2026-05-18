@@ -455,6 +455,8 @@ func (r *Runner) Run(ctx context.Context, w io.Writer, scriptName string, argv [
 	full := []string{
 		"run", "--rm", "-i",
 		"-e", "MYSQL_CLIENT_MODE=docker",
+		"-e", "TENANT_NAME_PREFIX=" + os.Getenv("TENANT_NAME_PREFIX"),
+		"-e", "TENANT_NAME_PREFIX_OVERRIDE=" + os.Getenv("TENANT_NAME_PREFIX"),
 		"-v", "/var/run/docker.sock:/var/run/docker.sock",
 		"-v", r.scriptsHostPath + ":/opt/deployment:ro",
 		"--network", "host",

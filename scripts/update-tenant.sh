@@ -101,6 +101,8 @@ if [ -z "$TENANT_NAME" ]; then
     exit 1
 fi
 
+TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
+
 BACKEND_APP="${TENANT_NAME}-backend"
 FRONTEND_APP="${TENANT_NAME}-frontend"
 

@@ -68,6 +68,50 @@ mysql_host_for_container() {
     esac
 }
 
+sanitize_tenant_name() {
+    printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/^-*//;s/-*$//'
+}
+
+tenant_name_prefix() {
+    local prefix
+    prefix="$(sanitize_tenant_name "${TENANT_NAME_PREFIX_OVERRIDE:-${TENANT_NAME_PREFIX:-}}")"
+    [ -z "$prefix" ] && return 0
+    case "$prefix" in
+        *-) printf '%s' "$prefix" ;;
+        *)  printf '%s-' "$prefix" ;;
+    esac
+}
+
+tenant_full_name() {
+    local tenant prefix
+    tenant="$(sanitize_tenant_name "$1")"
+    prefix="$(tenant_name_prefix)"
+    if [ -n "$prefix" ] && [[ "$tenant" != "$prefix"* ]]; then
+        tenant="${prefix}${tenant}"
+    fi
+    if [ -z "$tenant" ] || [ ${#tenant} -gt 63 ]; then
+        echo "Invalid tenant name after applying TENANT_NAME_PREFIX: $tenant" >&2
+        return 1
+    fi
+    printf '%s' "$tenant"
+}
+
+tenant_in_scope() {
+    local tenant prefix
+    tenant="$(sanitize_tenant_name "$1")"
+    prefix="$(tenant_name_prefix)"
+    [ -z "$prefix" ] || [[ "$tenant" == "$prefix"* ]]
+}
+
+tenant_from_app_name() {
+    local app="$1"
+    case "$app" in
+        *-backend)  printf '%s' "${app%-backend}" ;;
+        *-frontend) printf '%s' "${app%-frontend}" ;;
+        *)          printf '%s' "$app" ;;
+    esac
+}
+
 # MySQL client (supports stdin/heredocs)
 run_mysql() {
     local host

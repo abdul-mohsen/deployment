@@ -53,6 +53,8 @@ if [ -z "$TENANT_NAME" ]; then
     exit 1
 fi
 
+TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
+
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
 MYSQL_HOST="${MYSQL_HOST:-127.0.0.1}"
 MYSQL_PORT="${MYSQL_PORT:-3306}"

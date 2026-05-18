@@ -43,6 +43,10 @@ done
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
+if [ -n "$TENANT_FILTER" ]; then
+    TENANT_FILTER="$(tenant_full_name "$TENANT_FILTER")" || exit 1
+fi
+
 BASE_DOMAIN="${BASE_DOMAIN:-<unset>}"
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
 
@@ -227,6 +231,7 @@ render_once() {
         echo "${B}===========================================================${N}"
         printf "  Dokku container : %s\n" "$(colorize_state "$dstate")"
         printf "  Dokku host ports: %s\n" "${dports:-<none>}"
+        [ -n "$(tenant_name_prefix)" ] && printf "  Tenant prefix   : %s\n" "$(tenant_name_prefix)"
         printf "  Auto-pull cron  : %s\n" "$(cron_has_autopull)"
         echo ""
     fi
@@ -241,6 +246,13 @@ render_once() {
     # only lines that look like a Dokku app name (lowercase, digits, hyphens).
     local apps; apps=$(docker exec -i dokku dokku --quiet apps:list 2>/dev/null \
                        | grep -E '^[a-z0-9][a-z0-9-]*$' || true)
+
+    if [ -n "$(tenant_name_prefix)" ]; then
+        apps=$(while IFS= read -r app; do
+            tenant="$(app_tenant "$app")"
+            tenant_in_scope "$tenant" && printf '%s\n' "$app"
+        done <<< "$apps")
+    fi
 
     if [ -n "$TENANT_FILTER" ]; then
         apps=$(printf '%s\n' "$apps" \

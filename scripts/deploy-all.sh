@@ -148,6 +148,7 @@ if [ ${#TARGET_TENANTS[@]} -gt 0 ]; then
     # Deploy to specific tenants only
     APPS=""
     for t in "${TARGET_TENANTS[@]}"; do
+        t="$(tenant_full_name "$t")" || exit 1
         APP_NAME="${t}${SUFFIX}"
         if dokku apps:exists "$APP_NAME" 2>/dev/null; then
             APPS="${APPS:+$APPS
@@ -161,8 +162,16 @@ else
     # Deploy to all tenants
     APPS=$(dokku apps:list 2>/dev/null | tail -n +2 | grep -- "${SUFFIX}$" || true)
 
+    if [ -n "$(tenant_name_prefix)" ]; then
+        APPS=$(while IFS= read -r app; do
+            tenant="${app%${SUFFIX}}"
+            tenant_in_scope "$tenant" && printf '%s\n' "$app"
+        done <<< "$APPS")
+    fi
+
     # Apply exclusions
     for ex in "${EXCLUDE_TENANTS[@]+"${EXCLUDE_TENANTS[@]}"}"; do
+        ex="$(tenant_full_name "$ex")" || exit 1
         APPS=$(echo "$APPS" | grep -v -x "${ex}${SUFFIX}" || true)
     done
 fi

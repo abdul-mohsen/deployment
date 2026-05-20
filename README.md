@@ -2,6 +2,19 @@
 
 Server-side automation for a Dokku-based multi-tenant platform.
 
+The primary operator entrypoint is now one git-style command:
+
+```bash
+sudo ./scripts/deployctl.sh <area> <command> [args]
+```
+
+Use `--plan` to see the underlying script before running it:
+
+```bash
+./scripts/deployctl.sh --plan tenant update acme --restart
+# bash scripts/update-tenant.sh acme --restart
+```
+
 **Two repos own their own build:**
 
 ```
@@ -13,7 +26,7 @@ backend repo  →  push to dev  ──────────┐
                                   │                   │
                                   │ manual            │ auto every 2 min
                                   ▼                   ▼
-                          deploy-all.sh         auto-pull.sh
+                          deployctl fleet sync   deployctl fleet auto-pull
                                   │                   │
                               prod tenants       dev tenant
 ```
@@ -30,6 +43,7 @@ backend repo  →  push to dev  ──────────┐
 config.env.example          # copy to config.env on each server
 README.md
 scripts/                    # ops automation (run on the server)
+  deployctl.sh              # one command: tenant/fleet/stack/setup/db/dokku/webhook
   setup.sh                  # one-time install: Dokku, MySQL wiring, cron, webhook
   setup-dev-tenant.sh       # creates the single dev tenant pinned to :dev
   create-tenant.sh          # provision a new prod tenant
@@ -81,21 +95,25 @@ cp config.env.example config.env
 $EDITOR config.env
 
 sudo ./scripts/setup.sh
-sudo ./scripts/setup-dev-tenant.sh        # creates the one dev tenant
+sudo ./scripts/deployctl.sh setup dev-tenant        # creates the one dev tenant
 ```
 
 ## Day-2 operations
 
 | Task | Command |
 |---|---|
-| Create prod tenant | `sudo ./scripts/create-tenant.sh acme` |
-| Manual prod deploy (one client) | `sudo ./scripts/deploy-all.sh myuser/api:latest --tenant acme` |
-| Manual prod deploy (all clients) | `sudo ./scripts/deploy-all.sh myuser/api:latest` |
-| Pin a tenant to a fixed image | `sudo ./scripts/set-tenant-image.sh acme --backend myuser/api:v1.4` |
-| Rollback | `sudo ./scripts/rollback-tenant.sh acme --to myuser/api:abc1234` |
-| List tenants | `sudo ./scripts/list-tenants.sh` |
-| Tail logs | `sudo ./scripts/tail-logs.sh acme-backend` |
-| Backup | `sudo ./scripts/backup-tenant.sh --all` |
+| Create prod tenant | `sudo ./scripts/deployctl.sh tenant create acme` |
+| Manual prod deploy (one client) | `sudo ./scripts/deployctl.sh fleet sync myuser/api:latest --tenant acme` |
+| Manual prod deploy (all clients) | `sudo ./scripts/deployctl.sh fleet sync myuser/api:latest` |
+| Pin a tenant to a fixed image | `sudo ./scripts/deployctl.sh tenant pin acme --backend myuser/api:v1.4` |
+| Rollback | `sudo ./scripts/deployctl.sh tenant rollback acme --to myuser/api:abc1234` |
+| List tenants | `sudo ./scripts/deployctl.sh tenant list` |
+| Tenant status | `sudo ./scripts/deployctl.sh tenant status acme` |
+| Tail logs | `sudo ./scripts/deployctl.sh tenant logs acme --type backend` |
+| Backup | `sudo ./scripts/deployctl.sh fleet backup` |
+| Restart platform | `sudo ./scripts/deployctl.sh stack restart --env all` |
+
+The old `scripts/*.sh` files remain as readable implementation units and compatibility entrypoints. New operations should be exposed through `deployctl.sh` first.
 
 ## Bootstrapping the app repos
 

@@ -177,7 +177,64 @@ func (s Script) Slug() string {
 	return strings.TrimSuffix(s.Name, ".sh")
 }
 
-// Catalog returns the curated list of scripts the dashboard exposes.
+// ControlCommand returns the equivalent deployctl command shown in the UI.
+func (s Script) ControlCommand() string {
+	switch s.Slug() {
+	case "status":
+		return "fleet status"
+	case "list-tenants":
+		return "tenant list"
+	case "create-tenant":
+		return "tenant create"
+	case "init-tenant-db":
+		return "tenant init-db"
+	case "remove-tenant":
+		return "tenant remove"
+	case "cleanup-broken-tenant":
+		return "tenant cleanup"
+	case "deploy-all":
+		return "fleet sync"
+	case "rollback-tenant":
+		return "tenant rollback"
+	case "set-tenant-image":
+		return "tenant pin"
+	case "update-tenant":
+		return "tenant update"
+	case "backup-tenant":
+		return "tenant backup"
+	case "tail-logs":
+		return "tenant logs"
+	case "verify-mysql":
+		return "db verify"
+	case "fix-dokku-hostname":
+		return "dokku fix-hostname"
+	case "setup-nats":
+		return "setup nats"
+	case "discover-dokku-nginx":
+		return "dokku discover-nginx"
+	case "watch-dokku-traffic":
+		return "dokku traffic"
+	case "auto-pull":
+		return "fleet auto-pull"
+	case "setup-dev-tenant":
+		return "setup dev-tenant"
+	case "cleanup-old-files":
+		return "cleanup old-files"
+	default:
+		return "script " + s.Name
+	}
+}
+
+// Group returns the operation group used by command-center templates.
+func (s Script) Group() string {
+	cmd := s.ControlCommand()
+	if before, _, ok := strings.Cut(cmd, " "); ok {
+		return before
+	}
+	return cmd
+}
+
+// Catalog returns the curated list of deployctl-backed operations the dashboard exposes.
 //
 // Adding a new script: drop it into ./scripts/ and add an entry here. Only
 // scripts in this list are executable; anything else is rejected.
@@ -472,7 +529,7 @@ cp -r /opt/deployment/scripts /tmp/dep/
 find /tmp/dep -type f \( -name '*.sh' -o -name '*.env' \) -exec sed -i 's/\r$//' {} +
 cd /tmp/dep
 NAME="$1"; shift
-exec bash "scripts/$NAME" "$@"
+exec bash "scripts/deployctl.sh" "script" "$NAME" "$@"
 `,
 		"--", scriptName,
 	}

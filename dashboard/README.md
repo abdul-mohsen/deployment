@@ -1,13 +1,13 @@
-# Dokku Dashboard
+# Dokku Control Plane
 
-Argo-CD-style web UI for the Dokku tenants on this server.
+Argo-CD-inspired web UI for the Dokku tenants on this server.
 
-- Live status grid (SSE; updates every 3s with smooth state-change animations)
+- Application grid with Health, Sync, Live, and Desired state
 - Per-app actions: start / stop / restart / rebuild
 - Tenant-first actions: select a tenant, then update version / restart / stop / delete
 - Compatible version picker: one tag maps to backend and frontend images
 - Live log streaming (SSE) + ring-buffer log aggregation + downloadable dump
-- Form-driven scripts (`/scripts/<name>`) with streamed output
+- Command forms backed by `scripts/deployctl.sh` with streamed output
 - Command palette (Ctrl/Cmd+K)
 - Single-admin login (bcrypt) with signed cookie session
 
@@ -45,6 +45,14 @@ APP_IMAGE_VERSION_DEFAULT=dev
 ```
 
 Publishing `BACKEND_IMAGE:v1` and `FRONTEND_IMAGE:v1` makes `v1` selectable as a compatible pair. Re-pushing only the frontend with the same tag is supported; update deploys pull before applying the image.
+
+The equivalent shell workflow uses the same command vocabulary:
+
+```sh
+sudo ./scripts/deployctl.sh tenant status acme
+sudo ./scripts/deployctl.sh tenant update acme --backend-image repo/api:v1 --frontend-image repo/web:v1
+sudo ./scripts/deployctl.sh fleet sync repo/api:v2 --type backend --tenant acme
+```
 
 ## Local perf check
 

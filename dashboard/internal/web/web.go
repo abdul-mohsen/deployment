@@ -467,7 +467,7 @@ func (s *server) handleScriptRun(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	fmt.Fprintf(w, "data: $ bash scripts/%s %s\n\n", sc.Name, strings.Join(displayArgv(sc, argv), " "))
+	fmt.Fprintf(w, "data: $ bash scripts/deployctl.sh %s %s\n\n", sc.ControlCommand(), strings.Join(displayArgv(sc, argv), " "))
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}

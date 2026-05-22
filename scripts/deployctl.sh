@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PROGRAM="${0##*/}"
-CONFIG_FILE=""
+CONFIG_FILE="${CONFIG_FILE:-}"
 PLAN=false
 
 usage() {
@@ -91,6 +91,7 @@ run_script() {
 
     local args=("$@")
     if [ -n "$CONFIG_FILE" ] && script_accepts_config "$script"; then
+        export CONFIG_FILE
         args+=(--config "$CONFIG_FILE")
     fi
 

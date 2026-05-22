@@ -36,6 +36,14 @@ expect_plan "bash scripts/create-tenant.sh acme --backend-image repo/api:v1 --fr
 expect_plan "bash scripts/update-tenant.sh acme --restart --config /opt/deployment/config.prod.env" \
     --config /opt/deployment/config.prod.env tenant update acme --restart
 
+got="$(CONFIG_FILE=/opt/deployment/config.prod.env plan tenant update acme --restart)"
+if [ "$got" = "bash scripts/update-tenant.sh acme --restart --config /opt/deployment/config.prod.env" ]; then
+    pass "CONFIG_FILE env is preserved"
+else
+    echo "got:      $got"
+    fail "CONFIG_FILE env is preserved"
+fi
+
 expect_plan "bash scripts/status.sh --tenant acme --json --config /opt/deployment/config.prod.env" \
     --config /opt/deployment/config.prod.env tenant status acme --json
 

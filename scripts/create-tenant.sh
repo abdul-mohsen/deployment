@@ -295,6 +295,24 @@ if dokku apps:exists "$BACKEND_APP" 2>/dev/null; then
     error "App '$BACKEND_APP' already exists. Tenant may already be provisioned."
     exit 1
 fi
+if dokku apps:exists "$FRONTEND_APP" 2>/dev/null; then
+    error "App '$FRONTEND_APP' already exists. Tenant may already be provisioned."
+    exit 1
+fi
+
+create_dokku_app() {
+    local app="$1"
+    log "Creating app: $app"
+    if dokku apps:create "$app"; then
+        return 0
+    fi
+    if dokku apps:exists "$app" 2>/dev/null; then
+        warn "dokku apps:create returned non-zero after creating $app; continuing."
+        return 0
+    fi
+    error "Failed to create app: $app"
+    exit 1
+}
 
 # ---- Show plan ----
 echo ""
@@ -339,11 +357,8 @@ fi
 # =============================================================================
 
 # ---- 1. Create Dokku apps ----
-log "Creating backend app: $BACKEND_APP"
-dokku apps:create "$BACKEND_APP"
-
-log "Creating frontend app: $FRONTEND_APP"
-dokku apps:create "$FRONTEND_APP"
+create_dokku_app "$BACKEND_APP"
+create_dokku_app "$FRONTEND_APP"
 
 # ---- 2. Set domains ----
 log "Configuring domains..."

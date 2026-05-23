@@ -4,6 +4,7 @@ package web
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -52,9 +53,10 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		"now":      func() string { return time.Now().Format("2006-01-02 15:04:05") },
 		"stateClr": stateClass,
 		"httpClr":  httpClass,
+		"json":     templateJSON,
 	}
 	pages := map[string]*template.Template{}
-	layoutPages := []string{"index.html", "app.html", "tenant.html", "scripts.html", "script.html", "password.html"}
+	layoutPages := []string{"index.html", "app.html", "tenant.html", "scripts.html", "script.html", "releases.html", "password.html"}
 	for _, name := range layoutPages {
 		pages[name] = template.Must(template.New("").Funcs(funcs).ParseFS(tplFS,
 			"templates/_layout.html",
@@ -103,12 +105,21 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		r.Get("/events", s.handleEvents)
 		r.Get("/settings/password", s.handlePasswordPage)
 		r.Post("/settings/password", s.handlePasswordSubmit)
+		r.Get("/releases", s.handleReleasesPage)
 		r.Get("/scripts", s.handleScriptsPage)
 		r.Get("/scripts/{name}", s.handleScriptPage)
 		r.Post("/scripts/{name}/run", s.handleScriptRun)
 	})
 
 	return r
+}
+
+func templateJSON(v any) template.JS {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return template.JS("null")
+	}
+	return template.JS(b)
 }
 
 // ---- Auth -------------------------------------------------------------------
@@ -424,8 +435,17 @@ func (s *server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleScriptsPage(w http.ResponseWriter, _ *http.Request) {
 	s.render(w, "scripts.html", map[string]any{
-		"Env":     s.cfg.EnvName,
-		"Scripts": scripts.Catalog(),
+		"Env":      s.cfg.EnvName,
+		"Scripts":  scripts.Catalog(),
+		"Releases": scripts.ReleaseCatalog(),
+	})
+}
+
+func (s *server) handleReleasesPage(w http.ResponseWriter, _ *http.Request) {
+	s.render(w, "releases.html", map[string]any{
+		"Env":            s.cfg.EnvName,
+		"Releases":       scripts.ReleaseCatalog(),
+		"DefaultVersion": scripts.DefaultImageVersion(),
 	})
 }
 
@@ -439,6 +459,7 @@ func (s *server) handleScriptPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "script.html", map[string]any{
 		"Env":              s.cfg.EnvName,
 		"Script":           sc,
+		"Releases":         scripts.ReleaseCatalog(),
 		"RunnerConfigured": s.cfg.ScriptsHostPath != "",
 	})
 }

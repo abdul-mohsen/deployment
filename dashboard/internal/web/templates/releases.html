@@ -1,0 +1,47 @@
+{{define "content"}}
+<section class="ops-hero compact">
+  <div>
+    <div class="eyebrow">releases</div>
+    <h1>Version Catalog</h1>
+    <p>Selecting a version deploys the matching backend and frontend image tags.</p>
+  </div>
+  <div class="hero-actions">
+    <a href="/scripts/create-tenant" class="command-link">New tenant</a>
+    <a href="/scripts/update-tenant" class="command-link secondary">Update tenant</a>
+  </div>
+</section>
+
+<div class="release-grid">
+  {{range .Releases}}
+  <article class="release-card {{if .Broken}}broken{{end}}">
+    <div class="release-card-head">
+      <div>
+        <span class="release-tag">{{.Tag}}</span>
+        {{if eq .Tag $.DefaultVersion}}<span class="release-default">default</span>{{end}}
+      </div>
+      <span class="release-pill {{if .Broken}}broken{{else}}ok{{end}}">{{if .Broken}}broken{{else}}{{.Status}}{{end}}</span>
+    </div>
+    <h3>{{if .Title}}{{.Title}}{{else}}{{.Tag}}{{end}}</h3>
+    {{if .Date}}<p class="release-date">{{.Date}}</p>{{end}}
+    <dl class="release-images">
+      <div><dt>Backend</dt><dd>{{.BackendImage}}</dd></div>
+      <div><dt>Frontend</dt><dd>{{.FrontendImage}}</dd></div>
+    </dl>
+    <ul class="release-notes">
+      {{range .Notes}}
+      <li>{{.}}</li>
+      {{else}}
+      <li>No release notes recorded for this version.</li>
+      {{end}}
+    </ul>
+    <div class="release-actions">
+      <a href="/scripts/create-tenant?image_version={{urlquery .Tag}}" class="action-chip good">Create tenant</a>
+      <a href="/scripts/update-tenant?image_version={{urlquery .Tag}}" class="action-chip">Update tenant</a>
+      <a href="/scripts/deploy-all?image_version={{urlquery .Tag}}" class="action-chip">Fleet sync</a>
+    </div>
+  </article>
+  {{end}}
+</div>
+{{end}}
+
+{{define "releases.html"}}{{template "_layout.html" .}}{{end}}

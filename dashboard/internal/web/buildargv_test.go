@@ -16,8 +16,8 @@ func setVersionTestEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("BACKEND_IMAGE", "ssdawweq/ifritah-api")
 	t.Setenv("FRONTEND_IMAGE", "ssdawweq/ifritah-web")
-	t.Setenv("APP_IMAGE_VERSIONS", "dev,2026.05.17")
-	t.Setenv("APP_IMAGE_VERSION_DEFAULT", "dev")
+	t.Setenv("APP_IMAGE_VERSIONS", "v2.4.51,v2.4.50")
+	t.Setenv("APP_IMAGE_VERSION_DEFAULT", "v2.4.51")
 }
 
 func TestBuildArgv_CreateTenant_FullFlow(t *testing.T) {
@@ -47,8 +47,8 @@ func TestBuildArgv_CreateTenant_FullFlow(t *testing.T) {
 		"--env MANAGER_USER=manager",
 		"--env MANAGER_PASSWORD=M4nager!",
 		"--env COMPANY_NAME=ACME",
-		"--backend-image ssdawweq/ifritah-api:dev",
-		"--frontend-image ssdawweq/ifritah-web:dev",
+		"--backend-image ssdawweq/ifritah-api:v2.4.51",
+		"--frontend-image ssdawweq/ifritah-web:v2.4.51",
 		"--backend-port 8090",
 		"--frontend-port 8000",
 	} {
@@ -121,7 +121,7 @@ func TestBuildArgv_UpdateTenant_VersionExpandsPair(t *testing.T) {
 	sc := scripts.Find("update-tenant.sh")
 	form := url.Values{
 		"_pos_name":     {"fresh"},
-		"image_version": {"2026.05.17"},
+		"image_version": {"v2.4.50"},
 	}
 	argv, err := buildArgv(sc, form)
 	if err != nil {
@@ -130,8 +130,8 @@ func TestBuildArgv_UpdateTenant_VersionExpandsPair(t *testing.T) {
 	joined := strings.Join(argv, " ")
 	for _, want := range []string{
 		"fresh",
-		"--backend-image ssdawweq/ifritah-api:2026.05.17",
-		"--frontend-image ssdawweq/ifritah-web:2026.05.17",
+		"--backend-image ssdawweq/ifritah-api:v2.4.50",
+		"--frontend-image ssdawweq/ifritah-web:v2.4.50",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("argv missing %q\nfull: %s", want, joined)
@@ -143,7 +143,7 @@ func TestBuildArgv_DeployAll_FrontendVersionExpandsPosImage(t *testing.T) {
 	setVersionTestEnv(t)
 	sc := scripts.Find("deploy-all.sh")
 	form := url.Values{
-		"image_version": {"2026.05.17"},
+		"image_version": {"v2.4.50"},
 		"type":          {"frontend"},
 		"tenant":        {"fresh"},
 	}
@@ -153,7 +153,7 @@ func TestBuildArgv_DeployAll_FrontendVersionExpandsPosImage(t *testing.T) {
 	}
 	joined := strings.Join(argv, " ")
 	for _, want := range []string{
-		"ssdawweq/ifritah-web:2026.05.17",
+		"ssdawweq/ifritah-web:v2.4.50",
 		"--type frontend",
 		"--tenant fresh",
 	} {
@@ -169,8 +169,9 @@ func TestDashboardTemplatesParse(t *testing.T) {
 		"now":      func() string { return time.Now().Format("2006-01-02 15:04:05") },
 		"stateClr": stateClass,
 		"httpClr":  httpClass,
+		"json":     templateJSON,
 	}
-	for _, name := range []string{"index.html", "app.html", "tenant.html", "scripts.html", "script.html", "password.html"} {
+	for _, name := range []string{"index.html", "app.html", "tenant.html", "scripts.html", "script.html", "releases.html", "password.html"} {
 		if _, err := template.New("").Funcs(funcs).ParseFS(tplFS,
 			"templates/_layout.html",
 			"templates/palette.html",

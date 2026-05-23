@@ -1,33 +1,12 @@
 [
   {
-    "tag": "v2.4.51",
-    "date": "2026-05-23",
-    "status": "stable",
-    "title": "Current production release",
+    "tag": "v0.0.1",
+    "date": "",
+    "status": "ready",
+    "title": "Initial release",
     "notes": [
-      "Recommended version for new tenants and fleet updates.",
-      "Deploys backend and frontend images with the v2.4.51 tag."
-    ]
-  },
-  {
-    "tag": "v2.4.50",
-    "date": "2026-05-18",
-    "status": "stable",
-    "title": "Previous production release",
-    "notes": [
-      "Safe rollback target when v2.4.51 is not desired.",
-      "Keep backend and frontend on the same v2.4.50 tag."
-    ]
-  },
-  {
-    "tag": "v2.4.49",
-    "date": "2026-05-12",
-    "status": "broken",
-    "broken": true,
-    "title": "Broken release",
-    "notes": [
-      "Marked broken in the release catalog.",
-      "Do not deploy except for investigation or explicit rollback testing."
+      "Starting release. Backend and frontend must both publish images with the v0.0.1 tag.",
+      "Keep this release only until the first feature or bug-fix release increments VERSION."
     ]
   }
 ]

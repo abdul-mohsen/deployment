@@ -36,30 +36,28 @@ runtime besides the docker socket.
 | `DASHBOARD_SNAPSHOT_WORKERS` | no | `8`             |
 | `DASHBOARD_ENV_FILE`  | no       | —               |
 
-Version picker values are exact image tags such as `v2.4.51`, not channels such as
+Version picker values are exact SemVer image tags such as `v0.0.1`, not channels such as
 `latest`, `stable`, or `dev`. The dashboard deploys the selected tag to both apps:
 
 ```sh
 BACKEND_IMAGE=ssdawweq/ifritah-api
 FRONTEND_IMAGE=ssdawweq/ifritah-web
-APP_IMAGE_VERSIONS=v2.4.51,v2.4.50,v2.4.49
-APP_IMAGE_VERSION_DEFAULT=v2.4.51
-APP_IMAGE_BROKEN_VERSIONS=v2.4.49
+APP_IMAGE_VERSIONS=v0.0.1
+APP_IMAGE_VERSION_DEFAULT=v0.0.1
 ```
 
-Publishing `BACKEND_IMAGE:v2.4.51` and `FRONTEND_IMAGE:v2.4.51` makes `v2.4.51` selectable as a compatible pair. Re-pushing only the frontend with the same tag is supported; update deploys pull before applying the image.
+Publishing `BACKEND_IMAGE:v0.0.1` and `FRONTEND_IMAGE:v0.0.1` makes `v0.0.1` selectable as a compatible pair. Re-pushing without changing `VERSION` overwrites that same image tag; increment `VERSION` only for a new feature or bug-fix release.
 
-Release notes and broken-version status are read from `dashboard/releases.json` by default, or from `APP_IMAGE_RELEASES_FILE` when set. The file shape is:
+Release notes are best kept in GitHub Releases, then mirrored into `dashboard/releases.json` for the server dashboard, or into `APP_IMAGE_RELEASES_FILE` when set. Broken status is not read from the file: the dashboard marks a version broken when the latest Dokku deployment currently running that version is not healthy. The file shape is:
 
 ```json
 [
   {
-    "tag": "v2.4.51",
-    "date": "2026-05-23",
-    "status": "stable",
-    "broken": false,
-    "title": "Current production release",
-    "notes": ["Recommended version for new tenants and fleet updates."]
+    "tag": "vX.X.X",
+    "date": "YYYY-MM-DD",
+    "status": "ready",
+    "title": "Short release title",
+    "notes": ["Human-written release note."]
   }
 ]
 ```
@@ -68,8 +66,8 @@ The equivalent shell workflow uses the same command vocabulary:
 
 ```sh
 sudo ./scripts/deployctl.sh tenant status acme
-sudo ./scripts/deployctl.sh tenant update acme --backend-image repo/api:v1 --frontend-image repo/web:v1
-sudo ./scripts/deployctl.sh fleet sync repo/api:v2 --type backend --tenant acme
+sudo ./scripts/deployctl.sh tenant update acme --backend-image repo/api:v0.0.1 --frontend-image repo/web:v0.0.1
+sudo ./scripts/deployctl.sh fleet sync repo/api:v0.0.1 --type backend --tenant acme
 ```
 
 ## Local perf check

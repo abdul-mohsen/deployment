@@ -169,7 +169,7 @@
       hint.hidden = true;
       return;
     }
-    const status = release.Broken ? 'broken' : (release.Status || 'stable');
+    const status = release.Broken ? 'broken' : (release.Status || 'ready');
     hint.hidden = false;
     hint.classList.toggle('broken', !!release.Broken);
     hint.querySelector('[data-version-title]').textContent = release.Tag + (release.Title && release.Title !== release.Tag ? ' - ' + release.Title : '');

@@ -22,16 +22,16 @@ backend repo  →  push to dev  ──────────┐
                  push to main ────┐     │
                                   │     │       Docker Hub
                                   ▼     ▼
-                            myuser/api:latest    myuser/api:dev
+            myuser/api:v0.0.1    myuser/api:<sha>
                                   │                   │
-                                  │ manual            │ auto every 2 min
+              │ manual            │ webhook/dev deploy
                                   ▼                   ▼
-                          deployctl fleet sync   deployctl fleet auto-pull
+          deployctl fleet sync   deployctl tenant update
                                   │                   │
                               prod tenants       dev tenant
 ```
 
-- **Dev**: a single tenant; `auto-pull.sh` polls `:dev` every 2 min and redeploys.
+- **Dev**: a single tenant; webhook deployment can pull the exact `VERSION` tag.
 - **Prod**: ops runs `deploy-all.sh <image> --tenant <client>` per client when promoting a build.
 - **App repos own**: Dockerfile, docker-compose for local dev, `.env.example`, and the GitHub Actions workflow that builds + pushes the image.
 - **This repo owns**: server provisioning, tenant lifecycle, image polling, manual rollouts, backups, rollbacks.
@@ -45,12 +45,12 @@ README.md
 scripts/                    # ops automation (run on the server)
   deployctl.sh              # one command: tenant/fleet/stack/setup/db/dokku/webhook
   setup.sh                  # one-time install: Dokku, MySQL wiring, cron, webhook
-  setup-dev-tenant.sh       # creates the single dev tenant pinned to :dev
+  setup-dev-tenant.sh       # creates the single dev tenant pinned to DEV_TAG
   create-tenant.sh          # provision a new prod tenant
   remove-tenant.sh
   update-tenant.sh
   deploy-all.sh             # MANUAL prod deploy (per-client or all)
-  auto-pull.sh              # cron: dev-only auto-deploy from :dev tag
+  auto-pull.sh              # optional cron: dev-only auto-deploy from DEV_TAG
   rollback-tenant.sh
   set-tenant-image.sh       # pin a tenant to a specific image
   list-tenants.sh
@@ -103,9 +103,9 @@ sudo ./scripts/deployctl.sh setup dev-tenant        # creates the one dev tenant
 | Task | Command |
 |---|---|
 | Create prod tenant | `sudo ./scripts/deployctl.sh tenant create acme` |
-| Manual prod deploy (one client) | `sudo ./scripts/deployctl.sh fleet sync myuser/api:latest --tenant acme` |
-| Manual prod deploy (all clients) | `sudo ./scripts/deployctl.sh fleet sync myuser/api:latest` |
-| Pin a tenant to a fixed image | `sudo ./scripts/deployctl.sh tenant pin acme --backend myuser/api:v1.4` |
+| Manual prod deploy (one client) | `sudo ./scripts/deployctl.sh fleet sync myuser/api:v0.0.1 --tenant acme` |
+| Manual prod deploy (all clients) | `sudo ./scripts/deployctl.sh fleet sync myuser/api:v0.0.1` |
+| Pin a tenant to a fixed image | `sudo ./scripts/deployctl.sh tenant pin acme --backend myuser/api:v0.0.1` |
 | Rollback | `sudo ./scripts/deployctl.sh tenant rollback acme --to myuser/api:abc1234` |
 | List tenants | `sudo ./scripts/deployctl.sh tenant list` |
 | Tenant status | `sudo ./scripts/deployctl.sh tenant status acme` |
@@ -126,10 +126,11 @@ docker compose up          # local dev stack
 # In the frontend repo: same with templates/frontend
 ```
 
-Each app repo CI builds:
-- `:dev` on push to `dev` → server's `auto-pull.sh` deploys it within ~2 min.
-- `:latest` on push to `main` → **not auto-deployed**. Ops promotes manually with `deploy-all.sh`.
-- `:<sha>` on every push → used for rollbacks.
+Each app repo CI reads `VERSION`, validates strict `vMAJOR.MINOR.PATCH`, and builds:
+- `:vX.X.X` from `VERSION` → primary deploy tag. Re-running CI with the same version overwrites that tag.
+- `:<sha>` on every push → immutable reference for rollbacks/debugging.
+
+Backend and frontend releases must use the same `VERSION` value. The dashboard version picker deploys that one tag to both apps. CI fails if `VERSION` is lower than the latest GitHub Release tag; equal is allowed for overwrite builds.
 
 ## GitHub secrets to set in each app repo
 

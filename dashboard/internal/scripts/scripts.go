@@ -64,7 +64,7 @@ func VersionCatalog() []ImageVersion {
 	for _, tag := range versions {
 		meta := metadata[tag]
 		if meta.Status == "" {
-			meta.Status = "stable"
+			meta.Status = "ready"
 		}
 		if meta.Title == "" {
 			meta.Title = tag
@@ -100,13 +100,16 @@ func DefaultImageVersion() string {
 		}
 	}
 	if len(versions) == 0 {
-		return "v2.4.51"
+		return "v0.0.1"
 	}
 	return versions[0]
 }
 
 func ResolveImageVersion(tag string) (ImageVersion, bool) {
 	tag = strings.TrimSpace(tag)
+	if !IsImageVersionTag(tag) {
+		return ImageVersion{}, false
+	}
 	for _, v := range VersionCatalog() {
 		if v.Tag == tag {
 			return v, true

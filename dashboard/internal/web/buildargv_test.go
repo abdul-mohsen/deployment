@@ -14,8 +14,8 @@ func setVersionTestEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("BACKEND_IMAGE", "ssdawweq/ifritah-api")
 	t.Setenv("FRONTEND_IMAGE", "ssdawweq/ifritah-web")
-	t.Setenv("APP_IMAGE_VERSIONS", "v2.4.51,v2.4.50")
-	t.Setenv("APP_IMAGE_VERSION_DEFAULT", "v2.4.51")
+	t.Setenv("APP_IMAGE_VERSIONS", "v0.0.1,v0.0.2")
+	t.Setenv("APP_IMAGE_VERSION_DEFAULT", "v0.0.1")
 }
 
 func TestBuildArgv_CreateTenant_FullFlow(t *testing.T) {
@@ -45,8 +45,8 @@ func TestBuildArgv_CreateTenant_FullFlow(t *testing.T) {
 		"--env MANAGER_USER=manager",
 		"--env MANAGER_PASSWORD=M4nager!",
 		"--env COMPANY_NAME=ACME",
-		"--backend-image ssdawweq/ifritah-api:v2.4.51",
-		"--frontend-image ssdawweq/ifritah-web:v2.4.51",
+		"--backend-image ssdawweq/ifritah-api:v0.0.1",
+		"--frontend-image ssdawweq/ifritah-web:v0.0.1",
 		"--backend-port 8090",
 		"--frontend-port 8000",
 	} {
@@ -119,7 +119,7 @@ func TestBuildArgv_UpdateTenant_VersionExpandsPair(t *testing.T) {
 	sc := scripts.Find("update-tenant.sh")
 	form := url.Values{
 		"_pos_name":     {"fresh"},
-		"image_version": {"v2.4.50"},
+		"image_version": {"v0.0.2"},
 	}
 	argv, err := buildArgv(sc, form)
 	if err != nil {
@@ -128,8 +128,8 @@ func TestBuildArgv_UpdateTenant_VersionExpandsPair(t *testing.T) {
 	joined := strings.Join(argv, " ")
 	for _, want := range []string{
 		"fresh",
-		"--backend-image ssdawweq/ifritah-api:v2.4.50",
-		"--frontend-image ssdawweq/ifritah-web:v2.4.50",
+		"--backend-image ssdawweq/ifritah-api:v0.0.2",
+		"--frontend-image ssdawweq/ifritah-web:v0.0.2",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("argv missing %q\nfull: %s", want, joined)
@@ -141,7 +141,7 @@ func TestBuildArgv_DeployAll_FrontendVersionExpandsPosImage(t *testing.T) {
 	setVersionTestEnv(t)
 	sc := scripts.Find("deploy-all.sh")
 	form := url.Values{
-		"image_version": {"v2.4.50"},
+		"image_version": {"v0.0.2"},
 		"type":          {"frontend"},
 		"tenant":        {"fresh"},
 	}
@@ -151,7 +151,7 @@ func TestBuildArgv_DeployAll_FrontendVersionExpandsPosImage(t *testing.T) {
 	}
 	joined := strings.Join(argv, " ")
 	for _, want := range []string{
-		"ssdawweq/ifritah-web:v2.4.50",
+		"ssdawweq/ifritah-web:v0.0.2",
 		"--type frontend",
 		"--tenant fresh",
 	} {

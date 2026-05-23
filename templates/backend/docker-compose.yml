@@ -25,8 +25,11 @@ services:
       retries: 10
 
   api:
-    build: .
-    image: ${IMAGE_NAME:-local/api}:dev
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-v0.0.1}
+    image: ${IMAGE_NAME:-local/api}:${APP_VERSION:-v0.0.1}
     depends_on:
       mysql:
         condition: service_healthy

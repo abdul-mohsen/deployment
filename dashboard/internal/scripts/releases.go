@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+var imageVersionTagPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
 
 type releaseMetadata struct {
 	Tag    string   `json:"tag"`
@@ -18,7 +21,7 @@ type releaseMetadata struct {
 
 func versionOptions() []string {
 	if raw := strings.TrimSpace(os.Getenv("APP_IMAGE_VERSIONS")); raw != "" {
-		return splitUnique(raw)
+		return versionTagsOnly(splitUnique(raw))
 	}
 
 	entries := loadReleaseMetadata()
@@ -27,35 +30,36 @@ func versionOptions() []string {
 	for _, entry := range entries {
 		versions = append(versions, entry.Tag)
 	}
-	if out := uniqueNonEmpty(versions); len(out) > 0 {
+	if out := versionTagsOnly(uniqueNonEmpty(versions)); len(out) > 0 {
 		return out
 	}
 
-	return []string{"v2.4.51", "v2.4.50", "v2.4.49"}
+	return []string{"v0.0.1"}
 }
 
 func releaseMetadataByTag() map[string]releaseMetadata {
 	out := map[string]releaseMetadata{}
 	for _, entry := range loadReleaseMetadata() {
 		entry.Tag = strings.TrimSpace(entry.Tag)
-		if entry.Tag == "" {
+		if !IsImageVersionTag(entry.Tag) {
 			continue
 		}
 		entry.Status = strings.TrimSpace(entry.Status)
-		if strings.EqualFold(entry.Status, "broken") {
-			entry.Broken = true
-		}
-		if entry.Broken {
-			entry.Status = "broken"
-		}
 		out[entry.Tag] = entry
 	}
-	for _, tag := range splitUnique(os.Getenv("APP_IMAGE_BROKEN_VERSIONS")) {
-		entry := out[tag]
-		entry.Tag = tag
-		entry.Status = "broken"
-		entry.Broken = true
-		out[tag] = entry
+	return out
+}
+
+func IsImageVersionTag(tag string) bool {
+	return imageVersionTagPattern.MatchString(strings.TrimSpace(tag))
+}
+
+func versionTagsOnly(in []string) []string {
+	out := []string{}
+	for _, tag := range in {
+		if IsImageVersionTag(tag) {
+			out = append(out, strings.TrimSpace(tag))
+		}
 	}
 	return out
 }

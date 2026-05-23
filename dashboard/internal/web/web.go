@@ -437,16 +437,98 @@ func (s *server) handleScriptsPage(w http.ResponseWriter, _ *http.Request) {
 	s.render(w, "scripts.html", map[string]any{
 		"Env":      s.cfg.EnvName,
 		"Scripts":  scripts.Catalog(),
-		"Releases": scripts.ReleaseCatalog(),
+		"Releases": s.releaseViews(),
 	})
 }
 
 func (s *server) handleReleasesPage(w http.ResponseWriter, _ *http.Request) {
 	s.render(w, "releases.html", map[string]any{
 		"Env":            s.cfg.EnvName,
-		"Releases":       scripts.ReleaseCatalog(),
+		"Releases":       s.releaseViews(),
 		"DefaultVersion": scripts.DefaultImageVersion(),
 	})
+}
+
+type releaseView struct {
+	scripts.ImageVersion
+	Deployed       int
+	Failed         int
+	FailureSummary string
+}
+
+func (s *server) releaseViews() []releaseView {
+	snap, _ := s.snapshots.Snapshot()
+	return buildReleaseViews(scripts.ReleaseCatalog(), snap.Apps)
+}
+
+func buildReleaseViews(catalog []scripts.ImageVersion, apps []dokku.App) []releaseView {
+	byTag := map[string]*releaseView{}
+	order := []string{}
+	add := func(release scripts.ImageVersion) *releaseView {
+		tag := strings.TrimSpace(release.Tag)
+		if !scripts.IsImageVersionTag(tag) {
+			return nil
+		}
+		if existing := byTag[tag]; existing != nil {
+			return existing
+		}
+		if release.Status == "" {
+			release.Status = "ready"
+		}
+		if release.Title == "" {
+			release.Title = tag
+		}
+		view := &releaseView{ImageVersion: release}
+		byTag[tag] = view
+		order = append(order, tag)
+		return view
+	}
+	for _, release := range catalog {
+		add(release)
+	}
+	for _, app := range apps {
+		tag := strings.TrimSpace(app.Version)
+		if !scripts.IsImageVersionTag(tag) {
+			continue
+		}
+		view := byTag[tag]
+		if view == nil {
+			view = add(scripts.ImageVersion{Tag: tag, Status: "deployed", Title: tag})
+		}
+		if view == nil {
+			continue
+		}
+		view.Deployed++
+		switch app.Role {
+		case "backend":
+			if view.BackendImage == "" {
+				view.BackendImage = app.Image
+			}
+		case "frontend":
+			if view.FrontendImage == "" {
+				view.FrontendImage = app.Image
+			}
+		}
+		if app.State != "" && app.State != "running" {
+			view.Failed++
+			if view.FailureSummary == "" {
+				view.FailureSummary = app.Name + " is " + app.State
+			}
+		}
+	}
+	views := make([]releaseView, 0, len(order))
+	for _, tag := range order {
+		view := *byTag[tag]
+		if view.Failed > 0 {
+			view.Broken = true
+			view.Status = "broken"
+			if view.FailureSummary == "" {
+				view.FailureSummary = fmt.Sprintf("%d of %d deployed apps failed", view.Failed, view.Deployed)
+			}
+		}
+		views = append(views, view)
+	}
+	return views
 }
 
 func (s *server) handleScriptPage(w http.ResponseWriter, r *http.Request) {
@@ -459,7 +541,7 @@ func (s *server) handleScriptPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "script.html", map[string]any{
 		"Env":              s.cfg.EnvName,
 		"Script":           sc,
-		"Releases":         scripts.ReleaseCatalog(),
+		"Releases":         s.releaseViews(),
 		"RunnerConfigured": s.cfg.ScriptsHostPath != "",
 	})
 }

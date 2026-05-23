@@ -37,15 +37,14 @@ runtime besides the docker socket.
 | `DASHBOARD_ENV_FILE`  | no       | —               |
 | `TENANT_NAME_PREFIX`  | no       | —               |
 
-Version picker values are exact image tags such as `v2.4.51`, not channels such as
+Version picker values are exact SemVer image tags such as `v0.0.1`, not channels such as
 `latest`, `stable`, or `dev`. The dashboard deploys the selected tag to both apps:
 
 ```sh
 BACKEND_IMAGE=ssdawweq/ifritah-api
 FRONTEND_IMAGE=ssdawweq/ifritah-web
-APP_IMAGE_VERSIONS=v2.4.51,v2.4.50,v2.4.49
-APP_IMAGE_VERSION_DEFAULT=v2.4.51
-APP_IMAGE_BROKEN_VERSIONS=v2.4.49
+APP_IMAGE_VERSIONS=v0.0.1
+APP_IMAGE_VERSION_DEFAULT=v0.0.1
 ```
 
 Use `TENANT_NAME_PREFIX` when dev and prod dashboards share one server or MySQL. With `TENANT_NAME_PREFIX=dev-`, creating tenant `acme` creates Dokku apps `dev-acme-backend` / `dev-acme-frontend` and database `tenant_dev_acme`. Use `TENANT_NAME_PREFIX=prod-` for prod so prod creates `tenant_prod_acme` instead. For two dashboards on one server, set this in each dashboard's `dashboard.env`; keep the shared `config.env` prefix unset or point each dashboard at a matching `DEPLOY_CONFIG_FILE`.
@@ -70,8 +69,8 @@ The equivalent shell workflow uses the same command vocabulary:
 
 ```sh
 sudo ./scripts/deployctl.sh tenant status acme
-sudo ./scripts/deployctl.sh tenant update acme --backend-image repo/api:v1 --frontend-image repo/web:v1
-sudo ./scripts/deployctl.sh fleet sync repo/api:v2 --type backend --tenant acme
+sudo ./scripts/deployctl.sh tenant update acme --backend-image repo/api:v0.0.1 --frontend-image repo/web:v0.0.1
+sudo ./scripts/deployctl.sh fleet sync repo/api:v0.0.1 --type backend --tenant acme
 ```
 
 ## Local perf check

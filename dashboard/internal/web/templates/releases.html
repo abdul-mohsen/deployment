@@ -23,6 +23,8 @@
     </div>
     <h3>{{if .Title}}{{.Title}}{{else}}{{.Tag}}{{end}}</h3>
     {{if .Date}}<p class="release-date">{{.Date}}</p>{{end}}
+    <p class="release-date">Deployed apps: {{.Deployed}}{{if .Failed}} · failed: {{.Failed}}{{end}}</p>
+    {{if .FailureSummary}}<p class="release-failure">{{.FailureSummary}}</p>{{end}}
     <dl class="release-images">
       <div><dt>Backend</dt><dd>{{.BackendImage}}</dd></div>
       <div><dt>Frontend</dt><dd>{{.FrontendImage}}</dd></div>

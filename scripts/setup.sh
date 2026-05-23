@@ -482,8 +482,9 @@ if prompt_yn "Create your first tenant now?" "y"; then
         TENANT_CMD="$SCRIPT_DIR/create-tenant.sh $TENANT_NAME --config $CONFIG_FILE"
 
         if [ -n "$DOCKERHUB_USERNAME" ]; then
-            BACKEND_IMG="${DOCKERHUB_USERNAME}/api:latest"
-            FRONTEND_IMG="${DOCKERHUB_USERNAME}/web:latest"
+            RELEASE_TAG="${APP_IMAGE_VERSION_DEFAULT:-${PULL_TAG:-v0.0.1}}"
+            BACKEND_IMG="${DOCKERHUB_USERNAME}/api:${RELEASE_TAG}"
+            FRONTEND_IMG="${DOCKERHUB_USERNAME}/web:${RELEASE_TAG}"
 
             info "Will deploy from: $BACKEND_IMG + $FRONTEND_IMG"
             if prompt_yn "Are images already pushed to Docker Hub?" "n"; then
@@ -517,7 +518,7 @@ log "  Dokku: running as Docker container"
 log "  Config: $CONFIG_FILE"
 log ""
 if [ -n "$DOCKERHUB_USERNAME" ]; then
-    log "  Auto-deploy: cron polling every 2 min ✓"
+    log "  Auto-deploy: webhook/cron can pull exact VERSION tags ✓"
     if [ -n "$WEBHOOK_SECRET" ]; then
         log "  Webhook: port 9999 ✓"
         log ""
@@ -536,7 +537,7 @@ if [ -n "$DOCKERHUB_USERNAME" ]; then
 fi
 log ""
 log "  Create more tenants:"
-log "    sudo ./scripts/create-tenant.sh <name> --backend-image ${DOCKERHUB_USERNAME:-youruser}/api:latest --frontend-image ${DOCKERHUB_USERNAME:-youruser}/web:latest"
+log "    sudo ./scripts/create-tenant.sh <name> --backend-image ${DOCKERHUB_USERNAME:-youruser}/api:${APP_IMAGE_VERSION_DEFAULT:-v0.0.1} --frontend-image ${DOCKERHUB_USERNAME:-youruser}/web:${APP_IMAGE_VERSION_DEFAULT:-v0.0.1}"
 log ""
 log "==========================================="
 echo ""

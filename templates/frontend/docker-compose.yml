@@ -8,8 +8,11 @@
 
 services:
   web:
-    build: .
-    image: ${IMAGE_NAME:-local/web}:dev
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-v0.0.1}
+    image: ${IMAGE_NAME:-local/web}:${APP_VERSION:-v0.0.1}
     env_file: .env
     environment:
       API_URL: ${API_URL:-http://localhost:3000}

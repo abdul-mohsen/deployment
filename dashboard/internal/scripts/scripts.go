@@ -44,18 +44,40 @@ type ImageVersion struct {
 	Tag           string
 	BackendImage  string
 	FrontendImage string
+	Date          string
+	Status        string
+	Broken        bool
+	Title         string
+	Notes         []string
+}
+
+func ReleaseCatalog() []ImageVersion {
+	return VersionCatalog()
 }
 
 func VersionCatalog() []ImageVersion {
 	backendRepo := imageRepo("BACKEND_IMAGE", "ifritah-api", "ssdawweq/ifritah-api")
 	frontendRepo := imageRepo("FRONTEND_IMAGE", "ifritah-web", "ssdawweq/ifritah-web")
 	versions := versionOptions()
+	metadata := releaseMetadataByTag()
 	out := make([]ImageVersion, 0, len(versions))
 	for _, tag := range versions {
+		meta := metadata[tag]
+		if meta.Status == "" {
+			meta.Status = "stable"
+		}
+		if meta.Title == "" {
+			meta.Title = tag
+		}
 		out = append(out, ImageVersion{
 			Tag:           tag,
 			BackendImage:  backendRepo + ":" + tag,
 			FrontendImage: frontendRepo + ":" + tag,
+			Date:          meta.Date,
+			Status:        meta.Status,
+			Broken:        meta.Broken,
+			Title:         meta.Title,
+			Notes:         meta.Notes,
 		})
 	}
 	return out
@@ -78,7 +100,7 @@ func DefaultImageVersion() string {
 		}
 	}
 	if len(versions) == 0 {
-		return "dev"
+		return "v2.4.51"
 	}
 	return versions[0]
 }
@@ -96,11 +118,11 @@ func ResolveImageVersion(tag string) (ImageVersion, bool) {
 func imageVersionField(required bool) Field {
 	f := Field{
 		Name:     "image_version",
-		Label:    "Version",
+		Label:    "Version tag",
 		Type:     "select",
 		Required: required,
 		Options:  VersionOptions(),
-		Help:     "Selects a compatible backend/frontend image pair that uses the same tag.",
+		Help:     "Deploys BACKEND_IMAGE:<tag> and FRONTEND_IMAGE:<tag>. Release notes show status and broken builds.",
 	}
 	if required {
 		f.Default = DefaultImageVersion()
@@ -125,39 +147,6 @@ func trimImageTag(image string) string {
 		return image[:lastColon]
 	}
 	return image
-}
-
-func versionOptions() []string {
-	if raw := strings.TrimSpace(os.Getenv("APP_IMAGE_VERSIONS")); raw != "" {
-		return splitUnique(raw)
-	}
-	return uniqueNonEmpty([]string{
-		strings.TrimSpace(os.Getenv("APP_IMAGE_VERSION_DEFAULT")),
-		strings.TrimSpace(os.Getenv("DEV_TAG")),
-		strings.TrimSpace(os.Getenv("PULL_TAG")),
-		"dev",
-		"latest",
-		"stable",
-	})
-}
-
-func splitUnique(raw string) []string {
-	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == '\n' || r == ' ' || r == '\t' })
-	return uniqueNonEmpty(parts)
-}
-
-func uniqueNonEmpty(in []string) []string {
-	seen := map[string]bool{}
-	out := []string{}
-	for _, v := range in {
-		v = strings.TrimSpace(v)
-		if v == "" || seen[v] {
-			continue
-		}
-		seen[v] = true
-		out = append(out, v)
-	}
-	return out
 }
 
 // Script is a registered orchestration script the UI can invoke.

@@ -5,7 +5,8 @@ Argo-CD-inspired web UI for the Dokku tenants on this server.
 - Application grid with Health, Sync, Live, and Desired state
 - Per-app actions: start / stop / restart / rebuild
 - Tenant-first actions: select a tenant, then update version / restart / stop / delete
-- Compatible version picker: one tag maps to backend and frontend images
+- Compatible version picker: one release tag maps to backend and frontend images
+- Release notes page with broken-version status
 - Live log streaming (SSE) + ring-buffer log aggregation + downloadable dump
 - Command forms backed by `scripts/deployctl.sh` with streamed output
 - Command palette (Ctrl/Cmd+K)
@@ -35,16 +36,33 @@ runtime besides the docker socket.
 | `DASHBOARD_SNAPSHOT_WORKERS` | no | `8`             |
 | `DASHBOARD_ENV_FILE`  | no       | —               |
 
-Version picker values come from the deployment env (`config.env` / `install.env`):
+Version picker values are exact image tags such as `v2.4.51`, not channels such as
+`latest`, `stable`, or `dev`. The dashboard deploys the selected tag to both apps:
 
 ```sh
 BACKEND_IMAGE=ssdawweq/ifritah-api
 FRONTEND_IMAGE=ssdawweq/ifritah-web
-APP_IMAGE_VERSIONS=dev,latest,stable
-APP_IMAGE_VERSION_DEFAULT=dev
+APP_IMAGE_VERSIONS=v2.4.51,v2.4.50,v2.4.49
+APP_IMAGE_VERSION_DEFAULT=v2.4.51
+APP_IMAGE_BROKEN_VERSIONS=v2.4.49
 ```
 
-Publishing `BACKEND_IMAGE:v1` and `FRONTEND_IMAGE:v1` makes `v1` selectable as a compatible pair. Re-pushing only the frontend with the same tag is supported; update deploys pull before applying the image.
+Publishing `BACKEND_IMAGE:v2.4.51` and `FRONTEND_IMAGE:v2.4.51` makes `v2.4.51` selectable as a compatible pair. Re-pushing only the frontend with the same tag is supported; update deploys pull before applying the image.
+
+Release notes and broken-version status are read from `dashboard/releases.json` by default, or from `APP_IMAGE_RELEASES_FILE` when set. The file shape is:
+
+```json
+[
+  {
+    "tag": "v2.4.51",
+    "date": "2026-05-23",
+    "status": "stable",
+    "broken": false,
+    "title": "Current production release",
+    "notes": ["Recommended version for new tenants and fleet updates."]
+  }
+]
+```
 
 The equivalent shell workflow uses the same command vocabulary:
 

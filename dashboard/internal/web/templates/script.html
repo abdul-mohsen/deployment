@@ -41,6 +41,16 @@
         {{if not .Required}}<option value=""></option>{{end}}
         {{range .Options}}<option value="{{.}}" {{if eq . $default}}selected{{end}}>{{.}}</option>{{end}}
       </select>
+      {{if eq .Name "image_version"}}
+      <div class="version-hint" data-version-hint hidden>
+        <div class="version-hint-top">
+          <span data-version-title></span>
+          <span data-version-status></span>
+        </div>
+        <p data-version-notes></p>
+        <a href="/releases">Open release notes</a>
+      </div>
+      {{end}}
     {{else if eq .Type "kv"}}
       <textarea name="{{.Name}}" rows="3"
         placeholder="KEY=value&#10;OTHER=value"
@@ -87,6 +97,7 @@
   const danger = {{.Danger}};
   const slug = '{{.Slug}}';
   const STORE_KEY = 'script-form:' + slug;
+  const releases = {{json $.Releases}};
 
   // ---- Auto-fill from last successful submission (localStorage) ----
   // Restores previously entered text/select/textarea values per script.
@@ -144,6 +155,34 @@
 
   applyQueryPrefill();
 
+  function selectedRelease() {
+    const select = form.elements.image_version;
+    if (!select || !select.value) return null;
+    return releases.find((release) => release.Tag === select.value) || null;
+  }
+
+  function renderVersionHint() {
+    const hint = document.querySelector('[data-version-hint]');
+    if (!hint) return;
+    const release = selectedRelease();
+    if (!release) {
+      hint.hidden = true;
+      return;
+    }
+    const status = release.Broken ? 'broken' : (release.Status || 'stable');
+    hint.hidden = false;
+    hint.classList.toggle('broken', !!release.Broken);
+    hint.querySelector('[data-version-title]').textContent = release.Tag + (release.Title && release.Title !== release.Tag ? ' - ' + release.Title : '');
+    const statusEl = hint.querySelector('[data-version-status]');
+    statusEl.textContent = status;
+    statusEl.className = release.Broken ? 'release-pill broken' : 'release-pill ok';
+    const notes = (release.Notes || []).slice(0, 2).join(' ');
+    hint.querySelector('[data-version-notes]').textContent = notes || 'No release notes recorded for this version.';
+  }
+
+  form.elements.image_version?.addEventListener('change', renderVersionHint);
+  renderVersionHint();
+
   function escapeHtml(s) {
     return s
       .replaceAll('&', '&amp;')
@@ -167,6 +206,8 @@
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     if (danger && !confirm('This script may modify or delete data. Continue?')) return;
+    const release = selectedRelease();
+    if (release && release.Broken && !confirm('Selected version ' + release.Tag + ' is marked broken. Continue?')) return;
     persistOnSubmit();
     const fd = new FormData(form);
     appendLine('');

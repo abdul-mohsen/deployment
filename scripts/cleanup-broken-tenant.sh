@@ -62,6 +62,8 @@ if [ -z "$TENANT_NAME" ]; then
     exit 1
 fi
 
+TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
+
 if ! [[ "$TENANT_NAME" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]]; then
     error "Invalid tenant name: $TENANT_NAME"
     error "Expected lowercase alphanumeric + hyphens, 1-63 characters."

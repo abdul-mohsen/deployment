@@ -3,10 +3,12 @@ package web
 import (
 	"html/template"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/abdul-mohsen/deployment/dashboard/internal/config"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/scripts"
 )
 
@@ -176,5 +178,19 @@ func TestDashboardTemplatesParse(t *testing.T) {
 		); err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
+	}
+}
+
+func TestFilterAppNamesScopesTenantPrefix(t *testing.T) {
+	server := &server{cfg: config.Config{TenantPrefix: "dev-"}}
+	got := server.filterAppNames([]string{
+		"dev-acme-backend",
+		"prod-acme-backend",
+		"dev-acme-frontend",
+		"worker",
+	})
+	want := []string{"dev-acme-backend", "dev-acme-frontend"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("filterAppNames() = %#v, want %#v", got, want)
 	}
 }

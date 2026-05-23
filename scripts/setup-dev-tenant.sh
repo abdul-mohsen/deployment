@@ -45,6 +45,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+NAME="$(tenant_full_name "$NAME")" || exit 1
+
 DOCKERHUB_USERNAME="${DOCKERHUB_USERNAME:-}"
 if [ -z "$DOCKERHUB_USERNAME" ]; then
     error "DOCKERHUB_USERNAME not set in $CONFIG_FILE"

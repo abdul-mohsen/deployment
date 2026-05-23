@@ -66,3 +66,21 @@ func TestUpdateEnvFileValuePreservesExportPrefix(t *testing.T) {
 		t.Fatalf("unexpected output: %q", got)
 	}
 }
+
+func TestNormalizeTenantPrefix(t *testing.T) {
+	tests := map[string]string{
+		"":         "",
+		"dev":      "dev-",
+		"dev-":     "dev-",
+		"Prod":     "prod-",
+		"qa env":   "qa-env-",
+		"---":      "",
+		"dev_acme": "dev-acme-",
+	}
+
+	for input, want := range tests {
+		if got := normalizeTenantPrefix(input); got != want {
+			t.Fatalf("normalizeTenantPrefix(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

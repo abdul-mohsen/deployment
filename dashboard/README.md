@@ -34,6 +34,7 @@ runtime besides the docker socket.
 | `COOKIE_SECURE`       | no       | `false`         |
 | `DASHBOARD_SNAPSHOT_WORKERS` | no | `8`             |
 | `DASHBOARD_ENV_FILE`  | no       | —               |
+| `TENANT_NAME_PREFIX`  | no       | —               |
 
 Version picker values come from the deployment env (`config.env` / `install.env`):
 
@@ -43,6 +44,8 @@ FRONTEND_IMAGE=ssdawweq/ifritah-web
 APP_IMAGE_VERSIONS=dev,latest,stable
 APP_IMAGE_VERSION_DEFAULT=dev
 ```
+
+Use `TENANT_NAME_PREFIX` when dev and prod dashboards share one server or MySQL. With `TENANT_NAME_PREFIX=dev-`, creating tenant `acme` creates Dokku apps `dev-acme-backend` / `dev-acme-frontend` and database `tenant_dev_acme`. Use `TENANT_NAME_PREFIX=prod-` for prod so prod creates `tenant_prod_acme` instead. For two dashboards on one server, set this in each dashboard's `dashboard.env`; keep the shared `config.env` prefix unset or point each dashboard at a matching `DEPLOY_CONFIG_FILE`.
 
 Publishing `BACKEND_IMAGE:v1` and `FRONTEND_IMAGE:v1` makes `v1` selectable as a compatible pair. Re-pushing only the frontend with the same tag is supported; update deploys pull before applying the image.
 
@@ -94,6 +97,7 @@ ADMIN_USER=admin
 ADMIN_PASSWORD_HASH=$(go run ./cmd/hashpw 'pick-something-strong')
 SESSION_KEY=$(openssl rand -hex 32)
 BASE_DOMAIN=ifritah.com
+TENANT_NAME_PREFIX=prod-
 EOF
 cd /opt/dashboard
 docker compose -f docker-compose.prod.yml up -d --build

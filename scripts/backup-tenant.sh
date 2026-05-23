@@ -84,6 +84,7 @@ if [ "${1:-}" = "--all" ]; then
     while IFS= read -r app; do
         if [[ "$app" == *-backend ]]; then
             tenant="${app%-backend}"
+            tenant_in_scope "$tenant" || continue
             if [ -z "${SEEN[$tenant]:-}" ]; then
                 SEEN["$tenant"]=1
                 backup_tenant "$tenant"
@@ -91,7 +92,7 @@ if [ "${1:-}" = "--all" ]; then
         fi
     done <<< "$ALL_APPS"
 elif [ -n "${1:-}" ]; then
-    backup_tenant "$1"
+    backup_tenant "$(tenant_full_name "$1")"
 else
     echo "Usage: $0 <tenant-name> | --all"
     exit 1

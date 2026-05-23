@@ -11,7 +11,7 @@ PASS() { echo "PASS: $*"; }
 FAIL() { echo "FAIL: $*"; exit 1; }
 
 echo "=== 1. bash -n on changed scripts ==="
-for f in scripts/lib.sh scripts/setup-dokku.sh scripts/setup.sh scripts/restart-stack.sh scripts/create-tenant.sh scripts/init-tenant-db.sh scripts/verify-mysql.sh scripts/list-tenants.sh scripts/tail-logs.sh scripts/update-tenant.sh scripts/rollback-tenant.sh scripts/post-merge-cleanup.sh; do
+for f in scripts/lib.sh scripts/setup-dokku.sh scripts/setup.sh scripts/restart-stack.sh scripts/create-tenant.sh scripts/init-tenant-db.sh scripts/verify-mysql.sh scripts/list-tenants.sh scripts/tail-logs.sh scripts/update-tenant.sh scripts/rollback-tenant.sh scripts/remove-tenant.sh scripts/cleanup-broken-tenant.sh scripts/backup-tenant.sh scripts/deploy-all.sh scripts/set-tenant-image.sh scripts/setup-dev-tenant.sh scripts/auto-pull.sh scripts/post-merge-cleanup.sh; do
     bash -n "$f" && PASS "syntax $f" || FAIL "syntax $f"
 done
 
@@ -346,6 +346,33 @@ grep -q 'TENANT_SCHEMA_IMAGE_PATH=' config.env.example \
     && grep -q 'TENANT_MIGRATIONS_IMAGE_DIR=' config.env.example \
     && PASS "config example points at backend image schema paths" \
     || FAIL "config example must document backend image schema paths"
+
+echo
+echo "=== 13. tenant prefixes isolate shared dev/prod targets ==="
+OUT="$(TENANT_NAME_PREFIX=dev bash -c 'source scripts/lib.sh; tenant_full_name acme; echo; tenant_full_name dev-acme; echo; tenant_in_scope dev-acme && echo scoped; tenant_in_scope prod-acme || echo isolated; TENANT_NAME_PREFIX=---; [ -z "$(tenant_name_prefix)" ] && echo empty-prefix; TENANT_NAME_PREFIX=prod; TENANT_NAME_PREFIX_OVERRIDE=dev; printf override:; tenant_full_name acme; echo')"
+echo "$OUT" | grep -q '^dev-acme$' \
+    && [ "$(echo "$OUT" | grep -c '^dev-acme$')" -eq 2 ] \
+    && echo "$OUT" | grep -q '^scoped$' \
+    && echo "$OUT" | grep -q '^isolated$' \
+    && echo "$OUT" | grep -q '^empty-prefix$' \
+    && echo "$OUT" | grep -q '^override:dev-acme$' \
+    && PASS "tenant prefix helper prefixes once and filters other environments" \
+    || { echo "$OUT"; FAIL "tenant prefix helper must prefix once and isolate scopes"; }
+for f in scripts/create-tenant.sh scripts/init-tenant-db.sh scripts/update-tenant.sh scripts/remove-tenant.sh scripts/cleanup-broken-tenant.sh scripts/setup-dev-tenant.sh scripts/auto-pull.sh scripts/backup-tenant.sh scripts/set-tenant-image.sh; do
+    grep -q 'tenant_full_name' "$f" \
+        && PASS "$f applies tenant_full_name" \
+        || FAIL "$f must apply TENANT_NAME_PREFIX to explicit tenant names"
+done
+for f in scripts/deploy-all.sh scripts/rollback-tenant.sh scripts/list-tenants.sh scripts/status.sh scripts/tail-logs.sh scripts/backup-tenant.sh scripts/set-tenant-image.sh; do
+    grep -q 'tenant_in_scope\|tenant_name_prefix' "$f" \
+        && PASS "$f scopes bulk/list operations" \
+        || FAIL "$f must scope bulk/list operations by TENANT_NAME_PREFIX"
+done
+grep -q 'TENANT_NAME_PREFIX=' dashboard/internal/scripts/scripts.go \
+    && grep -q 'filterAppNames' dashboard/internal/web/web.go \
+    && grep -q 'TENANT_NAME_PREFIX' dashboard/README.md \
+    && PASS "dashboard passes, filters, and documents tenant prefix" \
+    || FAIL "dashboard must pass/filter/document TENANT_NAME_PREFIX"
 
 echo
 echo "ALL TESTS PASSED"

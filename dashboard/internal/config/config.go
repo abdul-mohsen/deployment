@@ -26,6 +26,7 @@ type Config struct {
 	RunnerImage      string // image used to execute deployment scripts.
 	ConfigFile       string // optional --config file path inside runner.
 	DashboardEnvFile string // optional writable env file for dashboard credentials.
+	TenantPrefix     string // optional tenant name prefix, e.g. "dev-" or "prod-".
 }
 
 // Load reads configuration from the process environment.
@@ -59,6 +60,7 @@ func Load() (Config, error) {
 		RunnerImage:      envOr("SCRIPT_RUNNER_IMAGE", "mysql:8.0"),
 		ConfigFile:       envOr("DEPLOY_CONFIG_FILE", ""),
 		DashboardEnvFile: envOr("DASHBOARD_ENV_FILE", ""),
+		TenantPrefix:     normalizeTenantPrefix(os.Getenv("TENANT_NAME_PREFIX")),
 	}
 	if c.AdminUser == "" || c.AdminHash == "" {
 		return c, fmt.Errorf("ADMIN_USER and ADMIN_PASSWORD_HASH are required")
@@ -92,4 +94,24 @@ func envInt(k string, def int) int {
 		}
 	}
 	return def
+}
+
+func normalizeTenantPrefix(prefix string) string {
+	prefix = strings.ToLower(strings.TrimSpace(prefix))
+	if prefix == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range prefix {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return ""
+	}
+	return out + "-"
 }

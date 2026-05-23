@@ -642,6 +642,7 @@ func displayArgv(sc *scripts.Script, argv []string) []string {
 
 func (s *server) collectSnapshot(ctx context.Context) appSnapshot {
 	names, err := s.dokku.AppsList(ctx)
+	names = s.filterAppNames(names)
 	containerIDs := s.dokku.ContainerIDsByApp(ctx)
 	domains := s.dokku.DomainMap(ctx)
 	detail := func(ctx context.Context, name string) dokku.App {
@@ -738,6 +739,9 @@ func snapshotWorkerLimit(appCount int) int {
 }
 
 func (s *server) appsForTenant(ctx context.Context, tenant string) []dokku.App {
+	if !s.tenantInScope(tenant) {
+		return nil
+	}
 	snap, _ := s.snapshots.Snapshot()
 	apps := make([]dokku.App, 0, 2)
 	for _, app := range snap.Apps {
@@ -759,6 +763,34 @@ func (s *server) appsForTenant(ctx context.Context, tenant string) []dokku.App {
 	return apps
 }
 
+func (s *server) filterAppNames(names []string) []string {
+	if s.cfg.TenantPrefix == "" {
+		return names
+	}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if s.tenantInScope(tenantFromAppName(name)) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func (s *server) tenantInScope(tenant string) bool {
+	return s.cfg.TenantPrefix == "" || strings.HasPrefix(tenant, s.cfg.TenantPrefix)
+}
+
+func tenantFromAppName(name string) string {
+	switch {
+	case strings.HasSuffix(name, "-backend"):
+		return strings.TrimSuffix(name, "-backend")
+	case strings.HasSuffix(name, "-frontend"):
+		return strings.TrimSuffix(name, "-frontend")
+	default:
+		return name
+	}
+}
+
 func (s *server) render(w http.ResponseWriter, name string, data any) {
 	t, ok := s.pages[name]
 	if !ok {
@@ -772,6 +804,7 @@ func (s *server) render(w http.ResponseWriter, name string, data any) {
 		m["MySQLConfigured"] = configured
 		m["MySQLNeedsConfig"] = !configured
 		m["MySQLAdminUser"] = user
+		m["TenantPrefix"] = s.cfg.TenantPrefix
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := t.ExecuteTemplate(w, name, data); err != nil {

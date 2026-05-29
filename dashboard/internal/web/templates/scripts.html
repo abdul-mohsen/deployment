@@ -1,19 +1,26 @@
 {{define "content"}}
-<section class="mb-6">
-  <h1 class="text-2xl font-semibold tracking-tight">Scripts</h1>
-  <p class="text-sm text-zinc-400">Every orchestration script under <code>scripts/</code>. Click to open a form, fill in args, watch live output.</p>
+<section class="ops-hero compact">
+  <div>
+    <div class="eyebrow">commands</div>
+    <h1>Deployment Command Center</h1>
+    <p>Every action maps to <code>scripts/deployctl.sh</code>.</p>
+  </div>
+  <div class="hero-actions">
+    <a href="/releases" class="command-link secondary">Release notes</a>
+    <a href="/scripts/status" class="command-link">Run status</a>
+  </div>
 </section>
 
-<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+<div class="command-grid">
   {{range .Scripts}}
-  <a href="/scripts/{{.Slug}}" class="group block rounded-xl bg-zinc-900/60 ring-1 ring-zinc-800 hover:ring-emerald-500/40 transition p-5">
-    <div class="flex items-center gap-2">
-      <h3 class="font-semibold truncate">{{.Title}}</h3>
-      {{if .Danger}}<span class="text-[10px] px-1.5 py-0.5 rounded ring-1 ring-rose-500/30 text-rose-300 uppercase tracking-widest">danger</span>{{end}}
+  <a href="/scripts/{{.Slug}}" class="command-card group">
+    <div class="command-head">
+      <span class="command-group">{{.Group}}</span>
+      {{if .Danger}}<span class="danger-pill">danger</span>{{end}}
     </div>
-    <p class="text-xs text-zinc-400 mt-1">{{.Summary}}</p>
-    <code class="text-[11px] text-zinc-500 mt-3 block truncate">scripts/{{.Name}}</code>
-    <span class="text-[11px] text-emerald-400 mt-3 inline-block opacity-0 group-hover:opacity-100 transition">open →</span>
+    <h3>{{.Title}}</h3>
+    <p>{{.Summary}}</p>
+    <code>deployctl {{.ControlCommand}}</code>
   </a>
   {{end}}
 </div>

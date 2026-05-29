@@ -42,7 +42,7 @@
       const ql = q.toLowerCase();
       for (const tenant of paletteTenants) {
         if (!ql || tenant.name.toLowerCase().includes(ql) || tenant.apps.some((a) => a.name.toLowerCase().includes(ql))) {
-          items.push({label: tenant.name + '  ·  ' + tenant.state + ' / ' + tenant.version, href: '/tenants/' + tenant.name});
+          items.push({label: tenant.name + '  ·  ' + (tenant.health || tenant.state) + ' / ' + (tenant.sync || tenant.version), href: '/tenants/' + tenant.name});
         }
       }
     }
@@ -111,6 +111,31 @@
     return colon > slash ? image.slice(colon + 1) : '';
   }
 
+  function tenantHealth(t) {
+    if (t.state === 'running') return 'Healthy';
+    if (t.state === 'mixed' || t.state === 'restarting' || t.state === 'created') return 'Degraded';
+    if (t.state === 'unknown' || t.state === 'not-deployed') return 'Missing';
+    return 'Suspended';
+  }
+
+  function tenantSync(t) {
+    if (!t.backend || !t.frontend) return 'OutOfSync';
+    const be = t.backendVersion || appVersion(t.backend.image);
+    const fe = t.frontendVersion || appVersion(t.frontend.image);
+    if (!be || !fe) return 'Unknown';
+    return be === fe ? 'Synced' : 'OutOfSync';
+  }
+
+  function badgeClass(kind, value) {
+    const normalized = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    return 'status-badge badge-' + kind + '-' + normalized;
+  }
+
+  function setText(node, selector, value) {
+    const el = node.querySelector(selector);
+    if (el) el.textContent = value || '-';
+  }
+
   function tenantState(t) {
     const states = t.apps.map((a) => a.state || 'unknown');
     if (states.length && states.every((s) => s === 'running')) return 'running';
@@ -134,10 +159,14 @@
       tenant.state = tenantState(tenant);
       const backendVersion = tenant.backend?.version || appVersion(tenant.backend?.image);
       const frontendVersion = tenant.frontend?.version || appVersion(tenant.frontend?.image);
+      tenant.backendVersion = backendVersion;
+      tenant.frontendVersion = frontendVersion;
       tenant.version = backendVersion && frontendVersion && backendVersion === frontendVersion
         ? backendVersion
         : [backendVersion || 'backend?', frontendVersion || 'frontend?'].join(' / ');
       tenant.domain = (tenant.frontend?.domains || '').split(',').find(Boolean)?.trim() || '';
+      tenant.health = tenantHealth(tenant);
+      tenant.sync = tenantSync(tenant);
     }
     return tenants;
   }
@@ -157,12 +186,27 @@
   }
 
   function paintCard(node, t) {
-    node.querySelector('.js-domain').textContent = t.domain || 'no public domain';
-    node.querySelector('.js-backend').textContent = t.backend ? t.backend.state || 'unknown' : 'missing';
-    node.querySelector('.js-frontend').textContent = t.frontend ? t.frontend.state || 'unknown' : 'missing';
-    node.querySelector('.js-version').textContent = t.version || '—';
-    node.querySelector('.js-version').title = [t.backend?.image || '', t.frontend?.image || ''].filter(Boolean).join('\n');
-    node.querySelector('.js-apps').textContent = t.apps.map((a) => a.name).join('  ');
+    setText(node, '.js-domain', t.domain || 'no endpoint');
+    setText(node, '.js-backend', t.backend ? t.backend.state || 'unknown' : 'missing');
+    setText(node, '.js-frontend', t.frontend ? t.frontend.state || 'unknown' : 'missing');
+    setText(node, '.js-version', t.version || '-');
+    setText(node, '.js-apps', t.apps.map((a) => a.name).join('  '));
+    setText(node, '.js-live', t.apps.map((a) => (a.role || 'app') + ':' + (a.state || 'unknown')).join('  '));
+    setText(node, '.js-desired', t.sync === 'Synced' ? (t.backendVersion || t.frontendVersion || '-') : t.version || '-');
+
+    const version = node.querySelector('.js-version');
+    if (version) version.title = [t.backend?.image || '', t.frontend?.image || ''].filter(Boolean).join('\n');
+
+    const health = node.querySelector('.js-health');
+    if (health) {
+      health.textContent = t.health;
+      health.className = badgeClass('health', t.health);
+    }
+    const sync = node.querySelector('.js-sync');
+    if (sync) {
+      sync.textContent = t.sync;
+      sync.className = badgeClass('sync', t.sync);
+    }
   }
 
   function applyFilter() {

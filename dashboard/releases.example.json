@@ -1,0 +1,12 @@
+[
+  {
+    "tag": "vX.X.X",
+    "date": "YYYY-MM-DD",
+    "status": "ready",
+    "title": "Short release title",
+    "notes": [
+      "Human-written release note.",
+      "Another user-visible change."
+    ]
+  }
+]

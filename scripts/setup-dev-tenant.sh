@@ -3,16 +3,15 @@
 # setup-dev-tenant.sh — Provision the single dev tenant
 # =============================================================================
 # Creates exactly one dev tenant whose backend (and optionally frontend) tracks
-# the `:dev` image tag. Pushes to the `dev` branch in your backend repo will
-# build a `:dev` image; auto-pull.sh then deploys it only to this tenant.
+# DEV_TAG. App repo CI should build the VERSION tag; webhook deploys are preferred.
 #
 # Idempotent: re-running just refreshes the image pins.
 #
 # Usage:
 #   bash scripts/setup-dev-tenant.sh                 # use config.env defaults
 #   bash scripts/setup-dev-tenant.sh --name dev      # override tenant name
-#   bash scripts/setup-dev-tenant.sh --tag dev       # override dev tag
-#   bash scripts/setup-dev-tenant.sh --frontend      # also pin frontend to :dev
+#   bash scripts/setup-dev-tenant.sh --tag v0.0.1    # override dev tag
+#   bash scripts/setup-dev-tenant.sh --frontend      # also pin frontend to DEV_TAG
 # =============================================================================
 
 set -euo pipefail
@@ -31,7 +30,7 @@ CONFIG_FILE="${CONFIG_FILE:-$PROJECT_DIR/config.env}"
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
 
 NAME="${DEV_TENANT:-dev}"
-TAG="${DEV_TAG:-dev}"
+TAG="${DEV_TAG:-v0.0.1}"
 PIN_FRONTEND=false
 
 while [[ $# -gt 0 ]]; do
@@ -70,7 +69,7 @@ else
     bash "$SCRIPT_DIR/create-tenant.sh" "$NAME" --git-only --config "$CONFIG_FILE"
 fi
 
-# 2) Pin backend to :dev tag in the master DB so global deploys skip it
+# 2) Pin backend to DEV_TAG in the master DB so global deploys skip it
 log "Pinning ${NAME} backend → ${BACKEND_IMG}"
 bash "$SCRIPT_DIR/set-tenant-image.sh" "$NAME" --backend "$BACKEND_IMG" --config "$CONFIG_FILE"
 
@@ -79,7 +78,7 @@ if $PIN_FRONTEND; then
     bash "$SCRIPT_DIR/set-tenant-image.sh" "$NAME" --frontend "$FRONTEND_IMG" --config "$CONFIG_FILE"
 fi
 
-# 3) Trigger an initial pull+deploy if the :dev image already exists on Docker Hub
+# 3) Trigger an initial pull+deploy if the DEV_TAG image already exists on Docker Hub
 log "Triggering initial deploy from ${BACKEND_IMG}..."
 if bash "$SCRIPT_DIR/deploy-all.sh" "$BACKEND_IMG" --type backend --tenant "$NAME" --skip-canary; then
     log "Initial backend deploy ✓"

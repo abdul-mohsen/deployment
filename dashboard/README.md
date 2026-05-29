@@ -1,13 +1,14 @@
-# Dokku Dashboard
+# Dokku Control Plane
 
-Argo-CD-style web UI for the Dokku tenants on this server.
+Argo-CD-inspired web UI for the Dokku tenants on this server.
 
-- Live status grid (SSE; updates every 3s with smooth state-change animations)
+- Application grid with Health, Sync, Live, and Desired state
 - Per-app actions: start / stop / restart / rebuild
 - Tenant-first actions: select a tenant, then update version / restart / stop / delete
-- Compatible version picker: one tag maps to backend and frontend images
+- Compatible version picker: one release tag maps to backend and frontend images
+- Release notes page with broken-version status
 - Live log streaming (SSE) + ring-buffer log aggregation + downloadable dump
-- Form-driven scripts (`/scripts/<name>`) with streamed output
+- Command forms backed by `scripts/deployctl.sh` with streamed output
 - Command palette (Ctrl/Cmd+K)
 - Single-admin login (bcrypt) with signed cookie session
 
@@ -36,18 +37,41 @@ runtime besides the docker socket.
 | `DASHBOARD_ENV_FILE`  | no       | —               |
 | `TENANT_NAME_PREFIX`  | no       | —               |
 
-Version picker values come from the deployment env (`config.env` / `install.env`):
+Version picker values are exact SemVer image tags such as `v0.0.1`, not channels such as
+`latest`, `stable`, or `dev`. The dashboard deploys the selected tag to both apps:
 
 ```sh
 BACKEND_IMAGE=ssdawweq/ifritah-api
 FRONTEND_IMAGE=ssdawweq/ifritah-web
-APP_IMAGE_VERSIONS=dev,latest,stable
-APP_IMAGE_VERSION_DEFAULT=dev
+APP_IMAGE_VERSIONS=v0.0.1
+APP_IMAGE_VERSION_DEFAULT=v0.0.1
 ```
 
 Use `TENANT_NAME_PREFIX` when dev and prod dashboards share one server or MySQL. With `TENANT_NAME_PREFIX=dev-`, creating tenant `acme` creates Dokku apps `dev-acme-backend` / `dev-acme-frontend` and database `tenant_dev_acme`. Use `TENANT_NAME_PREFIX=prod-` for prod so prod creates `tenant_prod_acme` instead. For two dashboards on one server, set this in each dashboard's `dashboard.env`; keep the shared `config.env` prefix unset or point each dashboard at a matching `DEPLOY_CONFIG_FILE`.
 
-Publishing `BACKEND_IMAGE:v1` and `FRONTEND_IMAGE:v1` makes `v1` selectable as a compatible pair. Re-pushing only the frontend with the same tag is supported; update deploys pull before applying the image.
+Publishing `BACKEND_IMAGE:v0.0.1` and `FRONTEND_IMAGE:v0.0.1` makes `v0.0.1` selectable as a compatible pair. Re-pushing without changing `VERSION` overwrites that same image tag; increment `VERSION` only for a new feature or bug-fix release.
+
+Release notes are best kept in GitHub Releases, then mirrored into `dashboard/releases.json` for the server dashboard, or into `APP_IMAGE_RELEASES_FILE` when set. Broken status is not read from the file: the dashboard marks a version broken when the latest Dokku deployment currently running that version is not healthy. The file shape is:
+
+```json
+[
+  {
+    "tag": "vX.X.X",
+    "date": "YYYY-MM-DD",
+    "status": "ready",
+    "title": "Short release title",
+    "notes": ["Human-written release note."]
+  }
+]
+```
+
+The equivalent shell workflow uses the same command vocabulary:
+
+```sh
+sudo ./scripts/deployctl.sh tenant status acme
+sudo ./scripts/deployctl.sh tenant update acme --backend-image repo/api:v0.0.1 --frontend-image repo/web:v0.0.1
+sudo ./scripts/deployctl.sh fleet sync repo/api:v0.0.1 --type backend --tenant acme
+```
 
 ## Local perf check
 

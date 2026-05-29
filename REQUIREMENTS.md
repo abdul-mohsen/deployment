@@ -48,9 +48,9 @@ tenant frontend  ──/api──▶  tenant backend
 - **One Dokku host, one MySQL** serves both. Tenants are separated only by app
   name and database name. There is no separate "dev cluster".
 - The `DEV_TENANT` (default `dev`) in [config.env](config.env.example) is a
-  single tenant that tracks `:dev` images via `auto-pull.sh`; all other tenants
-  track `:latest` (`PULL_TAG`) and are deployed manually via
-  [scripts/deploy-all.sh](scripts/deploy-all.sh).
+  single tenant that can track `DEV_TAG` via `auto-pull.sh`, but the preferred
+  release flow is exact SemVer image tags from each repo's `VERSION` file.
+  All other tenants are deployed manually via [scripts/deploy-all.sh](scripts/deploy-all.sh).
 - The string `production` you may see in scripts refers to:
   - the `zatca_env` column default (which ZATCA endpoint to submit to — has
     nothing to do with the tenant being a "production tenant"), and

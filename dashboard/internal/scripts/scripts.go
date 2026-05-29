@@ -44,18 +44,40 @@ type ImageVersion struct {
 	Tag           string
 	BackendImage  string
 	FrontendImage string
+	Date          string
+	Status        string
+	Broken        bool
+	Title         string
+	Notes         []string
+}
+
+func ReleaseCatalog() []ImageVersion {
+	return VersionCatalog()
 }
 
 func VersionCatalog() []ImageVersion {
 	backendRepo := imageRepo("BACKEND_IMAGE", "ifritah-api", "ssdawweq/ifritah-api")
 	frontendRepo := imageRepo("FRONTEND_IMAGE", "ifritah-web", "ssdawweq/ifritah-web")
 	versions := versionOptions()
+	metadata := releaseMetadataByTag()
 	out := make([]ImageVersion, 0, len(versions))
 	for _, tag := range versions {
+		meta := metadata[tag]
+		if meta.Status == "" {
+			meta.Status = "ready"
+		}
+		if meta.Title == "" {
+			meta.Title = tag
+		}
 		out = append(out, ImageVersion{
 			Tag:           tag,
 			BackendImage:  backendRepo + ":" + tag,
 			FrontendImage: frontendRepo + ":" + tag,
+			Date:          meta.Date,
+			Status:        meta.Status,
+			Broken:        meta.Broken,
+			Title:         meta.Title,
+			Notes:         meta.Notes,
 		})
 	}
 	return out
@@ -78,13 +100,16 @@ func DefaultImageVersion() string {
 		}
 	}
 	if len(versions) == 0 {
-		return "dev"
+		return "v0.0.1"
 	}
 	return versions[0]
 }
 
 func ResolveImageVersion(tag string) (ImageVersion, bool) {
 	tag = strings.TrimSpace(tag)
+	if !IsImageVersionTag(tag) {
+		return ImageVersion{}, false
+	}
 	for _, v := range VersionCatalog() {
 		if v.Tag == tag {
 			return v, true
@@ -96,11 +121,11 @@ func ResolveImageVersion(tag string) (ImageVersion, bool) {
 func imageVersionField(required bool) Field {
 	f := Field{
 		Name:     "image_version",
-		Label:    "Version",
+		Label:    "Version tag",
 		Type:     "select",
 		Required: required,
 		Options:  VersionOptions(),
-		Help:     "Selects a compatible backend/frontend image pair that uses the same tag.",
+		Help:     "Deploys BACKEND_IMAGE:<tag> and FRONTEND_IMAGE:<tag>. Release notes show status and broken builds.",
 	}
 	if required {
 		f.Default = DefaultImageVersion()
@@ -127,39 +152,6 @@ func trimImageTag(image string) string {
 	return image
 }
 
-func versionOptions() []string {
-	if raw := strings.TrimSpace(os.Getenv("APP_IMAGE_VERSIONS")); raw != "" {
-		return splitUnique(raw)
-	}
-	return uniqueNonEmpty([]string{
-		strings.TrimSpace(os.Getenv("APP_IMAGE_VERSION_DEFAULT")),
-		strings.TrimSpace(os.Getenv("DEV_TAG")),
-		strings.TrimSpace(os.Getenv("PULL_TAG")),
-		"dev",
-		"latest",
-		"stable",
-	})
-}
-
-func splitUnique(raw string) []string {
-	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == '\n' || r == ' ' || r == '\t' })
-	return uniqueNonEmpty(parts)
-}
-
-func uniqueNonEmpty(in []string) []string {
-	seen := map[string]bool{}
-	out := []string{}
-	for _, v := range in {
-		v = strings.TrimSpace(v)
-		if v == "" || seen[v] {
-			continue
-		}
-		seen[v] = true
-		out = append(out, v)
-	}
-	return out
-}
-
 // Script is a registered orchestration script the UI can invoke.
 type Script struct {
 	Name    string // script file name in scripts/ (e.g. "create-tenant.sh")
@@ -177,7 +169,64 @@ func (s Script) Slug() string {
 	return strings.TrimSuffix(s.Name, ".sh")
 }
 
-// Catalog returns the curated list of scripts the dashboard exposes.
+// ControlCommand returns the equivalent deployctl command shown in the UI.
+func (s Script) ControlCommand() string {
+	switch s.Slug() {
+	case "status":
+		return "fleet status"
+	case "list-tenants":
+		return "tenant list"
+	case "create-tenant":
+		return "tenant create"
+	case "init-tenant-db":
+		return "tenant init-db"
+	case "remove-tenant":
+		return "tenant remove"
+	case "cleanup-broken-tenant":
+		return "tenant cleanup"
+	case "deploy-all":
+		return "fleet sync"
+	case "rollback-tenant":
+		return "tenant rollback"
+	case "set-tenant-image":
+		return "tenant pin"
+	case "update-tenant":
+		return "tenant update"
+	case "backup-tenant":
+		return "tenant backup"
+	case "tail-logs":
+		return "tenant logs"
+	case "verify-mysql":
+		return "db verify"
+	case "fix-dokku-hostname":
+		return "dokku fix-hostname"
+	case "setup-nats":
+		return "setup nats"
+	case "discover-dokku-nginx":
+		return "dokku discover-nginx"
+	case "watch-dokku-traffic":
+		return "dokku traffic"
+	case "auto-pull":
+		return "fleet auto-pull"
+	case "setup-dev-tenant":
+		return "setup dev-tenant"
+	case "cleanup-old-files":
+		return "cleanup old-files"
+	default:
+		return "script " + s.Name
+	}
+}
+
+// Group returns the operation group used by command-center templates.
+func (s Script) Group() string {
+	cmd := s.ControlCommand()
+	if before, _, ok := strings.Cut(cmd, " "); ok {
+		return before
+	}
+	return cmd
+}
+
+// Catalog returns the curated list of deployctl-backed operations the dashboard exposes.
 //
 // Adding a new script: drop it into ./scripts/ and add an entry here. Only
 // scripts in this list are executable; anything else is rejected.
@@ -472,7 +521,7 @@ cp -r /opt/deployment/scripts /tmp/dep/
 find /tmp/dep -type f \( -name '*.sh' -o -name '*.env' \) -exec sed -i 's/\r$//' {} +
 cd /tmp/dep
 NAME="$1"; shift
-exec bash "scripts/$NAME" "$@"
+exec bash "scripts/deployctl.sh" "script" "$NAME" "$@"
 `,
 		"--", scriptName,
 	}

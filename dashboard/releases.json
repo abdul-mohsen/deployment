@@ -1,0 +1,12 @@
+[
+  {
+    "tag": "v0.0.1",
+    "date": "",
+    "status": "ready",
+    "title": "Initial release",
+    "notes": [
+      "Starting release. Backend and frontend must both publish images with the v0.0.1 tag.",
+      "Keep this release only until the first feature or bug-fix release increments VERSION."
+    ]
+  }
+]

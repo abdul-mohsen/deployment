@@ -305,7 +305,8 @@ dokku config:set --no-restart "$FRONTEND_APP" \
     PORT="$FRONTEND_PORT" \
     APP_DOMAIN="$TENANT_DOMAIN" \
     BACKEND_URL="http://${BACKEND_APP}.web:${BACKEND_PORT}" \
-    API_URL="${PROTOCOL}://${TENANT_DOMAIN}/api"
+    API_URL="${PROTOCOL}://${TENANT_DOMAIN}/api" \
+    MASTER_DB_DSN="root:${MYSQL_ROOT_PASSWORD}@tcp(host.docker.internal:${MYSQL_PORT})/${MYSQL_MASTER_DB:-zatca_master}"
 
 # Message service (if configured)
 MSG_HOST="${MSG_HOST:-}"
@@ -360,6 +361,14 @@ SQLEOF
 INSERT INTO tenant (name, db_name)
 VALUES ('${TENANT_NAME}', '${TENANT_DB_NAME}')
 ON DUPLICATE KEY UPDATE enabled=1;
+SQLEOF
+
+        # Seed the default plan without overwriting an existing operator choice.
+        log "Seeding tenant plan..."
+        run_mysql "$MYSQL_MASTER_DB" <<SQLEOF
+INSERT INTO \`${MYSQL_MASTER_DB}\`.tenant_plan (tenant_name, plan)
+VALUES ('${TENANT_NAME}', 'solo')
+ON DUPLICATE KEY UPDATE updated_at=NOW();
 SQLEOF
 
         # Inject DB env vars into the backend container.

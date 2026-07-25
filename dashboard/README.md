@@ -9,6 +9,8 @@ Argo-CD-inspired web UI for the Dokku tenants on this server.
 - Release notes page with broken-version status
 - Live log streaming (SSE) + ring-buffer log aggregation + downloadable dump
 - Command forms backed by `scripts/deployctl.sh` with streamed output
+- Tenant plan management backed by the deployment master database
+- Form-driven scripts (`/scripts/<name>`) with streamed output
 - Command palette (Ctrl/Cmd+K)
 - Single-admin login (bcrypt) with signed cookie session
 
@@ -30,6 +32,7 @@ runtime besides the docker socket.
 | `DOCKER_BIN`          | no       | `docker`        |
 | `DOKKU_CONTAINER`     | no       | `dokku`         |
 | `BASE_DOMAIN`         | no       | `localhost`     |
+| `MASTER_DB_DSN`       | no       | —               |
 | `SESSION_KEY`         | no       | random per boot |
 | `LOG_BUFFER_LINES`    | no       | `2000`          |
 | `COOKIE_SECURE`       | no       | `false`         |

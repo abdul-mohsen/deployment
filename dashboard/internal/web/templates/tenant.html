@@ -35,6 +35,33 @@
   {{end}}
 </dl>
 
+<section class="action-panel mt-6">
+  <div class="flex items-center justify-between gap-3">
+    <h2>Plan</h2>
+    <span class="text-xs px-2 py-1 rounded ring-1 {{planClr .Plan.Plan}}">{{.Plan.Plan}}</span>
+  </div>
+  {{if .PlanError}}
+  <p class="mt-3 text-sm text-amber-300">Plan details are temporarily unavailable.</p>
+  {{end}}
+  <form method="post" action="/tenants/{{.Tenant}}/plan" class="mt-4 space-y-4">
+    <label class="block text-sm">
+      <span class="muted-line">Current plan</span>
+      <select name="plan" required class="mt-1 block w-full max-w-sm bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 outline-none focus:border-emerald-500">
+        <option value="solo" {{if eq .Plan.Plan "solo"}}selected{{end}}>Solo</option>
+        <option value="growth" {{if eq .Plan.Plan "growth"}}selected{{end}}>Growth</option>
+        <option value="business" {{if eq .Plan.Plan "business"}}selected{{end}}>Business</option>
+        <option value="enterprise" {{if eq .Plan.Plan "enterprise"}}selected{{end}}>Enterprise</option>
+      </select>
+    </label>
+    <label class="block text-sm">
+      <span class="muted-line">Notes</span>
+      <textarea name="notes" maxlength="500" rows="3" class="mt-1 block w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 outline-none focus:border-emerald-500" placeholder="Optional plan notes">{{.Plan.Notes}}</textarea>
+    </label>
+    {{if .Plan.TrialEndsAt}}<p class="muted-line">Trial ends {{.Plan.TrialEndsAt}}</p>{{end}}
+    <button type="submit" class="command-link">Save</button>
+  </form>
+</section>
+
 <section class="action-layout">
   <div class="action-panel wide">
     <h2>Sync Version</h2>

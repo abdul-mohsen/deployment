@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/abdul-mohsen/deployment/dashboard/internal/logbuf"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/scripts"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/web"
+	_ "github.com/go-sql-driver/mysql"
 )
 
 func main() {
@@ -42,10 +44,18 @@ func main() {
 	client := dokku.New(cfg.DockerBin, cfg.DokkuContainer)
 	store := logbuf.New(cfg.LogBufferLines)
 	runner := scripts.NewRunner(cfg.DockerBin, cfg.RunnerImage, cfg.ScriptsHostPath, cfg.ConfigFile)
+	var masterDB *sql.DB
+	if cfg.MasterDBDSN != "" {
+		masterDB, err = sql.Open("mysql", cfg.MasterDBDSN)
+		if err != nil {
+			log.Fatal("master database configuration is invalid")
+		}
+		defer masterDB.Close()
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           web.Router(cfg, client, store, runner),
+		Handler:           web.Router(cfg, client, store, runner, masterDB),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

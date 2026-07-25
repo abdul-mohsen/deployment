@@ -3,6 +3,7 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -38,6 +39,7 @@ const sessionName = "dashboard"
 type server struct {
 	cfg       config.Config
 	dokku     *dokku.Client
+	masterDB  *sql.DB
 	logs      *logbuf.Store
 	runner    *scripts.Runner
 	pages     map[string]*template.Template
@@ -47,13 +49,14 @@ type server struct {
 }
 
 // Router builds the HTTP handler.
-func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts.Runner) http.Handler {
+func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts.Runner, masterDB ...*sql.DB) http.Handler {
 	funcs := template.FuncMap{
 		"join":     strings.Join,
-		"now":      func() string { return time.Now().Format("2006-01-02 15:04:05") },
-		"stateClr": stateClass,
-		"httpClr":  httpClass,
-		"json":     templateJSON,
+		"now":       func() string { return time.Now().Format("2006-01-02 15:04:05") },
+		"stateClr":  stateClass,
+		"httpClr":   httpClass,
+		"json":      templateJSON,
+		"planClr":   planBadgeClass,
 	}
 	pages := map[string]*template.Template{}
 	layoutPages := []string{"index.html", "app.html", "tenant.html", "scripts.html", "script.html", "releases.html", "password.html"}
@@ -75,7 +78,11 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		SameSite: http.SameSiteLaxMode,
 	}
 
-	s := &server{cfg: cfg, dokku: d, logs: l, runner: runner, pages: pages, store: store}
+	var db *sql.DB
+	if len(masterDB) > 0 {
+		db = masterDB[0]
+	}
+	s := &server{cfg: cfg, dokku: d, masterDB: db, logs: l, runner: runner, pages: pages, store: store}
 	s.snapshots = newSnapshotCache(60*time.Second, s.collectSnapshot)
 	s.snapshots.Start(context.Background())
 
@@ -96,6 +103,7 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		r.Use(s.requireAuth)
 		r.Get("/", s.handleIndex)
 		r.Get("/tenants/{name}", s.handleTenant)
+		r.Post("/tenants/{name}/plan", s.handleTenantPlanUpdate)
 		r.Post("/tenants/{name}/{verb}", s.handleTenantAction)
 		r.Get("/apps/{name}", s.handleApp)
 		r.Post("/apps/{name}/{verb}", s.handleAction)
@@ -259,9 +267,9 @@ func (s *server) handleApp(w http.ResponseWriter, r *http.Request) {
 	}
 	app := s.dokku.AppDetails(r.Context(), name)
 	s.render(w, "app.html", map[string]any{
-		"Env":  s.cfg.EnvName,
-		"Base": s.cfg.BaseDomain,
-		"App":  app,
+		"Env":       s.cfg.EnvName,
+		"Base":      s.cfg.BaseDomain,
+		"App":       app,
 	})
 }
 
@@ -288,6 +296,7 @@ func (s *server) handleTenant(w http.ResponseWriter, r *http.Request) {
 			frontend = &apps[i]
 		}
 	}
+	plan, planErr := s.tenantPlan(r.Context(), name)
 	s.render(w, "tenant.html", map[string]any{
 		"Env":            s.cfg.EnvName,
 		"Base":           s.cfg.BaseDomain,
@@ -297,7 +306,40 @@ func (s *server) handleTenant(w http.ResponseWriter, r *http.Request) {
 		"Frontend":       frontend,
 		"Versions":       scripts.VersionCatalog(),
 		"DefaultVersion": scripts.DefaultImageVersion(),
+		"Plan":           plan,
+		"PlanError":      planErr != nil,
 	})
+}
+
+func (s *server) handleTenantPlanUpdate(w http.ResponseWriter, r *http.Request) {
+	tenant := chi.URLParam(r, "name")
+	if !validAppName(tenant) {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	if s.masterDB == nil {
+		http.Error(w, "plan management is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	plan := strings.TrimSpace(r.FormValue("plan"))
+	if !validPlan(plan) {
+		http.Error(w, "invalid plan", http.StatusBadRequest)
+		return
+	}
+	notes := strings.TrimSpace(r.FormValue("notes"))
+	if len(notes) > 500 {
+		http.Error(w, "notes must be 500 characters or fewer", http.StatusBadRequest)
+		return
+	}
+	if _, err := s.masterDB.ExecContext(r.Context(), upsertTenantPlanSQL, tenant, plan, notes, plan, notes); err != nil {
+		http.Error(w, "could not update tenant plan", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/tenants/"+url.PathEscape(tenant)+"?plan=updated", http.StatusSeeOther)
 }
 
 func (s *server) handleTenantAction(w http.ResponseWriter, r *http.Request) {

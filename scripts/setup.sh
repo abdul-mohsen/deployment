@@ -374,9 +374,43 @@ CREATE TABLE IF NOT EXISTS tenant (
 -- Add columns if upgrading from older schema
 ALTER TABLE tenant ADD COLUMN IF NOT EXISTS backend_image  VARCHAR(255) NOT NULL DEFAULT '';
 ALTER TABLE tenant ADD COLUMN IF NOT EXISTS frontend_image VARCHAR(255) NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS tenant_plan (
+    tenant_name      VARCHAR(100) PRIMARY KEY,
+    plan             ENUM('solo', 'growth', 'business', 'enterprise')
+                     NOT NULL DEFAULT 'solo',
+    trial_ends_at    TIMESTAMP NULL,
+    notes            VARCHAR(500),
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                     ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+ALTER TABLE tenant_plan
+    ADD COLUMN IF NOT EXISTS plan ENUM('solo', 'growth', 'business', 'enterprise')
+                                 NOT NULL DEFAULT 'solo';
+ALTER TABLE tenant_plan
+    ADD COLUMN IF NOT EXISTS trial_ends_at TIMESTAMP NULL;
+ALTER TABLE tenant_plan
+    ADD COLUMN IF NOT EXISTS notes VARCHAR(500);
+ALTER TABLE tenant_plan
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                                      ON UPDATE CURRENT_TIMESTAMP;
+CREATE TABLE IF NOT EXISTS tenant_feature_override (
+    tenant_name  VARCHAR(100) NOT NULL,
+    feature_id   VARCHAR(100) NOT NULL,
+    enabled      BOOLEAN NOT NULL,
+    reason       VARCHAR(255),
+    expires_at   TIMESTAMP NULL,
+    PRIMARY KEY (tenant_name, feature_id),
+    INDEX idx_tenant (tenant_name)
+) ENGINE=InnoDB;
+ALTER TABLE tenant_feature_override
+    ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE tenant_feature_override
+    ADD COLUMN IF NOT EXISTS reason VARCHAR(255);
+ALTER TABLE tenant_feature_override
+    ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP NULL;
 SQLEOF
 
-    log "Master database ready: ${MYSQL_MASTER_DB}.tenant"
+    log "Master database ready: ${MYSQL_MASTER_DB}.tenant, tenant_plan, tenant_feature_override"
 else
     warn "MYSQL_ROOT_PASSWORD not configured. Skipping master DB setup."
     warn "Edit config.env and re-run setup.sh to create master database."

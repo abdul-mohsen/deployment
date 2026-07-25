@@ -52,11 +52,11 @@ type server struct {
 func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts.Runner, masterDB ...*sql.DB) http.Handler {
 	funcs := template.FuncMap{
 		"join":     strings.Join,
-		"now":       func() string { return time.Now().Format("2006-01-02 15:04:05") },
-		"stateClr":  stateClass,
-		"httpClr":   httpClass,
-		"json":      templateJSON,
-		"planClr":   planBadgeClass,
+		"now":      func() string { return time.Now().Format("2006-01-02 15:04:05") },
+		"stateClr": stateClass,
+		"httpClr":  httpClass,
+		"json":     templateJSON,
+		"planClr":  planBadgeClass,
 	}
 	pages := map[string]*template.Template{}
 	layoutPages := []string{"index.html", "app.html", "tenant.html", "scripts.html", "script.html", "releases.html", "password.html"}
@@ -267,9 +267,9 @@ func (s *server) handleApp(w http.ResponseWriter, r *http.Request) {
 	}
 	app := s.dokku.AppDetails(r.Context(), name)
 	s.render(w, "app.html", map[string]any{
-		"Env":       s.cfg.EnvName,
-		"Base":      s.cfg.BaseDomain,
-		"App":       app,
+		"Env":  s.cfg.EnvName,
+		"Base": s.cfg.BaseDomain,
+		"App":  app,
 	})
 }
 

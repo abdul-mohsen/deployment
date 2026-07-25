@@ -170,6 +170,7 @@ func TestDashboardTemplatesParse(t *testing.T) {
 		"stateClr": stateClass,
 		"httpClr":  httpClass,
 		"json":     templateJSON,
+		"planClr":  planBadgeClass,
 	}
 	for _, name := range []string{"index.html", "app.html", "tenant.html", "scripts.html", "script.html", "releases.html", "password.html"} {
 		if _, err := template.New("").Funcs(funcs).ParseFS(tplFS,

@@ -3,6 +3,7 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"fmt"
 	"html/template"
@@ -33,21 +34,23 @@ var staticFS embed.FS
 const sessionName = "dashboard"
 
 type server struct {
-	cfg     config.Config
-	dokku   *dokku.Client
-	logs    *logbuf.Store
-	runner  *scripts.Runner
-	pages   map[string]*template.Template
-	store   *sessions.CookieStore
+	cfg      config.Config
+	dokku    *dokku.Client
+	masterDB *sql.DB
+	logs     *logbuf.Store
+	runner   *scripts.Runner
+	pages    map[string]*template.Template
+	store    *sessions.CookieStore
 }
 
 // Router builds the HTTP handler.
-func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts.Runner) http.Handler {
+func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts.Runner, masterDB ...*sql.DB) http.Handler {
 	funcs := template.FuncMap{
 		"join":     strings.Join,
 		"now":      func() string { return time.Now().Format("2006-01-02 15:04:05") },
 		"stateClr": stateClass,
 		"httpClr":  httpClass,
+		"planClr":  planBadgeClass,
 	}
 	pages := map[string]*template.Template{}
 	layoutPages := []string{"index.html", "app.html", "scripts.html", "script.html"}
@@ -69,7 +72,11 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		SameSite: http.SameSiteLaxMode,
 	}
 
-	s := &server{cfg: cfg, dokku: d, logs: l, runner: runner, pages: pages, store: store}
+	var db *sql.DB
+	if len(masterDB) > 0 {
+		db = masterDB[0]
+	}
+	s := &server{cfg: cfg, dokku: d, masterDB: db, logs: l, runner: runner, pages: pages, store: store}
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -87,7 +94,8 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireAuth)
 		r.Get("/", s.handleIndex)
-		r.Get("/apps/{name}", s.handleApp)
+		r.Get("/apps/{name}", s.handleTenant)
+		r.Post("/apps/{name}/plan", s.handleTenantPlanUpdate)
 		r.Post("/apps/{name}/{verb}", s.handleAction)
 		r.Get("/apps/{name}/logs", s.handleLogStream)
 		r.Get("/apps/{name}/logs.txt", s.handleLogDump)
@@ -170,17 +178,56 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleApp(w http.ResponseWriter, r *http.Request) {
+	s.handleTenant(w, r)
+}
+
+func (s *server) handleTenant(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if !validAppName(name) {
 		http.Error(w, "invalid name", http.StatusBadRequest)
 		return
 	}
 	app := s.dokku.AppDetails(r.Context(), name)
+	plan, planErr := s.tenantPlan(r.Context(), app.Tenant)
 	s.render(w, "app.html", map[string]any{
-		"Env":  s.cfg.EnvName,
-		"Base": s.cfg.BaseDomain,
-		"App":  app,
+		"Env":       s.cfg.EnvName,
+		"Base":      s.cfg.BaseDomain,
+		"App":       app,
+		"Plan":      plan,
+		"PlanError": planErr != nil,
 	})
+}
+
+func (s *server) handleTenantPlanUpdate(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if !validAppName(name) {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	if s.masterDB == nil {
+		http.Error(w, "plan management is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	plan := strings.TrimSpace(r.FormValue("plan"))
+	if !validPlan(plan) {
+		http.Error(w, "invalid plan", http.StatusBadRequest)
+		return
+	}
+	notes := strings.TrimSpace(r.FormValue("notes"))
+	if len(notes) > 500 {
+		http.Error(w, "notes must be 500 characters or fewer", http.StatusBadRequest)
+		return
+	}
+	tenant := tenantNameFromApp(name)
+	if _, err := s.masterDB.ExecContext(r.Context(), upsertTenantPlanSQL, tenant, plan, notes, plan, notes); err != nil {
+		http.Error(w, "could not update tenant plan", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/apps/"+url.PathEscape(name)+"?plan=updated", http.StatusSeeOther)
 }
 
 func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
@@ -326,8 +373,8 @@ func (s *server) handleScriptPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, "script.html", map[string]any{
-		"Env":             s.cfg.EnvName,
-		"Script":          sc,
+		"Env":              s.cfg.EnvName,
+		"Script":           sc,
 		"RunnerConfigured": s.cfg.ScriptsHostPath != "",
 	})
 }

@@ -172,6 +172,16 @@ func Catalog() []Script {
 			},
 		},
 		{
+			Name: "set-tenant-plan.sh", Title: "Set tenant plan",
+			Summary: "Change a tenant's subscription plan and operator notes.",
+			Fields: []Field{
+				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true, Placeholder: "acme"},
+				{Name: "plan", Label: "Plan", Flag: "--plan", Type: "select", Required: true,
+					Options: []string{"solo", "growth", "business", "enterprise"}},
+				{Name: "notes", Label: "Notes", Flag: "--notes", Type: "text", Placeholder: "Optional operator notes"},
+			},
+		},
+		{
 			Name: "update-tenant.sh", Title: "Update tenant", Summary: "Update images, env, scale, restart.",
 			Fields: []Field{
 				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true},

@@ -17,6 +17,7 @@ type Config struct {
 	DockerBin       string // path to the docker binary.
 	DokkuContainer  string // name of the dokku-in-docker container.
 	BaseDomain      string // base domain shown for app URLs.
+	MasterDBDSN     string // MySQL DSN for the deployment master database.
 	AdminUser       string // single admin username.
 	AdminHash       string // bcrypt hash of the admin password.
 	SessionKey      []byte // cookie signing key.
@@ -50,6 +51,7 @@ func Load() (Config, error) {
 		DockerBin:       envOr("DOCKER_BIN", "docker"),
 		DokkuContainer:  envOr("DOKKU_CONTAINER", "dokku"),
 		BaseDomain:      envOr("BASE_DOMAIN", "localhost"),
+		MasterDBDSN:     os.Getenv("MASTER_DB_DSN"),
 		AdminUser:       os.Getenv("ADMIN_USER"),
 		AdminHash:       os.Getenv("ADMIN_PASSWORD_HASH"),
 		LogBufferLines:  envInt("LOG_BUFFER_LINES", 2000),

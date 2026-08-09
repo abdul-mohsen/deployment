@@ -19,6 +19,7 @@ import (
 	"github.com/abdul-mohsen/deployment/dashboard/internal/config"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/dokku"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/logbuf"
+	"github.com/abdul-mohsen/deployment/dashboard/internal/retention"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/scripts"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/web"
 )
@@ -43,6 +44,11 @@ func main() {
 	store := logbuf.New(cfg.LogBufferLines)
 	runner := scripts.NewRunner(cfg.DockerBin, cfg.RunnerImage, cfg.ScriptsHostPath, cfg.ConfigFile)
 
+	// Start the daily backup retention policy (prunes auto-origin backups older than 7 days).
+	retentionRunner := retention.New(cfg.DockerBin, cfg.RunnerImage, cfg.ScriptsHostPath, retention.DefaultRetentionDays)
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	retentionRunner.Start(bgCtx)
+
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           web.Router(cfg, client, store, runner),
@@ -59,6 +65,9 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
+
+	bgCancel()
+	retentionRunner.Stop()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

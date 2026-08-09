@@ -25,6 +25,8 @@ Areas:
   tenant status [name] [flags]       Show fleet or tenant health
   tenant logs [name] [flags]         Tail tenant logs
   tenant backup [name|--all]         Dump tenant data
+  tenant restore <name> --from <id>  Restore/rollback a tenant to a backup
+  tenant backups <list|delete|prune> Manage backup sets (protect/verify/prune)
   tenant rollback <name> [flags]     Roll back to a previous image
   tenant pin [name] [flags]          Pin or list desired images
   tenant init-db <name> [flags]      Initialize schema and seed users
@@ -34,6 +36,7 @@ Areas:
   fleet sync <image> [flags]         Roll an image to tenants
   fleet logs [flags]                 Aggregate logs
   fleet backup                       Back up every tenant
+  fleet backups <list|prune>         Manage backups across the fleet
   fleet auto-pull [flags]            Run one auto-pull cycle
 
   stack restart [flags]              Restart Dokku/dashboard stack
@@ -64,7 +67,7 @@ need_arg() {
 
 script_accepts_config() {
     case "$1" in
-        auto-pull.sh|backup-tenant.sh|cleanup-broken-tenant.sh|create-tenant.sh|deploy-all.sh|init-tenant-db.sh|list-tenants.sh|remove-tenant.sh|rollback-tenant.sh|set-tenant-image.sh|setup-dev-tenant.sh|setup.sh|status.sh|update-tenant.sh|webhook-server.sh)
+        auto-pull.sh|backup-tenant.sh|cleanup-broken-tenant.sh|create-tenant.sh|deploy-all.sh|init-tenant-db.sh|list-tenants.sh|manage-backups.sh|remove-tenant.sh|restore-tenant.sh|rollback-tenant.sh|set-tenant-image.sh|setup-dev-tenant.sh|setup.sh|status.sh|update-tenant.sh|webhook-server.sh)
             return 0
             ;;
         *)
@@ -153,6 +156,13 @@ tenant_cmd() {
         backup)
             run_script backup-tenant.sh "$@"
             ;;
+        restore)
+            local name="${1:-}"; need_arg "$name" "tenant name"; shift
+            run_script restore-tenant.sh "$name" "$@"
+            ;;
+        backups)
+            run_script manage-backups.sh "$@"
+            ;;
         rollback)
             local name="${1:-}"; need_arg "$name" "tenant name"; shift
             run_script rollback-tenant.sh "$name" "$@"
@@ -194,6 +204,9 @@ fleet_cmd() {
             ;;
         backup)
             run_script backup-tenant.sh --all "$@"
+            ;;
+        backups)
+            run_script manage-backups.sh "$@"
             ;;
         auto-pull|pull)
             run_script auto-pull.sh "$@"

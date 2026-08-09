@@ -6,34 +6,49 @@
   <title>Sign in · Dokku Dashboard</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen flex items-center justify-center font-sans">
-  <form method="post" action="/login" class="w-full max-w-sm bg-zinc-900/60 ring-1 ring-zinc-800 rounded-2xl p-8 space-y-5">
-    <div class="flex items-center gap-3">
-      <span class="inline-block h-2.5 w-2.5 rounded-full
-        {{if eq .Env "prod"}}bg-rose-500{{else}}bg-emerald-500{{end}}"></span>
-      <h1 class="text-lg font-semibold">Dokku Dashboard</h1>
-      <span class="text-xs uppercase tracking-widest px-2 py-0.5 rounded ring-1
-        {{if eq .Env "prod"}}ring-rose-500/30 text-rose-400{{else}}ring-emerald-500/30 text-emerald-400{{end}}">{{.Env}}</span>
-    </div>
-    {{if .Error}}
-      <div class="text-rose-400 text-sm">
-        {{if eq .Error "invalid"}}Invalid credentials.{{end}}
-        {{if eq .Error "session"}}Login succeeded but session could not be saved. Check browser cookie settings for localhost.{{end}}
+<body style="background:var(--bg);min-height:100vh;display:flex;align-items:center;justify-content:center">
+  <div style="width:100%;max-width:380px;padding:0 16px">
+    <div style="background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius-lg);padding:32px">
+
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:24px">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;flex-shrink:0;
+          background:{{if eq .Env "prod"}}var(--red){{else}}var(--green){{end}};
+          box-shadow:0 0 8px {{if eq .Env "prod"}}rgba(248,81,73,.6){{else}}rgba(63,185,80,.6){{end}}"></span>
+        <span style="font-size:16px;font-weight:600;color:var(--text)">Dokku Control Plane</span>
+        <span style="font-size:11px;padding:2px 8px;border-radius:10px;
+          border:1px solid {{if eq .Env "prod"}}var(--red-bd){{else}}var(--green-bd){{end}};
+          color:{{if eq .Env "prod"}}var(--red){{else}}var(--green){{end}};
+          background:{{if eq .Env "prod"}}var(--red-bg){{else}}var(--green-bg){{end}}">{{.Env}}</span>
       </div>
-    {{end}}
-    <label class="block">
-      <span class="text-xs text-zinc-400 uppercase tracking-widest">User</span>
-      <input name="user" required autofocus
-             class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 focus:border-emerald-500 focus:outline-none">
-    </label>
-    <label class="block">
-      <span class="text-xs text-zinc-400 uppercase tracking-widest">Password</span>
-      <input type="password" name="pass" required
-             class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 focus:border-emerald-500 focus:outline-none">
-    </label>
-    <button class="w-full bg-emerald-500 text-zinc-950 font-semibold rounded-lg py-2 hover:bg-emerald-400">
-      Sign in
-    </button>
-  </form>
+
+      {{if .Error}}
+      <div style="margin-bottom:16px;padding:8px 12px;border-radius:var(--radius);background:var(--red-bg);border:1px solid var(--red-bd);color:var(--red);font-size:13px">
+        {{if eq .Error "invalid"}}Invalid credentials.{{end}}
+        {{if eq .Error "session"}}Login succeeded but session could not be saved. Check browser cookie settings.{{end}}
+      </div>
+      {{end}}
+
+      <form method="post" action="/login" style="display:flex;flex-direction:column;gap:16px">
+        <label>
+          <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:6px">Username</div>
+          <input name="user" required autofocus autocomplete="username"
+                 style="width:100%;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:var(--radius);padding:8px 10px;font-size:14px;color:var(--text);outline:none;transition:border-color .15s"
+                 onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+        </label>
+        <label>
+          <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:6px">Password</div>
+          <input type="password" name="pass" required autocomplete="current-password"
+                 style="width:100%;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:var(--radius);padding:8px 10px;font-size:14px;color:var(--text);outline:none;transition:border-color .15s"
+                 onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+        </label>
+        <button type="submit"
+                style="width:100%;height:38px;background:var(--accent);border:1px solid var(--accent);border-radius:var(--radius);color:#fff;font-size:14px;font-weight:600;cursor:pointer;transition:background .15s"
+                onmouseover="this.style.background='var(--accent-h)'" onmouseout="this.style.background='var(--accent)'">
+          Sign in
+        </button>
+      </form>
+
+    </div>
+  </div>
 </body>
 </html>{{end}}

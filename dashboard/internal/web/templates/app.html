@@ -1,55 +1,61 @@
 {{define "content"}}
 {{with .App}}
-<a href="/" class="back-link">back to applications</a>
-<div class="detail-head">
-  <div>
-    <div class="eyebrow">{{.Role}}</div>
-    <h1>{{.Name}}</h1>
-    <p>Tenant <code>{{.Tenant}}</code></p>
+<div class="breadcrumb"><a href="/">Services</a> <span class="bc-sep">›</span> <span>{{.Tenant}}</span> <span class="bc-sep">›</span> <span>{{.Role}}</span></div>
+
+<div class="page-header">
+  <div class="page-header-left">
+    <h1 class="page-title">{{.Name}}</h1>
+    <span class="page-subtitle">{{.Role}} · tenant <code>{{.Tenant}}</code></span>
   </div>
-  <span class="text-xs px-2 py-1 rounded ring-1 {{stateClr .State}}">{{.State}}</span>
+  <div class="page-header-right">
+    <span class="badge {{stateClr .State}} badge-lg">{{.State}}</span>
+    {{if and .Domains (eq .State "running")}}
+    <a href="http://{{index .Domains 0}}" target="_blank" rel="noopener" class="btn btn-secondary">Open ↗</a>
+    {{end}}
+  </div>
 </div>
 
-<dl class="resource-grid four">
+<!-- Detail cards -->
+<div class="cards-row four">
   <div class="resource-card">
-    <dt>Image</dt>
-    <dd class="image-line" title="{{.Image}}">{{or .Image "-"}}</dd>
+    <div class="rc-label">Image</div>
+    <div class="rc-image" title="{{.Image}}">{{or .Image "—"}}</div>
   </div>
   <div class="resource-card">
-    <dt>HTTP</dt>
-    <dd>{{.HTTPCode}}</dd>
+    <div class="rc-label">HTTP</div>
+    <div class="rc-value">{{.HTTPCode}}</div>
   </div>
   <div class="resource-card">
-    <dt>Internal port</dt>
-    <dd>{{or .IntPort "-"}}</dd>
+    <div class="rc-label">Internal port</div>
+    <div class="rc-value">{{or .IntPort "—"}}</div>
   </div>
   <div class="resource-card">
-    <dt>Host ports</dt>
-    <dd class="image-line" title="{{.HostPorts}}">{{or .HostPorts "-"}}</dd>
+    <div class="rc-label">Host ports</div>
+    <div class="rc-image" title="{{.HostPorts}}">{{or .HostPorts "—"}}</div>
   </div>
-</dl>
-
-<div class="chip-row mt-6">
-  <button class="action-chip good"
-          hx-post="/apps/{{.Name}}/start" hx-swap="none">Start</button>
-  <button class="action-chip warn"
-          hx-post="/apps/{{.Name}}/stop" hx-confirm="Stop {{.Name}}?" hx-swap="none">Stop</button>
-  <button class="action-chip"
-          hx-post="/apps/{{.Name}}/restart" hx-confirm="Restart {{.Name}}?" hx-swap="none">Restart</button>
-  <button class="action-chip"
-          hx-post="/apps/{{.Name}}/rebuild" hx-confirm="Rebuild {{.Name}}? (re-runs the latest release)" hx-swap="none">Rebuild</button>
-  {{if and .Domains (eq .State "running")}}
-  <a href="http://{{index .Domains 0}}" target="_blank" rel="noopener"
-     class="action-chip good">Open</a>
-  {{end}}
-  <a href="/apps/{{.Name}}/logs.txt"
-     class="action-chip ml-auto">Download logs</a>
 </div>
 
-<section class="output-panel">
-  <h2>Live Logs</h2>
-  <pre id="logs" class="terminal-output"></pre>
-</section>
+<!-- Actions -->
+<div class="panel">
+  <div class="panel-title">Actions</div>
+  <div class="action-row">
+    <button class="btn btn-success"
+            hx-post="/apps/{{.Name}}/start" hx-swap="none">▶ Start</button>
+    <button class="btn btn-danger"
+            hx-post="/apps/{{.Name}}/stop" hx-confirm="Stop {{.Name}}?" hx-swap="none">⏹ Stop</button>
+    <button class="btn btn-secondary"
+            hx-post="/apps/{{.Name}}/restart" hx-confirm="Restart {{.Name}}?" hx-swap="none">↺ Restart</button>
+    <button class="btn btn-secondary"
+            hx-post="/apps/{{.Name}}/rebuild" hx-confirm="Rebuild {{.Name}}?" hx-swap="none">⟳ Rebuild</button>
+    <a href="/apps/{{.Name}}/logs.txt" class="btn btn-secondary" style="margin-left:auto">⬇ Download logs</a>
+  </div>
+</div>
+
+<!-- Live log stream -->
+<div class="panel">
+  <div class="panel-title">Live logs</div>
+  <pre id="logs" class="terminal"></pre>
+</div>
 
 <script>
 (function () {

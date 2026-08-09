@@ -27,6 +27,10 @@ type Config struct {
 	ConfigFile       string // optional --config file path inside runner.
 	DashboardEnvFile string // optional writable env file for dashboard credentials.
 	TenantPrefix     string // optional tenant name prefix, e.g. "dev-" or "prod-".
+	TenantStateDir   string // directory for per-tenant JSON state files (auto_redeploy etc.).
+	BackupDir        string // host path where backup files are stored.
+	MySQLHost        string // MySQL host for accounting export queries.
+	MySQLPort        string // MySQL port for accounting export queries.
 }
 
 // Load reads configuration from the process environment.
@@ -61,6 +65,10 @@ func Load() (Config, error) {
 		ConfigFile:       envOr("DEPLOY_CONFIG_FILE", ""),
 		DashboardEnvFile: envOr("DASHBOARD_ENV_FILE", ""),
 		TenantPrefix:     normalizeTenantPrefix(os.Getenv("TENANT_NAME_PREFIX")),
+		TenantStateDir:   envOr("TENANT_STATE_DIR", "/opt/tenant-state"),
+		BackupDir:        envOr("BACKUP_DIR", "/opt/tenant-backups"),
+		MySQLHost:        envOr("MYSQL_HOST", "127.0.0.1"),
+		MySQLPort:        envOr("MYSQL_PORT", "3306"),
 	}
 	if c.AdminUser == "" || c.AdminHash == "" {
 		return c, fmt.Errorf("ADMIN_USER and ADMIN_PASSWORD_HASH are required")

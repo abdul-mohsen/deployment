@@ -119,18 +119,16 @@ func ResolveImageVersion(tag string) (ImageVersion, bool) {
 }
 
 func imageVersionField(required bool) Field {
-	f := Field{
-		Name:     "image_version",
-		Label:    "Version tag",
-		Type:     "select",
-		Required: required,
-		Options:  VersionOptions(),
-		Help:     "Deploys BACKEND_IMAGE:<tag> and FRONTEND_IMAGE:<tag>. Release notes show status and broken builds.",
+	return Field{
+		Name:        "image_version",
+		Label:       "Image tag",
+		Type:        "text",
+		Required:    required,
+		Placeholder: "e.g. v1.2.3 or feature-my-branch",
+		Suggest:     []string{}, // populated client-side from /api/image-tags via datalist
+		Default:     DefaultImageVersion(),
+		Help:        "Tag applied to both BACKEND_IMAGE and FRONTEND_IMAGE. Available tags load automatically from Docker Hub.",
 	}
-	if required {
-		f.Default = DefaultImageVersion()
-	}
-	return f
 }
 
 func imageRepo(envKey, suffix, fallback string) string {
@@ -194,6 +192,10 @@ func (s Script) ControlCommand() string {
 		return "tenant update"
 	case "backup-tenant":
 		return "tenant backup"
+	case "manage-backups":
+		return "tenant backups"
+	case "restore-tenant":
+		return "tenant restore"
 	case "tail-logs":
 		return "tenant logs"
 	case "verify-mysql":
@@ -268,10 +270,9 @@ func Catalog() []Script {
 				// from the UI; defaults match the upstream images.
 				{Name: "backend_port", Flag: "--backend-port", Type: "hidden", Default: "8090"},
 				{Name: "frontend_port", Flag: "--frontend-port", Type: "hidden", Default: "8000"},
-				{Name: "no_database", Label: "Skip database", Flag: "--no-database", Type: "checkbox", Boolean: true,
-					Help: "Only use this if the backend can boot without a DB, or if you provide DATABASE_URL/DB_* in Env vars."},
-				{Name: "git_only", Label: "Git-only (no deploy)", Flag: "--git-only", Type: "checkbox", Boolean: true},
-				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
+			{Name: "no_database", Label: "Skip database", Flag: "--no-database", Type: "checkbox", Boolean: true,
+				Help: "Only use this if the backend can boot without a DB, or if you provide DATABASE_URL/DB_* in Env vars."},
+			{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
 				{Name: "envs", Label: "Env vars", Flag: "--env", Type: "kv",
 					Help: "One KEY=VALUE per line; each becomes a separate --env flag. Use this for DATABASE_URL or DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD when not provisioning MySQL from this script."},
 			},
@@ -373,6 +374,45 @@ func Catalog() []Script {
 			Fields: []Field{
 				{Name: "_pos_name", Label: "Tenant (or leave blank with --all)", Type: "text"},
 				{Name: "all", Label: "All tenants", Flag: "--all", Type: "checkbox", Boolean: true},
+				{Name: "origin", Label: "Origin", Flag: "--origin", Type: "select", Options: []string{"user", "auto"}, Default: "user",
+					Help: "user backups are protected from the retention policy; auto backups are pruned by policy."},
+				{Name: "owner", Label: "Owner", Flag: "--owner", Type: "text", Placeholder: "admin",
+					Help: "Owner tag recorded in the backup manifest (used for delete ownership checks)."},
+				{Name: "retention_days", Label: "Retention days", Flag: "--retention-days", Type: "text", Placeholder: "30"},
+			},
+		},
+		{
+			Name: "manage-backups.sh", Title: "Manage backups",
+			Summary: "List, verify, delete, and prune tenant backups. User backups are protected from policy prune.",
+			Fields: []Field{
+				{Name: "_pos_action", Label: "Action", Type: "select", Required: true,
+					Options: []string{"list", "verify", "delete", "prune"}, Default: "list"},
+				{Name: "_pos_id", Label: "Backup ID", Type: "text",
+					Placeholder: "acme_20250101_120000",
+					Help:        "Required for verify/delete. Leave blank for list/prune."},
+				{Name: "json", Label: "JSON output", Flag: "--json", Type: "checkbox", Boolean: true},
+				{Name: "owner", Label: "Owner", Flag: "--owner", Type: "text",
+					Help: "For delete: must match a user backup's owner. For list: filter by owner."},
+				{Name: "force", Label: "Force (operator override)", Flag: "--force", Type: "checkbox", Boolean: true,
+					Help: "Delete a user backup regardless of owner. Use with care."},
+				{Name: "retention_days", Label: "Retention days (prune)", Flag: "--retention-days", Type: "text", Placeholder: "30"},
+				{Name: "dry_run", Label: "Dry run (prune)", Flag: "--dry-run", Type: "checkbox", Boolean: true},
+			},
+		},
+		{
+			Name: "restore-tenant.sh", Title: "Restore / rollback",
+			Summary: "Restore a tenant's files and/or database from any backup. Takes a verified safety backup first.",
+			Danger:  true,
+			Fields: []Field{
+				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true, Placeholder: "acme"},
+				{Name: "from", Label: "Backup ID", Flag: "--from", Type: "text", Required: true,
+					Placeholder: "acme_20250101_120000",
+					Help:        "The backup set to restore (see Manage backups → list)."},
+				{Name: "files_only", Label: "Files only", Flag: "--files-only", Type: "checkbox", Boolean: true},
+				{Name: "db_only", Label: "Database only", Flag: "--db-only", Type: "checkbox", Boolean: true},
+				{Name: "no_safety_backup", Label: "Skip safety backup", Flag: "--no-safety-backup", Type: "checkbox", Boolean: true,
+					Help: "NOT recommended. By default a verified backup of the current state is taken before restoring."},
+				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
 			},
 		},
 		{
@@ -501,12 +541,21 @@ func (r *Runner) Run(ctx context.Context, w io.Writer, scriptName string, argv [
 		argv = append(argv, "--config", r.configFile)
 	}
 
+	// Docker socket path: Linux/macOS use a Unix socket; Windows Docker Desktop
+	// exposes a named pipe. We detect by checking for the pipe path first.
+	dockerSocket := "/var/run/docker.sock:/var/run/docker.sock"
+	if _, err := os.Stat(`\\.\pipe\dockerDesktopLinuxEngine`); err == nil {
+		dockerSocket = `//./pipe/dockerDesktopLinuxEngine://./pipe/dockerDesktopLinuxEngine`
+	} else if _, err := os.Stat(`\\.\pipe\docker_engine`); err == nil {
+		dockerSocket = `//./pipe/docker_engine://./pipe/docker_engine`
+	}
+
 	full := []string{
 		"run", "--rm", "-i",
 		"-e", "MYSQL_CLIENT_MODE=docker",
 		"-e", "TENANT_NAME_PREFIX=" + os.Getenv("TENANT_NAME_PREFIX"),
 		"-e", "TENANT_NAME_PREFIX_OVERRIDE=" + os.Getenv("TENANT_NAME_PREFIX"),
-		"-v", "/var/run/docker.sock:/var/run/docker.sock",
+		"-v", dockerSocket,
 		"-v", r.scriptsHostPath + ":/opt/deployment:ro",
 		"--network", "host",
 		img,

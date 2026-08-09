@@ -182,6 +182,85 @@ func TestDashboardTemplatesParse(t *testing.T) {
 	}
 }
 
+func TestBuildArgv_ManageBackups_ListDefaultsAction(t *testing.T) {
+	sc := scripts.Find("manage-backups.sh")
+	if sc == nil {
+		t.Fatal("manage-backups.sh not in catalog")
+	}
+	// No action provided -> Default "list" should be used as the positional.
+	argv, err := buildArgv(sc, url.Values{"json": {"on"}})
+	if err != nil {
+		t.Fatalf("buildArgv: %v", err)
+	}
+	joined := strings.Join(argv, " ")
+	if !strings.HasPrefix(joined, "list") {
+		t.Errorf("expected action positional first, got: %s", joined)
+	}
+	if !strings.Contains(joined, "--json") {
+		t.Errorf("expected --json flag, got: %s", joined)
+	}
+}
+
+func TestBuildArgv_ManageBackups_DeleteWithOwner(t *testing.T) {
+	sc := scripts.Find("manage-backups.sh")
+	argv, err := buildArgv(sc, url.Values{
+		"_pos_action": {"delete"},
+		"_pos_id":     {"acme_20250101_120000"},
+		"owner":       {"alice"},
+	})
+	if err != nil {
+		t.Fatalf("buildArgv: %v", err)
+	}
+	want := []string{"delete", "acme_20250101_120000", "--owner", "alice"}
+	if !reflect.DeepEqual(argv, want) {
+		t.Fatalf("argv = %#v, want %#v", argv, want)
+	}
+}
+
+func TestBuildArgv_RestoreTenant_RequiresFrom(t *testing.T) {
+	sc := scripts.Find("restore-tenant.sh")
+	if sc == nil {
+		t.Fatal("restore-tenant.sh not in catalog")
+	}
+	if _, err := buildArgv(sc, url.Values{"_pos_name": {"acme"}}); err == nil {
+		t.Fatal("expected error when --from backup id is missing")
+	}
+	argv, err := buildArgv(sc, url.Values{
+		"_pos_name": {"acme"},
+		"from":      {"acme_20250101_120000"},
+	})
+	if err != nil {
+		t.Fatalf("buildArgv: %v", err)
+	}
+	joined := strings.Join(argv, " ")
+	for _, want := range []string{"acme", "--from acme_20250101_120000"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("argv missing %q\nfull: %s", want, joined)
+		}
+	}
+}
+
+func TestBuildArgv_BackupTenant_OriginOwner(t *testing.T) {
+	sc := scripts.Find("backup-tenant.sh")
+	if sc == nil {
+		t.Fatal("backup-tenant.sh not in catalog")
+	}
+	argv, err := buildArgv(sc, url.Values{
+		"_pos_name": {"acme"},
+		"origin":    {"user"},
+		"owner":     {"alice"},
+	})
+	if err != nil {
+		t.Fatalf("buildArgv: %v", err)
+	}
+	joined := strings.Join(argv, " ")
+	for _, want := range []string{"acme", "--origin user", "--owner alice"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("argv missing %q\nfull: %s", want, joined)
+		}
+	}
+}
+
 func TestFilterAppNamesScopesTenantPrefix(t *testing.T) {
 	server := &server{cfg: config.Config{TenantPrefix: "dev-"}}
 	got := server.filterAppNames([]string{

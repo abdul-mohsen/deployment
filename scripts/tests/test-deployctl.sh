@@ -56,6 +56,18 @@ expect_plan "bash scripts/deploy-all.sh repo/api:v2 --type backend --tenant acme
 expect_plan "bash scripts/backup-tenant.sh --all" \
     fleet backup
 
+expect_plan "bash scripts/restore-tenant.sh acme --from acme_20250101_120000" \
+    tenant restore acme --from acme_20250101_120000
+
+expect_plan "bash scripts/manage-backups.sh list acme --json" \
+    tenant backups list acme --json
+
+expect_plan "bash scripts/manage-backups.sh prune --dry-run" \
+    fleet backups prune --dry-run
+
+expect_plan "bash scripts/backup-tenant.sh acme --origin user --owner alice" \
+    tenant backup acme --origin user --owner alice
+
 expect_plan "bash scripts/restart-stack.sh --env all" \
     stack restart --env all
 

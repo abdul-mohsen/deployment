@@ -317,3 +317,69 @@ get_remote_digest() {
         -I "https://registry-1.docker.io/v2/${repo}/manifests/${tag}" 2>/dev/null | \
         grep -i "docker-content-digest" | awk '{print $2}' | tr -d '\r'
 }
+
+# =============================================================================
+# Backup metadata helpers
+# =============================================================================
+# A backup "set" is one timestamped run for a tenant. It is described by a
+# sidecar manifest file named "<tenant>_<timestamp>.meta.json" living next to
+# the .tar.gz / .sql.gz artifacts in BACKUP_DIR. The manifest lets the backup
+# tooling distinguish user-created backups (protected from policy deletion)
+# from automatic backups (retained/deleted by the retention policy), and
+# records whether the artifacts passed integrity verification.
+
+# backup_id <tenant> <timestamp> -> the stable id for a backup set.
+backup_id() { printf '%s_%s' "$1" "$2"; }
+
+# json_escape <string> -> minimally escaped JSON string body (no quotes).
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s"
+}
+
+# Read a scalar string field from a backup manifest file. Best-effort JSON
+# scraping that avoids a jq dependency (the runner image may not ship jq).
+#   backup_meta_field <meta-file> <field>
+backup_meta_field() {
+    local file="$1" field="$2"
+    [ -f "$file" ] || return 1
+    sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$file" | head -n1
+}
+
+# Verify a gzip artifact's integrity. Works for both .tar.gz (verifies the
+# tar stream too) and .sql.gz. Returns non-zero on any corruption/empty file.
+verify_gzip_artifact() {
+    local file="$1"
+    [ -f "$file" ] || return 1
+    [ -s "$file" ] || return 1
+    gzip -t "$file" 2>/dev/null || return 1
+    case "$file" in
+        *.tar.gz) tar -tzf "$file" >/dev/null 2>&1 || return 1 ;;
+    esac
+    return 0
+}
+
+# Write a backup manifest. Positional args keep callers simple:
+#   write_backup_manifest <meta-file> <tenant> <timestamp> <origin> <owner> \
+#                         <files-artifact|-> <db-artifact|-> <verified:true|false>
+write_backup_manifest() {
+    local meta="$1" tenant="$2" ts="$3" origin="$4" owner="$5" files="$6" db="$7" verified="$8"
+    local files_base="" db_base=""
+    [ "$files" != "-" ] && [ -n "$files" ] && files_base="$(basename "$files")"
+    [ "$db" != "-" ] && [ -n "$db" ] && db_base="$(basename "$db")"
+    cat > "$meta" <<EOF
+{
+  "id": "$(json_escape "$(backup_id "$tenant" "$ts")")",
+  "tenant": "$(json_escape "$tenant")",
+  "timestamp": "$(json_escape "$ts")",
+  "origin": "$(json_escape "$origin")",
+  "owner": "$(json_escape "$owner")",
+  "files_artifact": "$(json_escape "$files_base")",
+  "db_artifact": "$(json_escape "$db_base")",
+  "verified": ${verified},
+  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+}

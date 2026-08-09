@@ -111,9 +111,40 @@ sudo ./scripts/deployctl.sh setup dev-tenant        # creates the one dev tenant
 | Tenant status | `sudo ./scripts/deployctl.sh tenant status acme` |
 | Tail logs | `sudo ./scripts/deployctl.sh tenant logs acme --type backend` |
 | Backup | `sudo ./scripts/deployctl.sh fleet backup` |
+| Backup (user, protected) | `sudo ./scripts/deployctl.sh tenant backup acme --origin user --owner alice` |
+| List backups | `sudo ./scripts/deployctl.sh tenant backups list acme` |
+| Delete own backup | `sudo ./scripts/deployctl.sh tenant backups delete acme_20250101_120000 --owner alice` |
+| Prune by policy | `sudo ./scripts/deployctl.sh fleet backups prune` |
+| Restore / rollback | `sudo ./scripts/deployctl.sh tenant restore acme --from acme_20250101_120000` |
 | Restart platform | `sudo ./scripts/deployctl.sh stack restart --env all` |
 
 The old `scripts/*.sh` files remain as readable implementation units and compatibility entrypoints. New operations should be exposed through `deployctl.sh` first.
+
+## Backups, restore & rollback
+
+Every backup is a *set*: a manifest sidecar `<tenant>_<timestamp>.meta.json`
+plus its `.tar.gz` (files) and `.sql.gz` (database) artifacts in `BACKUP_DIR`.
+The manifest records the **origin** and **owner**, and whether the artifacts
+passed integrity verification (`gzip -t`, `tar -tzf`, non-empty dump).
+
+- **User backups** (`--origin user`) are protected: the retention policy never
+  deletes them. Only the owner (or an operator with `--force`) can delete one.
+- **Automatic backups** (`--origin auto`, the default) are retained for
+  `BACKUP_RETENTION_DAYS` (default 30) and then pruned by policy.
+- **Automatic deploys create a verified backup first.** `auto-pull.sh` takes a
+  `--require-verified` backup before redeploying; if it can't be verified the
+  deploy is skipped and retried next cycle. Opt out with
+  `AUTO_BACKUP_BEFORE_REDEPLOY=0` (not recommended).
+- **Auto-redeploy can be disabled per environment/tenant** by listing tenant
+  names in `AUTO_REDEPLOY_DISABLED` (the allow-listed equivalent of the
+  dashboard per-environment "disable auto-redeploy" checkbox).
+- **Restore/rollback to any version** with `tenant restore <name> --from <id>`.
+  It refuses corrupt backups and, by default, takes a fresh verified safety
+  backup of the current state first so the restore itself is reversible.
+
+Backups are managed only through the allow-listed `manage-backups.sh` /
+`restore-tenant.sh` scripts (surfaced in the dashboard Scripts page). There is
+no arbitrary shell surface.
 
 ## Bootstrapping the app repos
 
@@ -131,6 +162,20 @@ Each app repo CI reads `VERSION`, validates strict `vMAJOR.MINOR.PATCH`, and bui
 - `:<sha>` on every push → immutable reference for rollbacks/debugging.
 
 Backend and frontend releases must use the same `VERSION` value. The dashboard version picker deploys that one tag to both apps. CI fails if `VERSION` is lower than the latest GitHub Release tag; equal is allowed for overwrite builds.
+
+Each app repo also ships a **PR branch-image workflow**
+(`.github/workflows/qa-branch-image.yml`, templated in
+`templates/{backend,frontend}/.github/workflows/qa-release.yml`). On every pull
+request it builds and pushes two tags to the configured Docker Hub repo:
+
+- `:<branch-name>` — a safe, branch-derived mutable tag (always the latest
+  build for that branch), and
+- `:<branch-name>-<shortsha>` — an immutable per-commit reference.
+
+The dashboard's searchable image selector lists these tags straight from Docker
+Hub for the configured account, showing only tags present in **both** the
+backend and frontend repos so a branch build is only offered when both apps
+have a matching image.
 
 ## GitHub secrets to set in each app repo
 

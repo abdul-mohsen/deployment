@@ -21,6 +21,7 @@ import (
 	"github.com/abdul-mohsen/deployment/dashboard/internal/dokku"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/logbuf"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/scripts"
+	"github.com/abdul-mohsen/deployment/dashboard/internal/tenantstate"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/sessions"
@@ -36,14 +37,15 @@ var staticFS embed.FS
 const sessionName = "dashboard"
 
 type server struct {
-	cfg       config.Config
-	dokku     *dokku.Client
-	logs      *logbuf.Store
-	runner    *scripts.Runner
-	pages     map[string]*template.Template
-	store     *sessions.CookieStore
-	snapshots *snapshotCache
-	authMu    sync.RWMutex
+	cfg         config.Config
+	dokku       *dokku.Client
+	logs        *logbuf.Store
+	runner      *scripts.Runner
+	pages       map[string]*template.Template
+	store       *sessions.CookieStore
+	snapshots   *snapshotCache
+	tenantState *tenantstate.Store
+	authMu      sync.RWMutex
 }
 
 // Router builds the HTTP handler.
@@ -76,6 +78,7 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 	}
 
 	s := &server{cfg: cfg, dokku: d, logs: l, runner: runner, pages: pages, store: store}
+	s.tenantState = tenantstate.NewStore(cfg.TenantStateDir)
 	s.snapshots = newSnapshotCache(60*time.Second, s.collectSnapshot)
 	s.snapshots.Start(context.Background())
 
@@ -102,6 +105,7 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		r.Get("/apps/{name}/logs", s.handleLogStream)
 		r.Get("/apps/{name}/logs.txt", s.handleLogDump)
 		r.Get("/api/apps", s.handleAPIApps)
+		r.Get("/api/image-tags", s.handleImageTags)
 		r.Get("/events", s.handleEvents)
 		r.Get("/settings/password", s.handlePasswordPage)
 		r.Post("/settings/password", s.handlePasswordSubmit)
@@ -109,6 +113,15 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		r.Get("/scripts", s.handleScriptsPage)
 		r.Get("/scripts/{name}", s.handleScriptPage)
 		r.Post("/scripts/{name}/run", s.handleScriptRun)
+		// Backup & restore endpoints
+		r.Post("/tenants/{name}/backup", s.handleTenantBackup)
+		r.Get("/tenants/{name}/backups", s.handleTenantBackupList)
+		r.Get("/tenants/{name}/backups/{id}/download", s.handleTenantBackupDownload)
+		r.Post("/tenants/{name}/backups/{id}/delete", s.handleTenantBackupDelete)
+		r.Post("/tenants/{name}/backups/{id}/restore", s.handleTenantRestore)
+		r.Get("/tenants/{name}/accounting-export", s.handleAccountingExport)
+		// Auto-redeploy toggle
+		r.Post("/tenants/{name}/auto-redeploy", s.handleTenantAutoRedeploy)
 	})
 
 	return r
@@ -288,6 +301,7 @@ func (s *server) handleTenant(w http.ResponseWriter, r *http.Request) {
 			frontend = &apps[i]
 		}
 	}
+	autoRedeploy := s.tenantState.IsAutoRedeployEnabled(name)
 	s.render(w, "tenant.html", map[string]any{
 		"Env":            s.cfg.EnvName,
 		"Base":           s.cfg.BaseDomain,
@@ -297,6 +311,8 @@ func (s *server) handleTenant(w http.ResponseWriter, r *http.Request) {
 		"Frontend":       frontend,
 		"Versions":       scripts.VersionCatalog(),
 		"DefaultVersion": scripts.DefaultImageVersion(),
+		"AutoRedeploy":   autoRedeploy,
+		"MaxUserBackups": 50,
 	})
 }
 
@@ -395,6 +411,177 @@ func (s *server) handleAPIApps(w http.ResponseWriter, r *http.Request) {
 	snap, _ := s.snapshots.Snapshot()
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprint(w, appsJSON(snap.Apps))
+}
+
+// handleImageTags returns available image tags from Docker Hub for autocomplete.
+// Optional ?q=<substr> filters results to tags whose name contains the substring.
+// Each tag entry includes metadata (is_branch, digest, last_pushed) for branch-name tags.
+func (s *server) handleImageTags(w http.ResponseWriter, r *http.Request) {
+	backendRepo := strings.TrimSpace(os.Getenv("BACKEND_IMAGE"))
+	frontendRepo := strings.TrimSpace(os.Getenv("FRONTEND_IMAGE"))
+	if backendRepo == "" {
+		if u := strings.TrimSpace(os.Getenv("DOCKERHUB_USERNAME")); u != "" {
+			backendRepo = u + "/ifritah-api"
+		}
+	}
+	if frontendRepo == "" {
+		if u := strings.TrimSpace(os.Getenv("DOCKERHUB_USERNAME")); u != "" {
+			frontendRepo = u + "/ifritah-web"
+		}
+	}
+
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	tags, metas := fetchImageTagsWithMeta(r.Context(), backendRepo, frontendRepo, query)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "max-age=60")
+	_ = json.NewEncoder(w).Encode(map[string]any{"tags": tags, "meta": metas})
+}
+
+// TagMeta holds per-tag metadata returned alongside the tag list.
+type TagMeta struct {
+	Tag        string `json:"tag"`
+	LastPushed string `json:"last_pushed,omitempty"` // ISO8601
+	Digest     string `json:"digest,omitempty"`       // first 19 chars of "sha256:..."
+	IsBranch   bool   `json:"is_branch"`              // true when not a semver vX.Y.Z tag
+}
+
+// fetchImageTagsWithMeta returns the filtered tag list + per-tag metadata.
+func fetchImageTagsWithMeta(ctx context.Context, backendRepo, frontendRepo, query string) ([]string, []TagMeta) {
+	allTags := fetchImageTags(ctx, backendRepo, frontendRepo)
+
+	// Apply substring filter
+	if query != "" {
+		filtered := allTags[:0]
+		for _, t := range allTags {
+			if strings.Contains(strings.ToLower(t), query) {
+				filtered = append(filtered, t)
+			}
+		}
+		allTags = filtered
+	}
+
+	// Fetch metadata for branch-name (non-semver) tags, limit 20 to avoid latency.
+	repo := backendRepo
+	if repo == "" {
+		repo = frontendRepo
+	}
+	metas := make([]TagMeta, 0, len(allTags))
+	fetched := 0
+	for _, tag := range allTags {
+		m := TagMeta{Tag: tag}
+		m.IsBranch = !scripts.IsImageVersionTag(tag) && tag != "latest" && tag != "dev"
+		if m.IsBranch && repo != "" && fetched < 20 {
+			m.LastPushed, m.Digest = fetchSingleTagMeta(ctx, repo, tag)
+			fetched++
+		}
+		metas = append(metas, m)
+	}
+	return allTags, metas
+}
+
+// fetchSingleTagMeta calls the Docker Hub v2 tag detail API and returns
+// (lastPushed RFC3339, shortDigest). Returns empty strings on any error.
+func fetchSingleTagMeta(ctx context.Context, repo, tag string) (lastPushed, digest string) {
+	apiURL := "https://hub.docker.com/v2/repositories/" + repo + "/tags/" + tag
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return
+	}
+	defer resp.Body.Close()
+	var result struct {
+		LastUpdated string `json:"last_updated"`
+		Images      []struct {
+			Digest string `json:"digest"`
+		} `json:"images"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return
+	}
+	lastPushed = result.LastUpdated
+	if len(result.Images) > 0 {
+		d := result.Images[0].Digest
+		if len(d) > 19 {
+			digest = d[:19] // "sha256:" (7 chars) + 12 hex chars
+		} else {
+			digest = d
+		}
+	}
+	return
+}
+
+// fetchImageTags queries Docker Hub public API for tags and returns a sorted
+// deduplicated intersection of tags present in both repos.
+func fetchImageTags(ctx context.Context, backendRepo, frontendRepo string) []string {
+	if backendRepo == "" && frontendRepo == "" {
+		return []string{}
+	}
+	fetch := func(repo string) map[string]bool {
+		set := map[string]bool{}
+		if repo == "" {
+			return set
+		}
+		page := "https://hub.docker.com/v2/repositories/" + repo + "/tags?page_size=100&ordering=last_updated"
+		for i := 0; i < 5 && page != ""; i++ {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, page, nil)
+			if err != nil {
+				break
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil || resp.StatusCode != http.StatusOK {
+				if resp != nil {
+					resp.Body.Close()
+				}
+				break
+			}
+			var result struct {
+				Next    string `json:"next"`
+				Results []struct {
+					Name string `json:"name"`
+				} `json:"results"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&result)
+			resp.Body.Close()
+			for _, r := range result.Results {
+				if r.Name != "" && r.Name != "latest" {
+					set[r.Name] = true
+				}
+			}
+			page = result.Next
+		}
+		return set
+	}
+
+	bTags := fetch(backendRepo)
+	fTags := fetch(frontendRepo)
+
+	// Intersection: only tags present in both repos (or all tags if only one repo configured)
+	var tags []string
+	if backendRepo == "" || frontendRepo == "" {
+		// single repo — just return what we have
+		m := bTags
+		if backendRepo == "" {
+			m = fTags
+		}
+		for t := range m {
+			tags = append(tags, t)
+		}
+	} else {
+		for t := range bTags {
+			if fTags[t] {
+				tags = append(tags, t)
+			}
+		}
+	}
+	sort.Strings(tags)
+	return tags
 }
 
 // handleEvents pushes cached snapshots as the background collector refreshes.
@@ -741,6 +928,26 @@ func displayArgv(sc *scripts.Script, argv []string) []string {
 		}
 	}
 	return out
+}
+
+// handleTenantAutoRedeploy persists the auto-redeploy toggle for a tenant.
+// POST /tenants/{name}/auto-redeploy  with form field enabled=1|0
+func (s *server) handleTenantAutoRedeploy(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if !validAppName(name) {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	enabled := r.FormValue("enabled") == "1"
+	if err := s.tenantState.SetAutoRedeploy(name, enabled); err != nil {
+		http.Error(w, "failed to save setting: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *server) collectSnapshot(ctx context.Context) appSnapshot {

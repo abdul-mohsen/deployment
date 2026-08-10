@@ -91,18 +91,16 @@ func VersionOptions() []string {
 }
 
 func DefaultImageVersion() string {
-	versions := versionOptions()
+	// Explicit override always wins.
 	if v := strings.TrimSpace(os.Getenv("APP_IMAGE_VERSION_DEFAULT")); v != "" {
-		for _, candidate := range versions {
-			if candidate == v {
-				return v
-			}
-		}
+		return v
 	}
-	if len(versions) == 0 {
-		return "v0.0.1"
+	versions := versionOptions()
+	if len(versions) > 0 {
+		return versions[0]
 	}
-	return versions[0]
+	// No semver catalog configured — default to the rolling dev image.
+	return "dev"
 }
 
 func ResolveImageVersion(tag string) (ImageVersion, bool) {
@@ -124,10 +122,10 @@ func imageVersionField(required bool) Field {
 		Label:       "Image tag",
 		Type:        "text",
 		Required:    required,
-		Placeholder: "e.g. v1.2.3 or feature-my-branch",
+		Placeholder: "e.g. dev, v1.2.3, or feature-my-branch",
 		Suggest:     []string{}, // populated client-side from /api/image-tags via datalist
 		Default:     DefaultImageVersion(),
-		Help:        "Tag applied to both BACKEND_IMAGE and FRONTEND_IMAGE. Available tags load automatically from Docker Hub.",
+		Help:        "Tag applied to both BACKEND_IMAGE and FRONTEND_IMAGE. Type to search available tags from Docker Hub.",
 	}
 }
 
@@ -139,6 +137,14 @@ func imageRepo(envKey, suffix, fallback string) string {
 		return user + "/" + suffix
 	}
 	return fallback
+}
+
+// BackendRepo returns the backend image repository name (no tag).
+func BackendRepo() string { return imageRepo("BACKEND_IMAGE", "ifritah-api", "ssdawweq/ifritah-api") }
+
+// FrontendRepo returns the frontend image repository name (no tag).
+func FrontendRepo() string {
+	return imageRepo("FRONTEND_IMAGE", "ifritah-web", "ssdawweq/ifritah-web")
 }
 
 func trimImageTag(image string) string {

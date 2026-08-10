@@ -517,8 +517,10 @@ func fetchSingleTagMeta(ctx context.Context, repo, tag string) (lastPushed, dige
 	return
 }
 
-// fetchImageTags queries Docker Hub public API for tags and returns a sorted
-// deduplicated intersection of tags present in both repos.
+// fetchImageTags queries Docker Hub for tags from both repos and returns a
+// sorted, deduplicated list. Tags present in both repos come first (sorted),
+// followed by tags that exist in only one repo. All tags including dev/latest
+// and branch names are included — callers filter as needed.
 func fetchImageTags(ctx context.Context, backendRepo, frontendRepo string) []string {
 	if backendRepo == "" && frontendRepo == "" {
 		return []string{}
@@ -550,7 +552,7 @@ func fetchImageTags(ctx context.Context, backendRepo, frontendRepo string) []str
 			_ = json.NewDecoder(resp.Body).Decode(&result)
 			resp.Body.Close()
 			for _, r := range result.Results {
-				if r.Name != "" && r.Name != "latest" {
+				if r.Name != "" {
 					set[r.Name] = true
 				}
 			}
@@ -562,25 +564,51 @@ func fetchImageTags(ctx context.Context, backendRepo, frontendRepo string) []str
 	bTags := fetch(backendRepo)
 	fTags := fetch(frontendRepo)
 
-	// Intersection: only tags present in both repos (or all tags if only one repo configured)
-	var tags []string
-	if backendRepo == "" || frontendRepo == "" {
-		// single repo — just return what we have
-		m := bTags
-		if backendRepo == "" {
-			m = fTags
-		}
-		for t := range m {
-			tags = append(tags, t)
-		}
-	} else {
-		for t := range bTags {
-			if fTags[t] {
-				tags = append(tags, t)
-			}
+	// Build union: all tags from either repo. Tags in both repos float to top
+	// (sorted), then tags from a single repo (sorted). This way dev/latest/branch
+	// tags all appear even if only one repo has been pushed.
+	both := map[string]bool{}
+	all := map[string]bool{}
+	for t := range bTags {
+		all[t] = true
+		if fTags[t] {
+			both[t] = true
 		}
 	}
-	sort.Strings(tags)
+	for t := range fTags {
+		all[t] = true
+	}
+
+	// Priority order: dev and latest first, then semver (newest first), then branches, then rest
+	priority := func(tag string) int {
+		switch tag {
+		case "dev":
+			return 0
+		case "latest":
+			return 1
+		}
+		if scripts.IsImageVersionTag(tag) {
+			return 2
+		}
+		return 3
+	}
+
+	tags := make([]string, 0, len(all))
+	for t := range all {
+		tags = append(tags, t)
+	}
+	sort.Slice(tags, func(i, j int) bool {
+		pi, pj := priority(tags[i]), priority(tags[j])
+		if pi != pj {
+			return pi < pj
+		}
+		// Within same priority: tags in both repos first, then reverse-alpha (newest semver first)
+		bi, bj := both[tags[i]], both[tags[j]]
+		if bi != bj {
+			return bi
+		}
+		return tags[i] > tags[j] // reverse alpha = newer semver / newer branch names first
+	})
 	return tags
 }
 
@@ -843,10 +871,24 @@ func expandImageVersion(sc *scripts.Script, form url.Values) (url.Values, error)
 	if version == "" {
 		return form, nil
 	}
+
+	// First try the semver catalog (vX.Y.Z tags with pinned image names).
 	resolved, ok := scripts.ResolveImageVersion(version)
 	if !ok {
-		return nil, fmt.Errorf("unknown image version %q", version)
+		// Not a semver catalog tag — treat as a raw Docker tag (dev, latest, branch name, sha).
+		// Build image names directly from the configured repos + the supplied tag.
+		backendRepo := scripts.BackendRepo()
+		frontendRepo := scripts.FrontendRepo()
+		if backendRepo == "" && frontendRepo == "" {
+			return nil, fmt.Errorf("image tag %q is not in the release catalog and DOCKERHUB_USERNAME / BACKEND_IMAGE / FRONTEND_IMAGE are not configured", version)
+		}
+		resolved = scripts.ImageVersion{
+			Tag:           version,
+			BackendImage:  backendRepo + ":" + version,
+			FrontendImage: frontendRepo + ":" + version,
+		}
 	}
+
 	out := cloneValues(form)
 	if scriptHasField(sc, "backend_image") && strings.TrimSpace(out.Get("backend_image")) == "" {
 		out.Set("backend_image", resolved.BackendImage)

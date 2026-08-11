@@ -314,6 +314,39 @@ if dokku apps:exists "$FRONTEND_APP" 2>/dev/null; then
     fi
 fi
 
+# fix_nginx_upstream rewrites Dokku's auto-generated nginx upstream block to use
+# the Docker service hostname instead of a bridge IP address. The bridge IP changes
+# on every container restart, causing 504 Gateway Timeout. Using the service hostname
+# with Docker's internal DNS resolver (127.0.0.11) makes the mapping stable.
+#
+# Must be called AFTER dokku_git_from_image so it runs after Dokku's post-deploy
+# nginx regeneration.
+fix_nginx_upstream() {
+    local app="$1"   # e.g. ssda123-frontend
+    local svc="$2"   # e.g. ssda123-frontend.web
+    local port="$3"  # e.g. 8000
+
+    local conf="/home/dokku/${app}/nginx.conf"
+
+    # Use sed inside the Dokku container to replace all bridge IPs in upstream block
+    dokku_shell "
+if [ -f '${conf}' ]; then
+  # Replace the entire upstream server block with the Docker hostname
+  python3 -c \"
+import re
+with open('${conf}') as f: c = f.read()
+p = r'upstream ${app}-${port} \{[^}]*\}'
+r = 'upstream ${app}-${port} {\n  server ${svc}:${port};\n}'
+c2 = re.sub(p, r, c, flags=re.DOTALL)
+if c2 != c:
+  with open('${conf}','w') as f: f.write(c2)
+  print('[i] nginx upstream fixed for ${app} -> ${svc}:${port}')
+\"
+  nginx -s reload 2>/dev/null || true
+fi
+" 2>&1 || warn "Could not fix nginx upstream for ${app} — tenant may not be accessible until next deploy"
+}
+
 create_dokku_app() {
     local app="$1"
     log "Creating app: $app"
@@ -570,8 +603,14 @@ if ! $GIT_ONLY; then
         ensure_tenant_image_available "$FRONTEND_IMAGE"
         dokku config:set --no-restart "$FRONTEND_APP" \
             APP_IMAGE_VERSION="$(image_tag "$FRONTEND_IMAGE")" \
-            APP_IMAGE_REF="$FRONTEND_IMAGE"
+            APP_IMAGE_REF="$FRONTEND_IMAGE" \
+            COOKIE_SECURE=false
         dokku_git_from_image "$FRONTEND_APP" "$FRONTEND_IMAGE"
+
+        # Dokku's nginx config uses the bridge network IP which changes on every container
+        # restart. Fix it immediately to use the Docker service hostname on the web network,
+        # which is stable and resolved via Docker's internal DNS (127.0.0.11).
+        fix_nginx_upstream "$FRONTEND_APP" "${FRONTEND_APP}.web" "8000"
     else
         info "No frontend image — deploy later with: git push dokku@${BASE_DOMAIN}:${FRONTEND_APP} main"
     fi

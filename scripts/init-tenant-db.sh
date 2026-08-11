@@ -566,6 +566,13 @@ register_seed_user() {
         return 0
     fi
 
+    # Backend requires password >= 8 characters. Pad short passwords with a suffix
+    # so the seed doesn't fail silently with HTTP 400.
+    if [ "${#password}" -lt 8 ]; then
+        warn "Password for '${username}' is shorter than 8 characters (required by backend). Appending suffix."
+        password="${password}Pass1!"
+    fi
+
     local email payload response status body attempt
     email="${username}@${TENANT_DOMAIN}"
     payload="{\"username\":\"$(json_escape "$username")\",\"email\":\"$(json_escape "$email")\",\"password\":\"$(json_escape "$password")\",\"full_name\":\"$(json_escape "$full_name")\",\"phone\":\"\"}"

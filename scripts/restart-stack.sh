@@ -133,6 +133,13 @@ start_dashboard_env() {
             dump_logs "$container"
             exit 1
         fi
+    elif [ "$env_name" = "prod" ] && [ -x "${REPO_DIR}/dashboard/prod-up.sh" ]; then
+        info "  using prod-up.sh (rebuilds binary + image, no cache)"
+        if ! (cd "${REPO_DIR}/dashboard" && bash ./prod-up.sh); then
+            error "  prod-up.sh failed. Last 200 log lines from $container:"
+            dump_logs "$container"
+            exit 1
+        fi
     else
         if ! (cd "${REPO_DIR}/dashboard" && docker compose -f "$compose_file" up -d --force-recreate); then
             error "  docker compose up failed. Last 200 log lines from $container:"

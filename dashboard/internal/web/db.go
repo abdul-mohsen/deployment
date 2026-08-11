@@ -8,6 +8,7 @@ import (
 
 	// MySQL driver: blank import registers the "mysql" driver.
 	_ "github.com/go-sql-driver/mysql"
+	"golang.org/x/crypto/bcrypt"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -211,4 +212,39 @@ func buildAccountingExcel(ctx context.Context, dsn, tenant string) (*excelize.Fi
 	}
 
 	return f, nil
+}
+
+// updateUserPasswordMySQL updates a user's bcrypt password hash directly in MySQL.
+// The backend uses bcrypt (cost 10) for passwords.
+func updateUserPasswordMySQL(ctx context.Context, dsn, username, newPassword string) error {
+	if username == "" {
+		return fmt.Errorf("username is empty")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), 10)
+	if err != nil {
+		return fmt.Errorf("bcrypt hash: %w", err)
+	}
+
+	db, err := openMySQL(dsn)
+	if err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	defer db.Close()
+
+	if err := db.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping: %w", err)
+	}
+
+	res, err := db.ExecContext(ctx,
+		"UPDATE `user` SET password = ? WHERE username = ?",
+		string(hash), username,
+	)
+	if err != nil {
+		return fmt.Errorf("update: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("user %q not found in database", username)
+	}
+	return nil
 }

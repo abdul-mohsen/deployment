@@ -122,6 +122,9 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		r.Get("/tenants/{name}/accounting-export", s.handleAccountingExport)
 		// Auto-redeploy toggle
 		r.Post("/tenants/{name}/auto-redeploy", s.handleTenantAutoRedeploy)
+		// Credential management
+		r.Get("/tenants/{name}/credentials", s.handleTenantCredentials)
+		r.Post("/tenants/{name}/credentials", s.handleTenantUpdateCredentials)
 	})
 
 	return r
@@ -1035,6 +1038,109 @@ func (s *server) handleTenantAutoRedeploy(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleTenantCredentials returns the admin/manager usernames stored in Dokku config.
+// GET /tenants/{name}/credentials
+func (s *server) handleTenantCredentials(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if !validAppName(name) {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	backendApp := name + "-backend"
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	adminUser, _ := s.dokku.ConfigGet(ctx, backendApp, "ADMIN_USER")
+	managerUser, _ := s.dokku.ConfigGet(ctx, backendApp, "MANAGER_USER")
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"admin_user":   adminUser,
+		"manager_user": managerUser,
+	})
+}
+
+// handleTenantUpdateCredentials updates admin/manager passwords in Dokku config
+// and reseeds them via the backend's /api/v2 register/update endpoints.
+// POST /tenants/{name}/credentials
+// Form fields: role (admin|manager), new_password
+func (s *server) handleTenantUpdateCredentials(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if !validAppName(name) {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+
+	role := strings.TrimSpace(r.FormValue("role"))
+	newPassword := strings.TrimSpace(r.FormValue("new_password"))
+
+	if role != "admin" && role != "manager" {
+		http.Error(w, "role must be admin or manager", http.StatusBadRequest)
+		return
+	}
+	if len(newPassword) < 8 {
+		http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
+
+	backendApp := name + "-backend"
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	// 1. Update the password in Dokku config (for future reseeds)
+	envKey := "ADMIN_PASSWORD"
+	userKey := "ADMIN_USER"
+	if role == "manager" {
+		envKey = "MANAGER_PASSWORD"
+		userKey = "MANAGER_USER"
+	}
+	username, _ := s.dokku.ConfigGet(ctx, backendApp, userKey)
+	if err := s.dokku.ConfigSet(ctx, backendApp, map[string]string{envKey: newPassword}); err != nil {
+		http.Error(w, "failed to update Dokku config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 2. Update the password in MySQL directly (fastest path, no API call needed)
+	dbName := "tenant_" + strings.ReplaceAll(name, "-", "_")
+	host := s.cfg.MySQLHost
+	port := s.cfg.MySQLPort
+	user := strings.TrimSpace(os.Getenv("MYSQL_ROOT_USER"))
+	if user == "" {
+		user = "root"
+	}
+	password := os.Getenv("MYSQL_ROOT_PASSWORD")
+
+	// Use the backend API instead — it handles bcrypt hashing
+	// Find the backend's internal URL from Dokku
+	backendURL := "http://" + backendApp + ".web:8090"
+	_ = dbName // used for direct MySQL fallback only
+
+	// Call the backend's admin password reset endpoint
+	// POST /api/v2/user/:id/password requires admin JWT — instead use MySQL directly
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?timeout=10s", user, password, host, port, dbName)
+	if err := updateUserPasswordMySQL(ctx, dsn, username, newPassword); err != nil {
+		// Log but don't fail — Dokku config was already updated
+		_ = backendURL
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":      false,
+			"warning": "Dokku config updated but MySQL password update failed: " + err.Error(),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":      true,
+		"message": "Password updated for " + role + " (" + username + ")",
+	})
 }
 
 func (s *server) collectSnapshot(ctx context.Context) appSnapshot {

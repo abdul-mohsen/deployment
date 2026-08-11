@@ -494,6 +494,7 @@ type Runner struct {
 	runnerImage     string // e.g. "mysql:8.0" — has bash, curl, mysql client
 	scriptsHostPath string // host path to /opt/deployment (mounted into runner)
 	configFile      string // optional --config path inside runner
+	backupDir       string // host path to backup dir (mounted rw so scripts can write)
 }
 
 // NewRunner builds a runner. scriptsHostPath is the path on the docker
@@ -508,6 +509,12 @@ func NewRunner(dockerBin, runnerImage, scriptsHostPath, configFile string) *Runn
 		scriptsHostPath: scriptsHostPath,
 		configFile:      configFile,
 	}
+}
+
+// SetBackupDir configures the host path for tenant backups.
+// The directory will be mounted into runner containers so scripts can write backup files.
+func (r *Runner) SetBackupDir(dir string) {
+	r.backupDir = dir
 }
 
 // safeArg only allows characters that cannot escape an argv slot. We split on
@@ -566,6 +573,13 @@ func (r *Runner) Run(ctx context.Context, w io.Writer, scriptName string, argv [
 		"-v", dockerSocket,
 		"-v", r.scriptsHostPath + ":/opt/deployment:ro",
 		"--network", "host",
+	}
+	// Mount the backup dir so backup scripts can write to the host filesystem
+	if r.backupDir != "" {
+		full = append(full, "-v", r.backupDir+":"+r.backupDir)
+		full = append(full, "-e", "BACKUP_DIR="+r.backupDir)
+	}
+	full = append(full,
 		img,
 		// CRLF tolerance: scripts authored on Windows have \r line endings
 		// which break bash. Stage to a writable dir, strip CRLF, then exec.
@@ -581,7 +595,7 @@ NAME="$1"; shift
 exec bash "scripts/deployctl.sh" "script" "$NAME" "$@"
 `,
 		"--", scriptName,
-	}
+	)
 	full = append(full, argv...)
 
 	cmd := exec.CommandContext(ctx, r.dockerBin, full...)

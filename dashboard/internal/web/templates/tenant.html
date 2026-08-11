@@ -94,6 +94,42 @@
   </div>
 </div>
 
+<!-- Credentials panel -->
+<div class="panel">
+  <div class="panel-toolbar">
+    <span class="panel-title" style="border:none;padding:0;margin:0">Access Credentials</span>
+    <div style="font-size:11px;color:var(--text-muted)">Admin and manager user accounts for this tenant</div>
+  </div>
+  <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <!-- Admin -->
+    <div>
+      <div class="field-label" style="margin-bottom:8px">Admin account</div>
+      <div id="cred-admin-user" style="font-family:var(--mono);font-size:13px;color:var(--text);margin-bottom:10px;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:var(--radius);padding:6px 10px">
+        Loading…
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <input id="cred-admin-pass" type="password" placeholder="New password (min 8 chars)"
+          class="form-input" style="flex:1;min-width:160px">
+        <button id="cred-admin-btn" data-role="admin" class="btn btn-primary" style="flex-shrink:0">Change</button>
+      </div>
+      <div id="cred-admin-msg" style="font-size:11px;margin-top:4px;height:14px"></div>
+    </div>
+    <!-- Manager -->
+    <div>
+      <div class="field-label" style="margin-bottom:8px">Manager account</div>
+      <div id="cred-manager-user" style="font-family:var(--mono);font-size:13px;color:var(--text);margin-bottom:10px;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:var(--radius);padding:6px 10px">
+        Loading…
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <input id="cred-manager-pass" type="password" placeholder="New password (min 8 chars)"
+          class="form-input" style="flex:1;min-width:160px">
+        <button id="cred-manager-btn" data-role="manager" class="btn btn-primary" style="flex-shrink:0">Change</button>
+      </div>
+      <div id="cred-manager-msg" style="font-size:11px;margin-top:4px;height:14px"></div>
+    </div>
+  </div>
+</div>
+
 <!-- Action output terminal -->
 <div class="panel">
   <div class="panel-title">Action output</div>
@@ -233,6 +269,61 @@
       }
     });
   }
+
+  // ── Credentials ───────────────────────────────────────────
+  async function loadCredentials() {
+    try {
+      const res = await fetch('/tenants/' + tenant + '/credentials');
+      if (!res.ok) return;
+      const data = await res.json();
+      const adminEl = document.getElementById('cred-admin-user');
+      const managerEl = document.getElementById('cred-manager-user');
+      if (adminEl) adminEl.textContent = data.admin_user || '(not set)';
+      if (managerEl) managerEl.textContent = data.manager_user || '(not set)';
+    } catch (e) {
+      console.warn('Failed to load credentials:', e);
+    }
+  }
+
+  function setupCredBtn(role) {
+    const btn = document.getElementById('cred-' + role + '-btn');
+    const passInput = document.getElementById('cred-' + role + '-pass');
+    const msg = document.getElementById('cred-' + role + '-msg');
+    if (!btn || !passInput) return;
+
+    btn.addEventListener('click', async () => {
+      const pw = passInput.value.trim();
+      if (pw.length < 8) {
+        if (msg) { msg.textContent = '⚠ Min 8 characters'; msg.style.color = 'var(--amber)'; }
+        return;
+      }
+      btn.disabled = true;
+      if (msg) msg.textContent = '';
+      try {
+        const res = await fetch('/tenants/' + tenant + '/credentials', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'role=' + role + '&new_password=' + encodeURIComponent(pw),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          if (msg) { msg.textContent = '✓ ' + data.message; msg.style.color = 'var(--green)'; }
+          passInput.value = '';
+          append('Password changed for ' + role + ' on ' + tenant);
+        } else {
+          if (msg) { msg.textContent = '⚠ ' + (data.warning || 'Failed'); msg.style.color = 'var(--amber)'; }
+        }
+      } catch (e) {
+        if (msg) { msg.textContent = '✖ Error: ' + e.message; msg.style.color = 'var(--red)'; }
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
+  loadCredentials();
+  setupCredBtn('admin');
+  setupCredBtn('manager');
 
   // ── Backup list ────────────────────────────────────────────
   async function loadBackups() {

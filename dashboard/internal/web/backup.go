@@ -3,7 +3,6 @@ package web
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -47,28 +47,67 @@ func validBackupID(id string) bool {
 	return true
 }
 
-// ── listBackupsForTenant calls manage-backups.sh list --json ──────────────────
+// ── listBackupsForTenant reads .meta.json files directly from the backup dir ──
+// This avoids running a sidecar container just to list files — the backup dir
+// is mounted directly into the dashboard container via BACKUP_DIR env / volume.
 
 func (s *server) listBackupsForTenant(ctx context.Context, tenant string) ([]backupManifest, error) {
-	out, err := s.runScriptCapture(ctx, "manage-backups.sh", []string{"list", tenant, "--json"})
+	backupDir := s.cfg.BackupDir
+	if backupDir == "" {
+		backupDir = "/opt/tenant-backups"
+	}
+
+	// Glob for all manifest files belonging to this tenant
+	pattern := filepath.Join(backupDir, tenant+"_*.meta.json")
+	matches, err := filepath.Glob(pattern)
 	if err != nil {
-		// manage-backups may print warnings to stderr; try to parse stdout anyway
-		return nil, fmt.Errorf("manage-backups list: %w — output: %s", err, out)
+		return nil, fmt.Errorf("glob backup manifests: %w", err)
 	}
-	// The script may prepend log lines before the JSON array; find the first '['.
-	idx := bytes.IndexByte(out, '[')
-	if idx < 0 {
-		// No backups found — treat as empty list
-		return []backupManifest{}, nil
+
+	manifests := make([]backupManifest, 0, len(matches))
+	for _, path := range matches {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue // skip unreadable files
+		}
+		var m backupManifest
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue // skip malformed manifests
+		}
+		// Double-check tenant matches (manifest may contain the tenant field)
+		if m.Tenant != "" && m.Tenant != tenant {
+			continue
+		}
+		// Populate ID from filename if missing: <tenant>_<timestamp>.meta.json
+		if m.ID == "" {
+			base := filepath.Base(path)
+			m.ID = strings.TrimSuffix(base, ".meta.json")
+		}
+		// Populate CreatedAt from Timestamp if missing
+		if m.CreatedAt == "" && m.Timestamp != "" {
+			m.CreatedAt = m.Timestamp
+		}
+		manifests = append(manifests, m)
 	}
-	var manifests []backupManifest
-	if err := json.Unmarshal(out[idx:], &manifests); err != nil {
-		return nil, fmt.Errorf("parse backup list JSON: %w", err)
-	}
+
+	// Sort newest first
+	sort.Slice(manifests, func(i, j int) bool {
+		ti := manifests[i].CreatedAt
+		if ti == "" {
+			ti = manifests[i].Timestamp
+		}
+		tj := manifests[j].CreatedAt
+		if tj == "" {
+			tj = manifests[j].Timestamp
+		}
+		return ti > tj
+	})
+
 	return manifests, nil
 }
 
 // runScriptCapture runs a script and captures stdout+stderr, returning combined output.
+// The backup dir is mounted so scripts can write/read backup files on the host.
 func (s *server) runScriptCapture(ctx context.Context, scriptName string, argv []string) ([]byte, error) {
 	if s.cfg.ScriptsHostPath == "" {
 		return nil, fmt.Errorf("SCRIPTS_HOST_PATH not configured")
@@ -96,12 +135,19 @@ cd /tmp/dep-cap
 NAME="$1"; shift
 exec bash "scripts/deployctl.sh" "script" "$NAME" "$@"%s`, configFlag)
 
+	backupDir := s.cfg.BackupDir
+	if backupDir == "" {
+		backupDir = "/opt/tenant-backups"
+	}
+
 	full := []string{
 		"run", "--rm", "-i",
 		"-e", "MYSQL_CLIENT_MODE=docker",
 		"-e", "TENANT_NAME_PREFIX=" + os.Getenv("TENANT_NAME_PREFIX"),
+		"-e", "BACKUP_DIR=" + backupDir,
 		"-v", dockerSocket,
 		"-v", s.cfg.ScriptsHostPath + ":/opt/deployment:ro",
+		"-v", backupDir + ":" + backupDir,
 		"--network", "host",
 		s.cfg.RunnerImage,
 		"bash", "-c", bashScript,

@@ -43,6 +43,9 @@ func main() {
 	client := dokku.New(cfg.DockerBin, cfg.DokkuContainer)
 	store := logbuf.New(cfg.LogBufferLines)
 	runner := scripts.NewRunner(cfg.DockerBin, cfg.RunnerImage, cfg.ScriptsHostPath, cfg.ConfigFile)
+	if cfg.BackupDir != "" {
+		runner.SetBackupDir(cfg.BackupDir)
+	}
 
 	// Start the daily backup retention policy (prunes auto-origin backups older than 7 days).
 	retentionRunner := retention.New(cfg.DockerBin, cfg.RunnerImage, cfg.ScriptsHostPath, retention.DefaultRetentionDays)

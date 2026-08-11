@@ -82,6 +82,7 @@ FRONTEND_PORT="8000"
 NO_DATABASE=false
 GIT_ONLY=false
 DRY_RUN=false
+FORCE_UPDATE=false
 MIGRATE_CMD=""
 declare -a ENV_VARS=()
 
@@ -219,6 +220,7 @@ while [[ $# -gt 0 ]]; do
         --env)            ENV_VARS+=("$2"); shift 2 ;;
         --git-only)       GIT_ONLY=true; shift ;;
         --dry-run)        DRY_RUN=true; shift ;;
+        --update)         FORCE_UPDATE=true; shift ;;
         --migrate)        MIGRATE_CMD="$2"; shift 2 ;;
         --config)         CONFIG_FILE="$2"; shift 2 ;;
         -*)               error "Unknown option: $1"; exit 1 ;;
@@ -292,12 +294,24 @@ fi
 
 # Check if apps already exist
 if dokku apps:exists "$BACKEND_APP" 2>/dev/null; then
-    error "App '$BACKEND_APP' already exists. Tenant may already be provisioned."
-    exit 1
+    if [ "$FORCE_UPDATE" = "true" ]; then
+        warn "App '$BACKEND_APP' already exists — continuing with --update (will re-deploy and re-seed)."
+    else
+        error "App '$BACKEND_APP' already exists. Tenant may already be provisioned."
+        error "→ To update an existing tenant's image or env vars, use: update-tenant.sh $TENANT_NAME"
+        error "→ To re-run provisioning anyway (e.g. after a partial failure), add --update to this command."
+        exit 1
+    fi
 fi
 if dokku apps:exists "$FRONTEND_APP" 2>/dev/null; then
-    error "App '$FRONTEND_APP' already exists. Tenant may already be provisioned."
-    exit 1
+    if [ "$FORCE_UPDATE" = "true" ]; then
+        warn "App '$FRONTEND_APP' already exists — continuing with --update."
+    else
+        error "App '$FRONTEND_APP' already exists. Tenant may already be provisioned."
+        error "→ To update an existing tenant's image or env vars, use: update-tenant.sh $TENANT_NAME"
+        error "→ To re-run provisioning anyway (e.g. after a partial failure), add --update to this command."
+        exit 1
+    fi
 fi
 
 create_dokku_app() {

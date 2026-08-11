@@ -440,15 +440,59 @@ func (s *server) handleImageTags(w http.ResponseWriter, r *http.Request) {
 
 // TagMeta holds per-tag metadata returned alongside the tag list.
 type TagMeta struct {
-	Tag        string `json:"tag"`
-	LastPushed string `json:"last_pushed,omitempty"` // ISO8601
-	Digest     string `json:"digest,omitempty"`       // first 19 chars of "sha256:..."
-	IsBranch   bool   `json:"is_branch"`              // true when not a semver vX.Y.Z tag
+	Tag           string `json:"tag"`
+	LastPushed    string `json:"last_pushed,omitempty"` // ISO8601
+	Digest        string `json:"digest,omitempty"`       // first 19 chars of "sha256:..."
+	IsBranch      bool   `json:"is_branch"`              // true when not a semver vX.Y.Z tag
+	InBoth        bool   `json:"in_both"`                // true when tag exists in both backend AND frontend repos
+	BackendOnly   bool   `json:"backend_only,omitempty"` // true when only in backend repo
+	FrontendOnly  bool   `json:"frontend_only,omitempty"` // true when only in frontend repo
 }
 
-// fetchImageTagsWithMeta returns the filtered tag list + per-tag metadata.
+// fetchImageTagsWithMeta returns the filtered tag list + per-tag metadata including
+// whether each tag is available in both repos (safe to deploy) or only one (partial).
 func fetchImageTagsWithMeta(ctx context.Context, backendRepo, frontendRepo, query string) ([]string, []TagMeta) {
-	allTags := fetchImageTags(ctx, backendRepo, frontendRepo)
+	// Fetch tag sets from both repos to compute coverage
+	bTagSet, fTagSet := fetchImageTagSets(ctx, backendRepo, frontendRepo)
+
+	// Build union sorted list (same logic as fetchImageTags but we already have the sets)
+	allTagsMap := map[string]bool{}
+	for t := range bTagSet {
+		allTagsMap[t] = true
+	}
+	for t := range fTagSet {
+		allTagsMap[t] = true
+	}
+
+	priority := func(tag string) int {
+		switch tag {
+		case "dev":
+			return 0
+		case "latest":
+			return 1
+		}
+		if scripts.IsImageVersionTag(tag) {
+			return 2
+		}
+		return 3
+	}
+	both := func(t string) bool { return bTagSet[t] && fTagSet[t] }
+
+	allTags := make([]string, 0, len(allTagsMap))
+	for t := range allTagsMap {
+		allTags = append(allTags, t)
+	}
+	sort.Slice(allTags, func(i, j int) bool {
+		pi, pj := priority(allTags[i]), priority(allTags[j])
+		if pi != pj {
+			return pi < pj
+		}
+		bi, bj := both(allTags[i]), both(allTags[j])
+		if bi != bj {
+			return bi
+		}
+		return allTags[i] > allTags[j]
+	})
 
 	// Apply substring filter
 	if query != "" {
@@ -461,7 +505,7 @@ func fetchImageTagsWithMeta(ctx context.Context, backendRepo, frontendRepo, quer
 		allTags = filtered
 	}
 
-	// Fetch metadata for branch-name (non-semver) tags, limit 20 to avoid latency.
+	// Fetch metadata for branch-name tags, limit 20 to avoid latency
 	repo := backendRepo
 	if repo == "" {
 		repo = frontendRepo
@@ -471,6 +515,9 @@ func fetchImageTagsWithMeta(ctx context.Context, backendRepo, frontendRepo, quer
 	for _, tag := range allTags {
 		m := TagMeta{Tag: tag}
 		m.IsBranch = !scripts.IsImageVersionTag(tag) && tag != "latest" && tag != "dev"
+		m.InBoth = bTagSet[tag] && fTagSet[tag]
+		m.BackendOnly = bTagSet[tag] && !fTagSet[tag]
+		m.FrontendOnly = !bTagSet[tag] && fTagSet[tag]
 		if m.IsBranch && repo != "" && fetched < 20 {
 			m.LastPushed, m.Digest = fetchSingleTagMeta(ctx, repo, tag)
 			fetched++
@@ -478,6 +525,46 @@ func fetchImageTagsWithMeta(ctx context.Context, backendRepo, frontendRepo, quer
 		metas = append(metas, m)
 	}
 	return allTags, metas
+}
+
+// fetchImageTagSets returns the raw tag sets for both repos separately.
+func fetchImageTagSets(ctx context.Context, backendRepo, frontendRepo string) (bTags, fTags map[string]bool) {
+	fetch := func(repo string) map[string]bool {
+		set := map[string]bool{}
+		if repo == "" {
+			return set
+		}
+		page := "https://hub.docker.com/v2/repositories/" + repo + "/tags?page_size=100&ordering=last_updated"
+		for i := 0; i < 5 && page != ""; i++ {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, page, nil)
+			if err != nil {
+				break
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil || resp.StatusCode != http.StatusOK {
+				if resp != nil {
+					resp.Body.Close()
+				}
+				break
+			}
+			var result struct {
+				Next    string `json:"next"`
+				Results []struct {
+					Name string `json:"name"`
+				} `json:"results"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&result)
+			resp.Body.Close()
+			for _, r := range result.Results {
+				if r.Name != "" {
+					set[r.Name] = true
+				}
+			}
+			page = result.Next
+		}
+		return set
+	}
+	return fetch(backendRepo), fetch(frontendRepo)
 }
 
 // fetchSingleTagMeta calls the Docker Hub v2 tag detail API and returns
@@ -518,55 +605,13 @@ func fetchSingleTagMeta(ctx context.Context, repo, tag string) (lastPushed, dige
 }
 
 // fetchImageTags queries Docker Hub for tags from both repos and returns a
-// sorted, deduplicated list. Tags present in both repos come first (sorted),
-// followed by tags that exist in only one repo. All tags including dev/latest
-// and branch names are included — callers filter as needed.
+// sorted, deduplicated list. Delegates to fetchImageTagSets to avoid code duplication.
 func fetchImageTags(ctx context.Context, backendRepo, frontendRepo string) []string {
 	if backendRepo == "" && frontendRepo == "" {
 		return []string{}
 	}
-	fetch := func(repo string) map[string]bool {
-		set := map[string]bool{}
-		if repo == "" {
-			return set
-		}
-		page := "https://hub.docker.com/v2/repositories/" + repo + "/tags?page_size=100&ordering=last_updated"
-		for i := 0; i < 5 && page != ""; i++ {
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, page, nil)
-			if err != nil {
-				break
-			}
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil || resp.StatusCode != http.StatusOK {
-				if resp != nil {
-					resp.Body.Close()
-				}
-				break
-			}
-			var result struct {
-				Next    string `json:"next"`
-				Results []struct {
-					Name string `json:"name"`
-				} `json:"results"`
-			}
-			_ = json.NewDecoder(resp.Body).Decode(&result)
-			resp.Body.Close()
-			for _, r := range result.Results {
-				if r.Name != "" {
-					set[r.Name] = true
-				}
-			}
-			page = result.Next
-		}
-		return set
-	}
+	bTags, fTags := fetchImageTagSets(ctx, backendRepo, frontendRepo)
 
-	bTags := fetch(backendRepo)
-	fTags := fetch(frontendRepo)
-
-	// Build union: all tags from either repo. Tags in both repos float to top
-	// (sorted), then tags from a single repo (sorted). This way dev/latest/branch
-	// tags all appear even if only one repo has been pushed.
 	both := map[string]bool{}
 	all := map[string]bool{}
 	for t := range bTags {

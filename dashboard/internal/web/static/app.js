@@ -326,20 +326,39 @@
 
     meta.slice(0, 40).forEach(m => {
       const li = document.createElement('li');
-      li.className = 'tag-dropdown-item';
+      // Visually dim tags that only exist in one repo — they will cause deploy failures
+      li.className = 'tag-dropdown-item' + (m.in_both === false && (m.backend_only || m.frontend_only) ? ' tag-partial' : '');
 
       const labelEl = document.createElement('span');
       labelEl.className = 'tag-dropdown-label';
       labelEl.textContent = m.tag;
       li.appendChild(labelEl);
 
+      // Show commit SHA for branch tags
       if (m.is_branch && m.digest) {
         const sub = document.createElement('span');
         sub.className = 'tag-dropdown-sub';
-        // Show first 12 hex chars after "sha256:"
         const short = m.digest.replace('sha256:', '').slice(0, 12);
         sub.textContent = 'commit: ' + short;
         li.appendChild(sub);
+      }
+
+      // Show warning if tag only exists in one repo
+      if (m.backend_only) {
+        const warn = document.createElement('span');
+        warn.className = 'tag-dropdown-warn';
+        warn.textContent = '⚠ backend only — frontend image missing';
+        li.appendChild(warn);
+      } else if (m.frontend_only) {
+        const warn = document.createElement('span');
+        warn.className = 'tag-dropdown-warn';
+        warn.textContent = '⚠ frontend only — backend image missing';
+        li.appendChild(warn);
+      } else if (m.in_both) {
+        const ok = document.createElement('span');
+        ok.className = 'tag-dropdown-ok';
+        ok.textContent = '✓ both repos';
+        li.appendChild(ok);
       }
 
       li.addEventListener('mousedown', e => {

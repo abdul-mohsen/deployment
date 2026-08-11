@@ -584,6 +584,19 @@ input, select, textarea { font: inherit; color: inherit; }
   color: var(--text-muted);
   font-family: var(--mono);
 }
+.tag-dropdown-warn {
+  font-size: 10px;
+  color: var(--amber);
+  font-family: var(--sans);
+}
+.tag-dropdown-ok {
+  font-size: 10px;
+  color: var(--green);
+  font-family: var(--sans);
+}
+.tag-dropdown-item.tag-partial {
+  opacity: 0.65;
+}
 
 /* ── Backup panel extras ──────────────────────────────────── */
 .empty-cell {

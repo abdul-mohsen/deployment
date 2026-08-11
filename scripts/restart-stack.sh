@@ -127,9 +127,16 @@ start_dashboard_env() {
 
     log "Starting Dashboard (${env_name})..."
     if [ "$env_name" = "dev" ] && [ -x "${REPO_DIR}/dashboard/dev-up.sh" ]; then
-        info "  using dev-up.sh (rebuilds binary + image)"
-        if ! (cd "${REPO_DIR}/dashboard" && bash ./dev-up.sh); then
+        info "  using dev-up.sh (builds image from source, no cache)"
+        if ! bash "${REPO_DIR}/dashboard/dev-up.sh"; then
             error "  dev-up.sh failed. Last 200 log lines from $container:"
+            dump_logs "$container"
+            exit 1
+        fi
+    elif [ "$env_name" = "prod" ] && [ -x "${REPO_DIR}/dashboard/prod-up.sh" ]; then
+        info "  using prod-up.sh (pulls latest image from Docker Hub)"
+        if ! bash "${REPO_DIR}/dashboard/prod-up.sh"; then
+            error "  prod-up.sh failed. Last 200 log lines from $container:"
             dump_logs "$container"
             exit 1
         fi

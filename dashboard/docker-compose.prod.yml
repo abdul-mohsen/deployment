@@ -1,12 +1,14 @@
-# Production profile: bind to 127.0.0.1; expose via Dokku/nginx behind TLS.
-# Required env (place in dashboard.env on the server):
-#   ADMIN_USER, ADMIN_PASSWORD_HASH (bcrypt), SESSION_KEY (32-byte hex), BASE_DOMAIN
+# Production profile.
+# The image is built and pushed to Docker Hub by GitHub Actions (.github/workflows/dashboard-image.yml)
+# on every push to main. To update the server:
+#
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d --force-recreate
+#
+# Required: dashboard.env with ADMIN_USER, ADMIN_PASSWORD_HASH, SESSION_KEY, BASE_DOMAIN
 services:
   dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: ssdawweq/dokku-dashboard:prod
+    image: ${DASHBOARD_IMAGE:-ssdawweq/dokku-dashboard:prod}
     container_name: dokku-dashboard-prod
     restart: unless-stopped
     ports:
@@ -16,7 +18,7 @@ services:
       DASHBOARD_ENV: prod
       LISTEN: ":8080"
       DOCKER_BIN: docker
-      DOKKU_CONTAINER: dokku
+      DOKKU_CONTAINER: ${DOKKU_CONTAINER:-dokku}
       LOG_BUFFER_LINES: 5000
       COOKIE_SECURE: "true"
       SCRIPTS_HOST_PATH: ${SCRIPTS_HOST_PATH:-/opt/deployment}
@@ -24,10 +26,15 @@ services:
       DEPLOY_CONFIG_FILE: ${DEPLOY_CONFIG_FILE:-/opt/deployment/config.env}
       DEPLOYMENT_DIR: /opt/deployment
       DASHBOARD_ENV_FILE: /app/dashboard.env
+      BACKUP_DIR: ${BACKUP_DIR:-/opt/tenant-backups}
+      STORAGE_ROOT: ${STORAGE_ROOT:-/opt/tenant-data}
+      DOCKERHUB_USERNAME: ${DOCKERHUB_USERNAME:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./dashboard.env:/app/dashboard.env
       - ${SCRIPTS_HOST_PATH:-/opt/deployment}:/opt/deployment:ro
+      - ${BACKUP_DIR:-/opt/tenant-backups}:${BACKUP_DIR:-/opt/tenant-backups}
+      - ${STORAGE_ROOT:-/opt/tenant-data}:/opt/tenant-data
     logging:
       driver: json-file
       options:

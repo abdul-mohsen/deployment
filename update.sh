@@ -2,11 +2,15 @@
 # =============================================================================
 # update.sh — Update the deployment stack to the latest version.
 #
-# Pulls the latest code from Git, then pulls the latest pre-built dashboard
-# image from Docker Hub and restarts the container.  That's it.
+# Run this on the server whenever you want to pick up code changes:
 #
-# Usage:
 #   sudo bash /opt/deployment/update.sh
+#
+# What it does:
+#   1. git pull origin main   (get the latest scripts + Dockerfile + vendor/)
+#   2. Build or pull the latest dashboard Docker image
+#   3. Stop the old container, start the new one
+#   4. Verify the dashboard is healthy at http://127.0.0.1:8080
 # =============================================================================
 
 set -euo pipefail
@@ -17,17 +21,18 @@ echo "========================================"
 echo " Deployment stack update"
 echo "========================================"
 
-# 1. Pull latest code
+# 1. Pull latest code (includes updated Dockerfile, vendor/, scripts)
 echo ""
-echo "[1/2] Pulling latest deployment scripts..."
+echo "[1/2] Pulling latest code..."
 git -C "$SCRIPT_DIR" pull origin main
 
-# 2. Update the dashboard (pull image + restart container)
+# 2. Rebuild dashboard image and restart container
 echo ""
 echo "[2/2] Updating dashboard..."
 bash "${SCRIPT_DIR}/scripts/restart-stack.sh" --env prod --dashboard-only
 
 echo ""
 echo "========================================"
-echo " Done."
+echo " Update complete."
+echo " Dashboard: http://127.0.0.1:8080"
 echo "========================================"

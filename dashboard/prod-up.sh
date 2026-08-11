@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# prod-up.sh — Pull the latest dashboard image and restart the container.
+# prod-up.sh — Build the dashboard image from source and restart the container.
 #
-# Pulls the pre-built image from Docker Hub (built automatically by GitHub
-# Actions on every push to main) and runs it — no Go, no docker build.
+# Builds entirely inside Docker (multi-stage Dockerfile with vendored deps).
+# No Go installation needed on the server. No internet access needed for Go.
+#
+# Once GitHub Actions is pushing to Docker Hub, this script will automatically
+# use `docker pull` instead of building locally (controlled by DASHBOARD_IMAGE).
 #
 # Usage (from anywhere on the server):
 #   sudo bash /opt/deployment/dashboard/prod-up.sh
@@ -12,13 +15,26 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-IMAGE="${DASHBOARD_IMAGE:-ssdawweq/dokku-dashboard:prod}"
-CONTAINER="dokku-dashboard-prod"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.prod.yml"
+CONTAINER="dokku-dashboard-prod"
+IMAGE="${DASHBOARD_IMAGE:-ssdawweq/dokku-dashboard:prod}"
 
-echo "[+] Pulling latest image: $IMAGE"
-docker pull "$IMAGE"
+# Try to pull a pre-built image from Docker Hub first.
+# If the repo doesn't exist or pull fails, build from source instead.
+if docker pull "$IMAGE" 2>/dev/null; then
+    echo "[+] Using pre-built image from Docker Hub: $IMAGE"
+else
+    echo "[+] No pre-built image found — building from source (this takes ~1-2 min)..."
+    echo "    (All dependencies are vendored — no internet needed)"
+
+    # Remove any old local image so Docker cannot reuse stale layers.
+    docker image rm "$IMAGE" 2>/dev/null || true
+
+    docker build \
+        --no-cache \
+        --tag "$IMAGE" \
+        "$SCRIPT_DIR"
+fi
 
 echo "[+] Stopping old container (if running)..."
 docker stop "$CONTAINER" 2>/dev/null || true

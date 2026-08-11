@@ -63,9 +63,33 @@ if ! dokku apps:exists "${DEV_TENANT}-backend" 2>/dev/null; then
     exit 0
 fi
 
+# Per-tenant auto-redeploy switch. Operators can disable automatic redeploys
+# for specific tenants/environments without turning off the cron by listing
+# tenant names (comma/space separated) in AUTO_REDEPLOY_DISABLED in config.env.
+# The names are matched after prefix normalization so either "dev" or
+# "dev-dev" works. This is the allow-listed equivalent of the per-environment
+# "disable auto-redeploy" checkbox surfaced in the dashboard.
+auto_redeploy_enabled() {
+    local tenant="$1" raw item norm
+    raw="${AUTO_REDEPLOY_DISABLED:-}"
+    [ -z "$raw" ] && return 0
+    for item in ${raw//,/ }; do
+        norm="$(tenant_full_name "$item" 2>/dev/null || echo "$item")"
+        if [ "$norm" = "$tenant" ] || [ "$item" = "$tenant" ]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
 check_and_deploy() {
     local image="$1" app_type="$2"
     [ -z "$image" ] && return 0
+
+    if ! auto_redeploy_enabled "$DEV_TENANT"; then
+        info "Auto-redeploy disabled for $DEV_TENANT (AUTO_REDEPLOY_DISABLED) — skipping ${app_type}."
+        return 0
+    fi
 
     local full_image="${image}:${DEV_TAG}"
     local digest_file="${DIGEST_DIR}/${app_type}-${DEV_TAG}.digest"
@@ -79,6 +103,20 @@ check_and_deploy() {
 
     log "New ${app_type} image: $full_image"
     info "  ${current_digest:-<first run>} → $remote_digest"
+
+    # Safety gate: an automatic deploy must be preceded by a verified backup of
+    # the tenant's SQL + files. If the backup can't be produced/verified we skip
+    # the deploy and retry next cycle rather than risk an unrecoverable rollout.
+    # AUTO_BACKUP_BEFORE_REDEPLOY=0 opts out (not recommended).
+    if [ "${AUTO_BACKUP_BEFORE_REDEPLOY:-1}" != "0" ]; then
+        info "Creating verified pre-deploy backup for $DEV_TENANT ..."
+        if ! bash "$SCRIPT_DIR/backup-tenant.sh" "$DEV_TENANT" \
+                --origin auto --owner auto-redeploy --require-verified --no-prune \
+                --config "$CONFIG_FILE"; then
+            warn "Pre-deploy backup failed verification — skipping ${app_type} deploy this cycle."
+            return 0
+        fi
+    fi
 
     if bash "$SCRIPT_DIR/deploy-all.sh" "$full_image" \
             --type "$app_type" \

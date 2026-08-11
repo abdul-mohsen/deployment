@@ -426,6 +426,23 @@ func (c *Client) exec(ctx context.Context, name string, args ...string) (string,
 
 // Helpers ---------------------------------------------------------------------
 
+// ConfigGet returns the value of a single Dokku config var for an app.
+func (c *Client) ConfigGet(ctx context.Context, app, key string) (string, error) {
+	out, err := c.exec(ctx, c.dockerBin, "exec", "-i", c.dokkuName,
+		"dokku", "config:get", app, key)
+	return strings.TrimSpace(out), err
+}
+
+// ConfigSet sets one or more KEY=VALUE pairs for a Dokku app (no-restart).
+func (c *Client) ConfigSet(ctx context.Context, app string, kvs map[string]string) error {
+	args := []string{"exec", "-i", c.dokkuName, "dokku", "config:set", "--no-restart", app}
+	for k, v := range kvs {
+		args = append(args, k+"="+v)
+	}
+	_, err := c.exec(ctx, c.dockerBin, args...)
+	return err
+}
+
 func roleOf(app string) string {
 	switch {
 	case strings.HasSuffix(app, "-backend"):

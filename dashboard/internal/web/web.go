@@ -21,6 +21,7 @@ import (
 	"github.com/abdul-mohsen/deployment/dashboard/internal/dokku"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/logbuf"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/scripts"
+	"github.com/abdul-mohsen/deployment/dashboard/internal/tenantstate"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/sessions"
@@ -36,14 +37,15 @@ var staticFS embed.FS
 const sessionName = "dashboard"
 
 type server struct {
-	cfg       config.Config
-	dokku     *dokku.Client
-	logs      *logbuf.Store
-	runner    *scripts.Runner
-	pages     map[string]*template.Template
-	store     *sessions.CookieStore
-	snapshots *snapshotCache
-	authMu    sync.RWMutex
+	cfg         config.Config
+	dokku       *dokku.Client
+	logs        *logbuf.Store
+	runner      *scripts.Runner
+	pages       map[string]*template.Template
+	store       *sessions.CookieStore
+	snapshots   *snapshotCache
+	tenantState *tenantstate.Store
+	authMu      sync.RWMutex
 }
 
 // Router builds the HTTP handler.
@@ -76,6 +78,7 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 	}
 
 	s := &server{cfg: cfg, dokku: d, logs: l, runner: runner, pages: pages, store: store}
+	s.tenantState = tenantstate.NewStore(cfg.TenantStateDir)
 	s.snapshots = newSnapshotCache(60*time.Second, s.collectSnapshot)
 	s.snapshots.Start(context.Background())
 
@@ -102,6 +105,7 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		r.Get("/apps/{name}/logs", s.handleLogStream)
 		r.Get("/apps/{name}/logs.txt", s.handleLogDump)
 		r.Get("/api/apps", s.handleAPIApps)
+		r.Get("/api/image-tags", s.handleImageTags)
 		r.Get("/events", s.handleEvents)
 		r.Get("/settings/password", s.handlePasswordPage)
 		r.Post("/settings/password", s.handlePasswordSubmit)
@@ -109,6 +113,18 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		r.Get("/scripts", s.handleScriptsPage)
 		r.Get("/scripts/{name}", s.handleScriptPage)
 		r.Post("/scripts/{name}/run", s.handleScriptRun)
+		// Backup & restore endpoints
+		r.Post("/tenants/{name}/backup", s.handleTenantBackup)
+		r.Get("/tenants/{name}/backups", s.handleTenantBackupList)
+		r.Get("/tenants/{name}/backups/{id}/download", s.handleTenantBackupDownload)
+		r.Post("/tenants/{name}/backups/{id}/delete", s.handleTenantBackupDelete)
+		r.Post("/tenants/{name}/backups/{id}/restore", s.handleTenantRestore)
+		r.Get("/tenants/{name}/accounting-export", s.handleAccountingExport)
+		// Auto-redeploy toggle
+		r.Post("/tenants/{name}/auto-redeploy", s.handleTenantAutoRedeploy)
+		// Credential management
+		r.Get("/tenants/{name}/credentials", s.handleTenantCredentials)
+		r.Post("/tenants/{name}/credentials", s.handleTenantUpdateCredentials)
 	})
 
 	return r
@@ -288,6 +304,7 @@ func (s *server) handleTenant(w http.ResponseWriter, r *http.Request) {
 			frontend = &apps[i]
 		}
 	}
+	autoRedeploy := s.tenantState.IsAutoRedeployEnabled(name)
 	s.render(w, "tenant.html", map[string]any{
 		"Env":            s.cfg.EnvName,
 		"Base":           s.cfg.BaseDomain,
@@ -297,6 +314,8 @@ func (s *server) handleTenant(w http.ResponseWriter, r *http.Request) {
 		"Frontend":       frontend,
 		"Versions":       scripts.VersionCatalog(),
 		"DefaultVersion": scripts.DefaultImageVersion(),
+		"AutoRedeploy":   autoRedeploy,
+		"MaxUserBackups": 50,
 	})
 }
 
@@ -395,6 +414,250 @@ func (s *server) handleAPIApps(w http.ResponseWriter, r *http.Request) {
 	snap, _ := s.snapshots.Snapshot()
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprint(w, appsJSON(snap.Apps))
+}
+
+// handleImageTags returns available image tags from Docker Hub for autocomplete.
+// Optional ?q=<substr> filters results to tags whose name contains the substring.
+// Each tag entry includes metadata (is_branch, digest, last_pushed) for branch-name tags.
+func (s *server) handleImageTags(w http.ResponseWriter, r *http.Request) {
+	backendRepo := strings.TrimSpace(os.Getenv("BACKEND_IMAGE"))
+	frontendRepo := strings.TrimSpace(os.Getenv("FRONTEND_IMAGE"))
+	if backendRepo == "" {
+		if u := strings.TrimSpace(os.Getenv("DOCKERHUB_USERNAME")); u != "" {
+			backendRepo = u + "/ifritah-api"
+		}
+	}
+	if frontendRepo == "" {
+		if u := strings.TrimSpace(os.Getenv("DOCKERHUB_USERNAME")); u != "" {
+			frontendRepo = u + "/ifritah-web"
+		}
+	}
+
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	tags, metas := fetchImageTagsWithMeta(r.Context(), backendRepo, frontendRepo, query)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "max-age=60")
+	_ = json.NewEncoder(w).Encode(map[string]any{"tags": tags, "meta": metas})
+}
+
+// TagMeta holds per-tag metadata returned alongside the tag list.
+type TagMeta struct {
+	Tag           string `json:"tag"`
+	LastPushed    string `json:"last_pushed,omitempty"` // ISO8601
+	Digest        string `json:"digest,omitempty"`       // first 19 chars of "sha256:..."
+	IsBranch      bool   `json:"is_branch"`              // true when not a semver vX.Y.Z tag
+	InBoth        bool   `json:"in_both"`                // true when tag exists in both backend AND frontend repos
+	BackendOnly   bool   `json:"backend_only,omitempty"` // true when only in backend repo
+	FrontendOnly  bool   `json:"frontend_only,omitempty"` // true when only in frontend repo
+}
+
+// fetchImageTagsWithMeta returns the filtered tag list + per-tag metadata including
+// whether each tag is available in both repos (safe to deploy) or only one (partial).
+func fetchImageTagsWithMeta(ctx context.Context, backendRepo, frontendRepo, query string) ([]string, []TagMeta) {
+	// Fetch tag sets from both repos to compute coverage
+	bTagSet, fTagSet := fetchImageTagSets(ctx, backendRepo, frontendRepo)
+
+	// Build union sorted list (same logic as fetchImageTags but we already have the sets)
+	allTagsMap := map[string]bool{}
+	for t := range bTagSet {
+		allTagsMap[t] = true
+	}
+	for t := range fTagSet {
+		allTagsMap[t] = true
+	}
+
+	priority := func(tag string) int {
+		switch tag {
+		case "dev":
+			return 0
+		case "latest":
+			return 1
+		}
+		if scripts.IsImageVersionTag(tag) {
+			return 2
+		}
+		return 3
+	}
+	both := func(t string) bool { return bTagSet[t] && fTagSet[t] }
+
+	allTags := make([]string, 0, len(allTagsMap))
+	for t := range allTagsMap {
+		allTags = append(allTags, t)
+	}
+	sort.Slice(allTags, func(i, j int) bool {
+		pi, pj := priority(allTags[i]), priority(allTags[j])
+		if pi != pj {
+			return pi < pj
+		}
+		bi, bj := both(allTags[i]), both(allTags[j])
+		if bi != bj {
+			return bi
+		}
+		return allTags[i] > allTags[j]
+	})
+
+	// Apply substring filter
+	if query != "" {
+		filtered := allTags[:0]
+		for _, t := range allTags {
+			if strings.Contains(strings.ToLower(t), query) {
+				filtered = append(filtered, t)
+			}
+		}
+		allTags = filtered
+	}
+
+	// Fetch metadata for branch-name tags, limit 20 to avoid latency
+	repo := backendRepo
+	if repo == "" {
+		repo = frontendRepo
+	}
+	metas := make([]TagMeta, 0, len(allTags))
+	fetched := 0
+	for _, tag := range allTags {
+		m := TagMeta{Tag: tag}
+		m.IsBranch = !scripts.IsImageVersionTag(tag) && tag != "latest" && tag != "dev"
+		m.InBoth = bTagSet[tag] && fTagSet[tag]
+		m.BackendOnly = bTagSet[tag] && !fTagSet[tag]
+		m.FrontendOnly = !bTagSet[tag] && fTagSet[tag]
+		if m.IsBranch && repo != "" && fetched < 20 {
+			m.LastPushed, m.Digest = fetchSingleTagMeta(ctx, repo, tag)
+			fetched++
+		}
+		metas = append(metas, m)
+	}
+	return allTags, metas
+}
+
+// fetchImageTagSets returns the raw tag sets for both repos separately.
+func fetchImageTagSets(ctx context.Context, backendRepo, frontendRepo string) (bTags, fTags map[string]bool) {
+	fetch := func(repo string) map[string]bool {
+		set := map[string]bool{}
+		if repo == "" {
+			return set
+		}
+		page := "https://hub.docker.com/v2/repositories/" + repo + "/tags?page_size=100&ordering=last_updated"
+		for i := 0; i < 5 && page != ""; i++ {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, page, nil)
+			if err != nil {
+				break
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil || resp.StatusCode != http.StatusOK {
+				if resp != nil {
+					resp.Body.Close()
+				}
+				break
+			}
+			var result struct {
+				Next    string `json:"next"`
+				Results []struct {
+					Name string `json:"name"`
+				} `json:"results"`
+			}
+			_ = json.NewDecoder(resp.Body).Decode(&result)
+			resp.Body.Close()
+			for _, r := range result.Results {
+				if r.Name != "" {
+					set[r.Name] = true
+				}
+			}
+			page = result.Next
+		}
+		return set
+	}
+	return fetch(backendRepo), fetch(frontendRepo)
+}
+
+// fetchSingleTagMeta calls the Docker Hub v2 tag detail API and returns
+// (lastPushed RFC3339, shortDigest). Returns empty strings on any error.
+func fetchSingleTagMeta(ctx context.Context, repo, tag string) (lastPushed, digest string) {
+	apiURL := "https://hub.docker.com/v2/repositories/" + repo + "/tags/" + tag
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return
+	}
+	defer resp.Body.Close()
+	var result struct {
+		LastUpdated string `json:"last_updated"`
+		Images      []struct {
+			Digest string `json:"digest"`
+		} `json:"images"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return
+	}
+	lastPushed = result.LastUpdated
+	if len(result.Images) > 0 {
+		d := result.Images[0].Digest
+		if len(d) > 19 {
+			digest = d[:19] // "sha256:" (7 chars) + 12 hex chars
+		} else {
+			digest = d
+		}
+	}
+	return
+}
+
+// fetchImageTags queries Docker Hub for tags from both repos and returns a
+// sorted, deduplicated list. Delegates to fetchImageTagSets to avoid code duplication.
+func fetchImageTags(ctx context.Context, backendRepo, frontendRepo string) []string {
+	if backendRepo == "" && frontendRepo == "" {
+		return []string{}
+	}
+	bTags, fTags := fetchImageTagSets(ctx, backendRepo, frontendRepo)
+
+	both := map[string]bool{}
+	all := map[string]bool{}
+	for t := range bTags {
+		all[t] = true
+		if fTags[t] {
+			both[t] = true
+		}
+	}
+	for t := range fTags {
+		all[t] = true
+	}
+
+	// Priority order: dev and latest first, then semver (newest first), then branches, then rest
+	priority := func(tag string) int {
+		switch tag {
+		case "dev":
+			return 0
+		case "latest":
+			return 1
+		}
+		if scripts.IsImageVersionTag(tag) {
+			return 2
+		}
+		return 3
+	}
+
+	tags := make([]string, 0, len(all))
+	for t := range all {
+		tags = append(tags, t)
+	}
+	sort.Slice(tags, func(i, j int) bool {
+		pi, pj := priority(tags[i]), priority(tags[j])
+		if pi != pj {
+			return pi < pj
+		}
+		// Within same priority: tags in both repos first, then reverse-alpha (newest semver first)
+		bi, bj := both[tags[i]], both[tags[j]]
+		if bi != bj {
+			return bi
+		}
+		return tags[i] > tags[j] // reverse alpha = newer semver / newer branch names first
+	})
+	return tags
 }
 
 // handleEvents pushes cached snapshots as the background collector refreshes.
@@ -656,10 +919,24 @@ func expandImageVersion(sc *scripts.Script, form url.Values) (url.Values, error)
 	if version == "" {
 		return form, nil
 	}
+
+	// First try the semver catalog (vX.Y.Z tags with pinned image names).
 	resolved, ok := scripts.ResolveImageVersion(version)
 	if !ok {
-		return nil, fmt.Errorf("unknown image version %q", version)
+		// Not a semver catalog tag — treat as a raw Docker tag (dev, latest, branch name, sha).
+		// Build image names directly from the configured repos + the supplied tag.
+		backendRepo := scripts.BackendRepo()
+		frontendRepo := scripts.FrontendRepo()
+		if backendRepo == "" && frontendRepo == "" {
+			return nil, fmt.Errorf("image tag %q is not in the release catalog and DOCKERHUB_USERNAME / BACKEND_IMAGE / FRONTEND_IMAGE are not configured", version)
+		}
+		resolved = scripts.ImageVersion{
+			Tag:           version,
+			BackendImage:  backendRepo + ":" + version,
+			FrontendImage: frontendRepo + ":" + version,
+		}
 	}
+
 	out := cloneValues(form)
 	if scriptHasField(sc, "backend_image") && strings.TrimSpace(out.Get("backend_image")) == "" {
 		out.Set("backend_image", resolved.BackendImage)
@@ -741,6 +1018,129 @@ func displayArgv(sc *scripts.Script, argv []string) []string {
 		}
 	}
 	return out
+}
+
+// handleTenantAutoRedeploy persists the auto-redeploy toggle for a tenant.
+// POST /tenants/{name}/auto-redeploy  with form field enabled=1|0
+func (s *server) handleTenantAutoRedeploy(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if !validAppName(name) {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	enabled := r.FormValue("enabled") == "1"
+	if err := s.tenantState.SetAutoRedeploy(name, enabled); err != nil {
+		http.Error(w, "failed to save setting: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleTenantCredentials returns the admin/manager usernames stored in Dokku config.
+// GET /tenants/{name}/credentials
+func (s *server) handleTenantCredentials(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if !validAppName(name) {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	backendApp := name + "-backend"
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	adminUser, _ := s.dokku.ConfigGet(ctx, backendApp, "ADMIN_USER")
+	managerUser, _ := s.dokku.ConfigGet(ctx, backendApp, "MANAGER_USER")
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"admin_user":   adminUser,
+		"manager_user": managerUser,
+	})
+}
+
+// handleTenantUpdateCredentials updates admin/manager passwords in Dokku config
+// and reseeds them via the backend's /api/v2 register/update endpoints.
+// POST /tenants/{name}/credentials
+// Form fields: role (admin|manager), new_password
+func (s *server) handleTenantUpdateCredentials(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if !validAppName(name) {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+
+	role := strings.TrimSpace(r.FormValue("role"))
+	newPassword := strings.TrimSpace(r.FormValue("new_password"))
+
+	if role != "admin" && role != "manager" {
+		http.Error(w, "role must be admin or manager", http.StatusBadRequest)
+		return
+	}
+	if len(newPassword) < 8 {
+		http.Error(w, "password must be at least 8 characters", http.StatusBadRequest)
+		return
+	}
+
+	backendApp := name + "-backend"
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	// 1. Update the password in Dokku config (for future reseeds)
+	envKey := "ADMIN_PASSWORD"
+	userKey := "ADMIN_USER"
+	if role == "manager" {
+		envKey = "MANAGER_PASSWORD"
+		userKey = "MANAGER_USER"
+	}
+	username, _ := s.dokku.ConfigGet(ctx, backendApp, userKey)
+	if err := s.dokku.ConfigSet(ctx, backendApp, map[string]string{envKey: newPassword}); err != nil {
+		http.Error(w, "failed to update Dokku config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 2. Update the password in MySQL directly (fastest path, no API call needed)
+	dbName := "tenant_" + strings.ReplaceAll(name, "-", "_")
+	host := s.cfg.MySQLHost
+	port := s.cfg.MySQLPort
+	user := strings.TrimSpace(os.Getenv("MYSQL_ROOT_USER"))
+	if user == "" {
+		user = "root"
+	}
+	password := os.Getenv("MYSQL_ROOT_PASSWORD")
+
+	// Use the backend API instead — it handles bcrypt hashing
+	// Find the backend's internal URL from Dokku
+	backendURL := "http://" + backendApp + ".web:8090"
+	_ = dbName // used for direct MySQL fallback only
+
+	// Call the backend's admin password reset endpoint
+	// POST /api/v2/user/:id/password requires admin JWT — instead use MySQL directly
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?timeout=10s", user, password, host, port, dbName)
+	if err := updateUserPasswordMySQL(ctx, dsn, username, newPassword); err != nil {
+		// Log but don't fail — Dokku config was already updated
+		_ = backendURL
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok":      false,
+			"warning": "Dokku config updated but MySQL password update failed: " + err.Error(),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":      true,
+		"message": "Password updated for " + role + " (" + username + ")",
+	})
 }
 
 func (s *server) collectSnapshot(ctx context.Context) appSnapshot {

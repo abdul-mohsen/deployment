@@ -1,94 +1,215 @@
 {{define "content"}}
-<a href="/" class="back-link">back to applications</a>
-<section class="detail-head">
-  <div>
-    <div class="eyebrow">tenant</div>
-    <h1>{{.Tenant}}</h1>
-    <p>Live resources, desired image, lifecycle actions.</p>
-  </div>
-  {{with .Frontend}}{{if and .Domains (eq .State "running")}}
-  <a href="http://{{index .Domains 0}}" target="_blank" rel="noopener"
-     class="command-link secondary">Open tenant</a>
-  {{end}}{{end}}
-</section>
+<div class="breadcrumb"><a href="/">Services</a> <span class="bc-sep">›</span> <span>{{.Tenant}}</span></div>
 
-<dl class="resource-grid">
+<div class="page-header">
+  <div class="page-header-left">
+    <h1 class="page-title">{{.Tenant}}</h1>
+    <span class="page-subtitle">Tenant detail — lifecycle, version sync, backups, auto-redeploy</span>
+  </div>
+  <div class="page-header-right">
+    {{with .Frontend}}{{if and .Domains (eq .State "running")}}
+    <a href="http://{{index .Domains 0}}" target="_blank" rel="noopener" class="btn btn-secondary">Open site ↗</a>
+    {{end}}{{end}}
+  </div>
+</div>
+
+<!-- Resource summary cards -->
+<div class="cards-row">
   {{with .Backend}}
   <div class="resource-card">
-    <div class="resource-title">
-      <dt>Backend</dt>
-      <span class="text-xs px-2 py-1 rounded ring-1 {{stateClr .State}}">{{.State}}</span>
+    <div class="rc-header">
+      <span class="rc-label">Backend</span>
+      <span class="badge {{stateClr .State}}">{{.State}}</span>
     </div>
-    <dd class="image-line" title="{{.Image}}">{{or .Image "-"}}</dd>
-    <dd class="muted-line">HTTP {{.HTTPCode}} · port {{or .IntPort "-"}}</dd>
+    <div class="rc-image" title="{{.Image}}">{{or .Image "—"}}</div>
+    <div class="rc-meta">HTTP {{.HTTPCode}} · port {{or .IntPort "—"}}</div>
   </div>
   {{end}}
   {{with .Frontend}}
   <div class="resource-card">
-    <div class="resource-title">
-      <dt>Frontend</dt>
-      <span class="text-xs px-2 py-1 rounded ring-1 {{stateClr .State}}">{{.State}}</span>
+    <div class="rc-header">
+      <span class="rc-label">Frontend</span>
+      <span class="badge {{stateClr .State}}">{{.State}}</span>
     </div>
-    <dd class="image-line" title="{{.Image}}">{{or .Image "-"}}</dd>
-    <dd class="muted-line">{{join .Domains " "}}</dd>
+    <div class="rc-image" title="{{.Image}}">{{or .Image "—"}}</div>
+    <div class="rc-meta">{{join .Domains " · "}}</div>
   </div>
   {{end}}
-</dl>
 
-<section class="action-layout">
-  <div class="action-panel wide">
-    <h2>Sync Version</h2>
-    <form id="tenant-version-form" class="inline-form">
+  <!-- Auto-redeploy card -->
+  <div class="resource-card">
+    <div class="rc-header"><span class="rc-label">Auto-redeploy</span></div>
+    <div style="margin-top:8px">
+      <label class="checkbox-label">
+        <input type="checkbox" id="auto-redeploy-toggle"
+               {{if .AutoRedeploy}}checked{{end}}
+               data-tenant="{{.Tenant}}">
+        <span id="auto-redeploy-status">{{if .AutoRedeploy}}Enabled{{else}}Disabled{{end}}</span>
+      </label>
+      <p style="font-size:11px;color:var(--text-dim);margin:6px 0 0;line-height:1.4">
+        When enabled, new image digests on Docker Hub trigger an automatic backup + redeploy.
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- Actions row -->
+<div class="panels-row">
+  <!-- Sync version -->
+  <div class="panel panel-sm">
+    <div class="panel-title">Sync Version</div>
+    <form id="tenant-version-form" class="sync-form">
       <input type="hidden" name="_pos_name" value="{{.Tenant}}">
-      <select name="image_version" required class="flex-1 bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 outline-none focus:border-emerald-500">
-        {{range .Versions}}
-        <option value="{{.Tag}}" {{if eq .Tag $.DefaultVersion}}selected{{end}}>{{.Tag}}</option>
-        {{end}}
-      </select>
-      <button class="command-link">Sync</button>
+      <div style="position:relative;flex:1;min-width:160px">
+        <input id="input-image_version" type="text" name="image_version"
+               value="{{.DefaultVersion}}" placeholder="e.g. v1.2.3 or feature-branch"
+               class="form-input" style="width:100%" autocomplete="off"
+               data-tag-search required>
+        <datalist id="dl-image_version"></datalist>
+      </div>
+      <button class="btn btn-primary">Sync</button>
     </form>
   </div>
 
-  <div class="action-panel">
-    <h2>Lifecycle</h2>
-    <div class="chip-row">
-      <button data-tenant-act="start" class="tenant-act action-chip good">Start</button>
-      <button data-tenant-act="stop" class="tenant-act action-chip warn">Stop</button>
-      <button data-tenant-act="restart" class="tenant-act action-chip">Restart</button>
-      <button data-tenant-act="rebuild" class="tenant-act action-chip">Rebuild</button>
+  <!-- Lifecycle -->
+  <div class="panel panel-sm">
+    <div class="panel-title">Lifecycle</div>
+    <div class="action-row">
+      <button data-tenant-act="start"   class="tenant-act btn btn-success">▶ Start</button>
+      <button data-tenant-act="stop"    class="tenant-act btn btn-danger"  data-confirm="Stop {{.Tenant}}?">⏹ Stop</button>
+      <button data-tenant-act="restart" class="tenant-act btn btn-secondary" data-confirm="Restart {{.Tenant}}?">↺ Restart</button>
+      <button data-tenant-act="rebuild" class="tenant-act btn btn-secondary" data-confirm="Rebuild {{.Tenant}}?">⟳ Rebuild</button>
     </div>
   </div>
-</section>
 
-<section class="quick-grid">
-  <a href="/scripts/update-tenant?_pos_name={{.Tenant}}">Update config</a>
-  <a href="/scripts/backup-tenant?_pos_name={{.Tenant}}">Backup</a>
-  <a href="/scripts/tail-logs?tenant={{.Tenant}}">Tail logs</a>
-  <a href="/scripts/remove-tenant?_pos_name={{.Tenant}}" class="danger">Delete tenant</a>
-</section>
+  <!-- Quick links -->
+  <div class="panel panel-sm">
+    <div class="panel-title">Quick links</div>
+    <div class="quick-links">
+      <a href="/scripts/update-tenant?_pos_name={{.Tenant}}" class="quick-link">Update config</a>
+      <a href="/scripts/tail-logs?tenant={{.Tenant}}" class="quick-link">Tail logs</a>
+      <a href="/tenants/{{.Tenant}}/accounting-export" class="quick-link">Export accounting ↓</a>
+      <a href="/scripts/remove-tenant?_pos_name={{.Tenant}}" class="quick-link danger">Delete tenant</a>
+    </div>
+  </div>
+</div>
 
-<section class="output-panel">
-  <h2>Action Output</h2>
-  <div id="tenant-out" class="terminal-output compact-output"></div>
-</section>
+<!-- Credentials panel -->
+<div class="panel">
+  <div class="panel-toolbar">
+    <span class="panel-title" style="border:none;padding:0;margin:0">Access Credentials</span>
+    <div style="font-size:11px;color:var(--text-muted)">Admin and manager user accounts for this tenant</div>
+  </div>
+  <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    <!-- Admin -->
+    <div>
+      <div class="field-label" style="margin-bottom:8px">Admin account</div>
+      <div id="cred-admin-user" style="font-family:var(--mono);font-size:13px;color:var(--text);margin-bottom:10px;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:var(--radius);padding:6px 10px">
+        Loading…
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <input id="cred-admin-pass" type="password" placeholder="New password (min 8 chars)"
+          class="form-input" style="flex:1;min-width:160px">
+        <button id="cred-admin-btn" data-role="admin" class="btn btn-primary" style="flex-shrink:0">Change</button>
+      </div>
+      <div id="cred-admin-msg" style="font-size:11px;margin-top:4px;height:14px"></div>
+    </div>
+    <!-- Manager -->
+    <div>
+      <div class="field-label" style="margin-bottom:8px">Manager account</div>
+      <div id="cred-manager-user" style="font-family:var(--mono);font-size:13px;color:var(--text);margin-bottom:10px;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:var(--radius);padding:6px 10px">
+        Loading…
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <input id="cred-manager-pass" type="password" placeholder="New password (min 8 chars)"
+          class="form-input" style="flex:1;min-width:160px">
+        <button id="cred-manager-btn" data-role="manager" class="btn btn-primary" style="flex-shrink:0">Change</button>
+      </div>
+      <div id="cred-manager-msg" style="font-size:11px;margin-top:4px;height:14px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Action output terminal -->
+<div class="panel">
+  <div class="panel-title">Action output</div>
+  <div id="tenant-out" class="terminal"></div>
+</div>
+
+<!-- Backup panel -->
+<div class="panel">
+  <div class="panel-toolbar">
+    <span class="panel-title" style="border:none;padding:0;margin:0">Backups</span>
+    <div style="font-size:11px;color:var(--text-muted)">
+      Auto backups retained 7 days &nbsp;·&nbsp; User backups kept until deleted (max {{.MaxUserBackups}})
+    </div>
+    <div class="panel-toolbar-right">
+      <input id="backup-label" type="text" placeholder="Optional label for backup…"
+             class="search-input" style="width:200px">
+      <button id="create-backup-btn" class="btn btn-primary">+ Create Backup</button>
+    </div>
+  </div>
+  <div class="table-wrap">
+    <table class="data-table" id="backup-table">
+      <thead>
+        <tr>
+          <th>Backup ID</th>
+          <th>Created</th>
+          <th>Origin</th>
+          <th>Owner</th>
+          <th>Verified</th>
+          <th>DB Artifact</th>
+          <th style="width:200px">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="backup-tbody">
+        <tr><td colspan="7" class="empty-cell">Loading backups…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Restore confirmation modal -->
+<div id="restore-modal" class="modal-overlay" style="display:none">
+  <div class="modal-box">
+    <h2 class="modal-title">Restore from backup</h2>
+    <p id="restore-modal-desc" class="modal-desc"></p>
+    <div class="modal-warn">
+      A verified safety backup of the current state will be taken before restoring.
+    </div>
+    <div class="modal-actions">
+      <button id="restore-cancel-btn" class="btn btn-secondary">Cancel</button>
+      <button id="restore-confirm-btn" class="btn btn-danger">Restore</button>
+    </div>
+  </div>
+</div>
 
 <script>
 (function () {
+  'use strict';
   const tenant = '{{.Tenant}}';
   const out = document.getElementById('tenant-out');
   const form = document.getElementById('tenant-version-form');
+  const backupTbody = document.getElementById('backup-tbody');
+  const restoreModal = document.getElementById('restore-modal');
+  let pendingRestoreID = null;
 
+  // ── Output terminal helpers ────────────────────────────────
   function append(line) {
     out.textContent += line + '\n';
     out.scrollTop = out.scrollHeight;
   }
 
-  async function streamScript(slug, fd) {
-    append('');
-    append('--- run ' + new Date().toISOString() + ' ---');
-    const res = await fetch('/scripts/' + slug + '/run', { method: 'POST', body: new URLSearchParams(fd) });
+  async function streamSSE(url, method, body) {
+    append('--- ' + method + ' ' + url + ' @ ' + new Date().toISOString() + ' ---');
+    const opts = { method };
+    if (body) {
+      opts.headers = { 'Content-Type': 'application/x-www-form-urlencoded' };
+      opts.body = typeof body === 'string' ? body : new URLSearchParams(body).toString();
+    }
+    const res = await fetch(url, opts);
     if (!res.ok) {
-      append('FAILED ' + res.status + ' ' + await res.text());
+      append('✖ ' + res.status + ' ' + await res.text());
       return;
     }
     const reader = res.body.getReader();
@@ -104,27 +225,217 @@
         buf = buf.slice(idx + 2);
         for (const ln of block.split('\n')) {
           if (ln.startsWith('data: ')) append(ln.slice(6));
-          if (ln.startsWith('event: error')) append('FAILED');
+          if (ln.startsWith('event: error')) append('✖ FAILED');
         }
       }
     }
   }
 
+  // ── Sync version form ──────────────────────────────────────
   form.addEventListener('submit', (ev) => {
     ev.preventDefault();
-    streamScript('update-tenant', new FormData(form));
+    streamSSE('/scripts/update-tenant/run', 'POST', new FormData(form));
   });
 
+  // ── Lifecycle buttons ──────────────────────────────────────
   document.querySelectorAll('.tenant-act').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const verb = btn.dataset.tenantAct;
-      if ((verb === 'stop' || verb === 'restart' || verb === 'rebuild') && !confirm(verb + ' ' + tenant + '?')) return;
-      append('');
+      const msg = btn.dataset.confirm;
+      if (msg && !confirm(msg)) return;
       append('--- ' + verb + ' ' + tenant + ' ---');
       const res = await fetch('/tenants/' + tenant + '/' + verb, { method: 'POST' });
       append(await res.text());
     });
   });
+
+  // ── Auto-redeploy toggle ───────────────────────────────────
+  const toggle = document.getElementById('auto-redeploy-toggle');
+  const statusLabel = document.getElementById('auto-redeploy-status');
+  if (toggle) {
+    toggle.addEventListener('change', async () => {
+      const enabled = toggle.checked;
+      const res = await fetch('/tenants/' + tenant + '/auto-redeploy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'enabled=' + (enabled ? '1' : '0'),
+      });
+      if (!res.ok) {
+        toggle.checked = !enabled; // revert
+        append('✖ Failed to save auto-redeploy setting: ' + res.status);
+      } else {
+        if (statusLabel) statusLabel.textContent = enabled ? 'Enabled' : 'Disabled';
+        append('Auto-redeploy ' + (enabled ? 'enabled' : 'disabled') + ' for ' + tenant);
+      }
+    });
+  }
+
+  // ── Credentials ───────────────────────────────────────────
+  async function loadCredentials() {
+    try {
+      const res = await fetch('/tenants/' + tenant + '/credentials');
+      if (!res.ok) return;
+      const data = await res.json();
+      const adminEl = document.getElementById('cred-admin-user');
+      const managerEl = document.getElementById('cred-manager-user');
+      if (adminEl) adminEl.textContent = data.admin_user || '(not set)';
+      if (managerEl) managerEl.textContent = data.manager_user || '(not set)';
+    } catch (e) {
+      console.warn('Failed to load credentials:', e);
+    }
+  }
+
+  function setupCredBtn(role) {
+    const btn = document.getElementById('cred-' + role + '-btn');
+    const passInput = document.getElementById('cred-' + role + '-pass');
+    const msg = document.getElementById('cred-' + role + '-msg');
+    if (!btn || !passInput) return;
+
+    btn.addEventListener('click', async () => {
+      const pw = passInput.value.trim();
+      if (pw.length < 8) {
+        if (msg) { msg.textContent = '⚠ Min 8 characters'; msg.style.color = 'var(--amber)'; }
+        return;
+      }
+      btn.disabled = true;
+      if (msg) msg.textContent = '';
+      try {
+        const res = await fetch('/tenants/' + tenant + '/credentials', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'role=' + role + '&new_password=' + encodeURIComponent(pw),
+        });
+        const data = await res.json();
+        if (data.ok) {
+          if (msg) { msg.textContent = '✓ ' + data.message; msg.style.color = 'var(--green)'; }
+          passInput.value = '';
+          append('Password changed for ' + role + ' on ' + tenant);
+        } else {
+          if (msg) { msg.textContent = '⚠ ' + (data.warning || 'Failed'); msg.style.color = 'var(--amber)'; }
+        }
+      } catch (e) {
+        if (msg) { msg.textContent = '✖ Error: ' + e.message; msg.style.color = 'var(--red)'; }
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
+  loadCredentials();
+  setupCredBtn('admin');
+  setupCredBtn('manager');
+
+  // ── Backup list ────────────────────────────────────────────
+  async function loadBackups() {
+    try {
+      const res = await fetch('/tenants/' + tenant + '/backups');
+      if (!res.ok) {
+        backupTbody.innerHTML = `<tr><td colspan="7" class="empty-cell" style="color:var(--red)">Failed to load backups (${res.status}).</td></tr>`;
+        return;
+      }
+      const data = await res.json();
+      const backups = (data.backups || []).sort((a, b) => (b.created_at || b.timestamp || '').localeCompare(a.created_at || a.timestamp || ''));
+      if (backups.length === 0) {
+        backupTbody.innerHTML = '<tr><td colspan="7" class="empty-cell">No backups yet. Click "+ Create Backup" to create the first one.</td></tr>';
+        return;
+      }
+      backupTbody.innerHTML = backups.map(b => {
+        const isUser = b.origin === 'user';
+        const verBadge = b.verified
+          ? '<span class="badge badge-success">✓ verified</span>'
+          : '<span class="badge badge-warn">unverified</span>';
+        const originBadge = isUser
+          ? '<span class="badge badge-info">user</span>'
+          : '<span class="badge badge-neutral">auto</span>';
+        const dbFile = b.db_artifact || b.DBArtifact || '';
+        const dlBtn = dbFile
+          ? `<a href="/tenants/${tenant}/backups/${b.id}/download" class="btn-action good" title="Download SQL backup">⬇ SQL</a>`
+          : '<span style="font-size:11px;color:var(--text-dim)">—</span>';
+        const restoreBtn = `<button class="btn-action" data-restore="${b.id}">↩ Restore</button>`;
+        const delBtn = isUser
+          ? `<button class="btn-action warn" data-del="${b.id}" title="Delete user backup">🗑</button>`
+          : `<span title="Auto backups are deleted by retention policy" style="font-size:11px;color:var(--text-dim)">policy</span>`;
+        const ts = b.created_at || b.timestamp || '—';
+        const shortTS = ts.length > 19 ? ts.slice(0, 19).replace('T', ' ') : ts;
+        return `<tr>
+          <td><code style="font-size:11px">${b.id}</code></td>
+          <td style="font-size:12px;white-space:nowrap">${shortTS}</td>
+          <td>${originBadge}</td>
+          <td style="font-size:12px">${b.owner || '—'}</td>
+          <td>${verBadge}</td>
+          <td style="font-family:var(--mono);font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${dbFile}">${dbFile || '—'}</td>
+          <td>
+            <div class="row-actions">
+              ${dlBtn}
+              ${restoreBtn}
+              ${delBtn}
+            </div>
+          </td>
+        </tr>`;
+      }).join('');
+
+      // Delete handlers
+      backupTbody.querySelectorAll('[data-del]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          if (!confirm('Permanently delete backup ' + btn.dataset.del + '?\nThis cannot be undone.')) return;
+          btn.disabled = true;
+          const r = await fetch('/tenants/' + tenant + '/backups/' + btn.dataset.del + '/delete', { method: 'POST' });
+          if (r.ok) {
+            append('Backup ' + btn.dataset.del + ' deleted.');
+            loadBackups();
+          } else {
+            append('✖ Delete failed: ' + await r.text());
+            btn.disabled = false;
+          }
+        });
+      });
+
+      // Restore handlers
+      backupTbody.querySelectorAll('[data-restore]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          pendingRestoreID = btn.dataset.restore;
+          document.getElementById('restore-modal-desc').textContent =
+            'Restore tenant "' + tenant + '" from backup: ' + pendingRestoreID;
+          restoreModal.style.display = 'flex';
+        });
+      });
+    } catch (e) {
+      backupTbody.innerHTML = `<tr><td colspan="7" class="empty-cell" style="color:var(--red)">Error loading backups: ${e.message}</td></tr>`;
+    }
+  }
+
+  // Create backup button
+  document.getElementById('create-backup-btn').addEventListener('click', async () => {
+    const label = document.getElementById('backup-label').value.trim();
+    const body = label ? 'label=' + encodeURIComponent(label) : '';
+    await streamSSE('/tenants/' + tenant + '/backup', 'POST', body || null);
+    loadBackups();
+  });
+
+  // Restore modal
+  document.getElementById('restore-cancel-btn').addEventListener('click', () => {
+    restoreModal.style.display = 'none';
+    pendingRestoreID = null;
+  });
+  document.getElementById('restore-confirm-btn').addEventListener('click', async () => {
+    if (!pendingRestoreID) return;
+    const id = pendingRestoreID;
+    restoreModal.style.display = 'none';
+    pendingRestoreID = null;
+    await streamSSE('/tenants/' + tenant + '/backups/' + id + '/restore', 'POST', null);
+    loadBackups();
+  });
+
+  // Close modal on overlay click
+  restoreModal.addEventListener('click', (e) => {
+    if (e.target === restoreModal) {
+      restoreModal.style.display = 'none';
+      pendingRestoreID = null;
+    }
+  });
+
+  // Initial load
+  loadBackups();
 })();
 </script>
 {{end}}

@@ -1,70 +1,84 @@
 {{define "content"}}
-<section class="ops-hero">
-  <div>
-    <div class="eyebrow">applications</div>
-    <h1>Tenant Fleet</h1>
-    <p>Base domain <code>*.{{.Base}}</code></p>
-  </div>
-  <div id="metrics" class="metric-strip">
-    <span>Tenants <b id="m-total">.</b></span>
-    <span class="metric-ok">Healthy <b id="m-running">.</b></span>
-    <span class="metric-warn">Degraded <b id="m-degraded">.</b></span>
-    <span class="metric-bad">Down <b id="m-down">.</b></span>
-    <span id="dokku-pill">Dokku <b>...</b></span>
-  </div>
-</section>
+<datalist id="image-tag-list"></datalist>
 
-<div class="ops-toolbar">
-  <input id="filter" placeholder="Filter tenants" autocomplete="off" class="control-input">
-  <a href="/scripts/create-tenant" class="command-link">New tenant</a>
-  <a href="/scripts/deploy-all" class="command-link">Sync image</a>
-  <a href="/scripts/status" class="command-link secondary">Full status</a>
-  <span id="pulse" class="pulse-dot opacity-0"></span>
+<div class="page-header">
+  <div class="page-header-left">
+    <h1 class="page-title">Tenant Fleet</h1>
+    <span class="page-subtitle">Base domain: <code>*.{{.Base}}</code></span>
+  </div>
+  <div class="page-header-right">
+    <!-- Quick create: kind prefix + name + button -->
+    <select id="kind-select" class="form-select" style="width:90px" title="Environment kind prefix">
+      <option value="dev">dev</option>
+      <option value="qa">qa</option>
+      <option value="prod">prod</option>
+    </select>
+    <input id="new-tenant-name" type="text" class="search-input" style="width:140px"
+           placeholder="tenant name…" autocomplete="off" spellcheck="false">
+    <button id="create-tenant-btn" class="btn btn-primary">+ Create tenant</button>
+    <a href="/scripts/deploy-all" class="btn btn-secondary">Sync image</a>
+  </div>
 </div>
 
-<div id="grid" class="app-grid">
-  <div class="skel skeleton-card animate-pulse"></div>
-  <div class="skel skeleton-card animate-pulse"></div>
-  <div class="skel skeleton-card animate-pulse"></div>
+<div class="panel">
+  <div class="panel-toolbar">
+    <div class="status-summary">
+      <span class="status-count" id="s-total">— tenants</span>
+      <span class="status-count running" id="s-running" style="display:none"></span>
+      <span class="status-count degraded" id="s-degraded" style="display:none"></span>
+      <span class="status-count stopped" id="s-stopped" style="display:none"></span>
+      <span id="dokku-pill" class="dokku-pill">Dokku <span class="dokku-status">…</span></span>
+    </div>
+    <div class="panel-toolbar-right">
+      <input id="filter" type="search" placeholder="Filter tenants…" class="search-input" autocomplete="off">
+      <span id="pulse" class="live-dot" title="Live"></span>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th class="col-status"></th>
+          <th class="col-name">Tenant</th>
+          <th class="col-health">Health</th>
+          <th class="col-state">State</th>
+          <th class="col-version">Version</th>
+          <th class="col-apps">Apps</th>
+          <th class="col-actions">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="tenant-tbody">
+        <tr class="skel-row"><td colspan="7"><div class="skel-line"></div></td></tr>
+        <tr class="skel-row"><td colspan="7"><div class="skel-line"></div></td></tr>
+        <tr class="skel-row"><td colspan="7"><div class="skel-line"></div></td></tr>
+      </tbody>
+    </table>
+  </div>
 </div>
 
-<template id="card-tpl">
-  <a class="app-card group">
-    <div class="card-topline"></div>
-    <div class="card-head">
-      <div class="tenant-title">
-        <span class="js-ring status-orbit">
-          <span class="js-ping status-ping"></span>
-          <span class="js-dot status-dot"></span>
-        </span>
-        <div class="min-w-0">
-          <h3 class="js-name">tenant-name</h3>
-          <div class="js-domain endpoint">domain</div>
-        </div>
+<template id="row-tpl">
+  <tr class="tenant-row" data-name="">
+    <td class="col-status"><span class="status-indicator js-indicator"></span></td>
+    <td class="col-name">
+      <a class="tenant-link js-tenant-link" href="#">
+        <span class="js-name fw-medium"></span>
+        <span class="js-domain row-sub"></span>
+      </a>
+    </td>
+    <td class="col-health"><span class="badge js-health-badge"></span></td>
+    <td class="col-state"><span class="badge js-state-badge"></span></td>
+    <td class="col-version"><code class="js-version row-mono"></code></td>
+    <td class="col-apps"><span class="js-apps row-sub"></span></td>
+    <td class="col-actions">
+      <div class="row-actions">
+        <button class="btn-action js-restart" data-act="restart">↺ Restart</button>
+        <button class="btn-action warn js-stop"  data-act="stop">⏹ Stop</button>
+        <button class="btn-action good js-start" data-act="start">▶ Start</button>
+        <a class="btn-action js-open" href="#" target="_blank" rel="noopener" style="display:none">↗ Open</a>
       </div>
-      <div class="badge-stack">
-        <span class="js-health status-badge">health</span>
-        <span class="js-sync status-badge">sync</span>
-      </div>
-    </div>
-    <div class="state-matrix">
-      <div><span>Live</span><b class="js-live">.</b></div>
-      <div><span>Desired</span><b class="js-desired">.</b></div>
-      <div><span>Backend</span><b class="js-backend">.</b></div>
-      <div><span>Frontend</span><b class="js-frontend">.</b></div>
-    </div>
-    <div class="resource-line">
-      <span class="js-state state-chip">state</span>
-      <span class="js-version truncate">.</span>
-      <span class="js-apps truncate">.</span>
-    </div>
-    <div class="card-actions">
-      <button data-act="restart" class="act action-chip">restart</button>
-      <button data-act="stop" class="act action-chip warn">stop</button>
-      <button data-act="start" class="act action-chip good">start</button>
-      <span class="drill-in">open</span>
-    </div>
-  </a>
+    </td>
+  </tr>
 </template>
 {{end}}
 

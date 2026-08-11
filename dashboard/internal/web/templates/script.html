@@ -1,93 +1,97 @@
 {{define "content"}}
 {{with .Script}}
-<a href="/scripts" class="back-link">back to commands</a>
-<div class="detail-head">
-  <div>
-    <div class="eyebrow">{{.Group}}</div>
-    <h1>{{.Title}}</h1>
-    <p>{{.Summary}}</p>
-    <code>scripts/deployctl.sh {{.ControlCommand}}</code>
+<div class="breadcrumb"><a href="/scripts">Commands</a> <span class="bc-sep">›</span> <span>{{.Title}}</span></div>
+
+<div class="page-header">
+  <div class="page-header-left">
+    <h1 class="page-title">{{.Title}}</h1>
+    <span class="page-subtitle">{{.Summary}}</span>
   </div>
-  {{if .Danger}}<span class="danger-pill">danger</span>{{end}}
+  {{if .Danger}}<span class="badge badge-danger badge-lg">danger</span>{{end}}
 </div>
 
+<code class="cmd-hint">scripts/deployctl.sh {{.ControlCommand}}</code>
+
 {{if not $.RunnerConfigured}}
-<div class="mt-4 p-3 rounded-lg ring-1 ring-amber-500/30 bg-amber-500/5 text-amber-300 text-xs">
-  <code>SCRIPTS_HOST_PATH</code> is not set on the dashboard. Scripts can be staged from this form,
-  but execution will fail until the deployment scripts directory is mounted on the host (see
-  <code>docker-compose.dev.yml</code> / <code>docker-compose.prod.yml</code>).
+<div class="alert alert-warn" style="margin-top:1rem">
+  <code>SCRIPTS_HOST_PATH</code> is not set. Scripts can be staged but will not execute until the deployment directory is mounted.
 </div>
 {{end}}
 
-<form id="run-form" class="command-form" autocomplete="on">
-  {{range .Fields}}
-  {{if eq .Type "hidden"}}
-    <input type="hidden" name="{{.Name}}" value="{{.Default}}">
-  {{else}}
-  <label class="block">
-    <div class="flex items-baseline justify-between">
-      <span class="text-xs uppercase tracking-widest text-zinc-400">
-        {{.Label}}{{if .Required}} <span class="text-rose-400">*</span>{{end}}
-      </span>
-      {{if .Flag}}<code class="text-[10px] text-zinc-600">{{.Flag}}</code>{{end}}
-    </div>
-    {{if eq .Type "checkbox"}}
-      <label class="mt-1 inline-flex items-center gap-2 text-sm">
-        <input type="checkbox" name="{{.Name}}" value="1" class="accent-emerald-500"> Enabled
-      </label>
-    {{else if eq .Type "select"}}
-      {{$default := .Default}}
-      <select name="{{.Name}}" class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 outline-none focus:border-emerald-500">
-        {{if not .Required}}<option value=""></option>{{end}}
-        {{range .Options}}<option value="{{.}}" {{if eq . $default}}selected{{end}}>{{.}}</option>{{end}}
-      </select>
-      {{if eq .Name "image_version"}}
-      <div class="version-hint" data-version-hint hidden>
-        <div class="version-hint-top">
-          <span data-version-title></span>
-          <span data-version-status></span>
-        </div>
-        <p data-version-notes></p>
-        <a href="/releases">Open release notes</a>
-      </div>
-      {{end}}
-    {{else if eq .Type "kv"}}
-      <textarea name="{{.Name}}" rows="3"
-        placeholder="KEY=value&#10;OTHER=value"
-        class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-sm outline-none focus:border-emerald-500"></textarea>
-    {{else if eq .Type "password"}}
-      <input type="password" name="{{.Name}}" placeholder="{{.Placeholder}}"
-        autocomplete="new-password"
-        {{if .Required}}required{{end}}
-        class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-sm outline-none focus:border-emerald-500">
+<div class="panel" style="max-width:52rem">
+  <div class="panel-title">Parameters</div>
+  <form id="run-form" class="script-form" autocomplete="on">
+    {{range .Fields}}
+    {{if eq .Type "hidden"}}
+      <input type="hidden" name="{{.Name}}" value="{{.Default}}">
     {{else}}
-      <input type="text" name="{{.Name}}" placeholder="{{.Placeholder}}"
-        value="{{.Default}}"
-        autocomplete="on"
-        {{if .Suggest}}list="dl-{{.Name}}"{{end}}
-        {{if .Required}}required{{end}}
-        class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-sm outline-none focus:border-emerald-500">
-      {{if .Suggest}}
-      <datalist id="dl-{{.Name}}">
-        {{range .Suggest}}<option value="{{.}}">{{end}}
-      </datalist>
+    <div class="field-row">
+      <label class="field-label">
+        {{.Label}}{{if .Required}} <span class="req">*</span>{{end}}
+        {{if .Flag}}<code class="field-flag">{{.Flag}}</code>{{end}}
+      </label>
+      {{if eq .Type "checkbox"}}
+        <label class="checkbox-label">
+          <input type="checkbox" name="{{.Name}}" value="1"> Enabled
+        </label>
+      {{else if eq .Type "select"}}
+        {{$default := .Default}}
+        <select name="{{.Name}}" class="form-select">
+          {{if not .Required}}<option value=""></option>{{end}}
+          {{range .Options}}<option value="{{.}}" {{if eq . $default}}selected{{end}}>{{.}}</option>{{end}}
+        </select>
+        {{if eq .Name "image_version"}}
+        <div class="version-hint" data-version-hint hidden>
+          <div class="vh-row">
+            <span data-version-title class="vh-tag"></span>
+            <span data-version-status></span>
+          </div>
+          <p data-version-notes class="vh-notes"></p>
+          <a href="/releases" class="vh-link">Open release notes</a>
+        </div>
+        {{end}}
+      {{else if eq .Type "kv"}}
+        <textarea name="{{.Name}}" rows="3" placeholder="KEY=value&#10;OTHER=value" class="form-textarea"></textarea>
+      {{else if eq .Type "password"}}
+        <input type="password" name="{{.Name}}" placeholder="{{.Placeholder}}"
+          autocomplete="new-password" {{if .Required}}required{{end}} class="form-input">
+      {{else}}
+        {{if eq .Name "image_version"}}
+        <div style="position:relative">
+          <input type="text" name="{{.Name}}" placeholder="{{.Placeholder}}"
+            value="{{.Default}}" autocomplete="off"
+            id="input-{{.Name}}" data-tag-search
+            {{if .Required}}required{{end}} class="form-input">
+          <datalist id="dl-{{.Name}}">
+            {{range .Suggest}}<option value="{{.}}">{{end}}
+          </datalist>
+        </div>
+        {{else}}
+        <input type="text" name="{{.Name}}" placeholder="{{.Placeholder}}"
+          value="{{.Default}}" autocomplete="off"
+          list="dl-{{.Name}}"
+          {{if .Required}}required{{end}} class="form-input">
+        <datalist id="dl-{{.Name}}">
+          {{range .Suggest}}<option value="{{.}}">{{end}}
+        </datalist>
+        {{end}}
       {{end}}
+      {{if .Help}}<p class="field-help">{{.Help}}</p>{{end}}
+    </div>
     {{end}}
-    {{if .Help}}<p class="mt-1 text-[11px] text-zinc-500">{{.Help}}</p>{{end}}
-  </label>
-  {{end}}
-  {{end}}
-  <div class="form-actions">
-    <button class="command-link">Run</button>
-    <button type="button" id="clear-out" class="command-link secondary">Clear</button>
-    {{if .Danger}}<span class="text-xs text-rose-300 ml-2">Confirmation will be requested.</span>{{end}}
-  </div>
-</form>
+    {{end}}
+    <div class="form-footer">
+      <button class="btn btn-primary">▶ Run</button>
+      <button type="button" id="clear-out" class="btn btn-secondary">Clear output</button>
+      {{if .Danger}}<span class="danger-note">Confirmation will be requested before execution.</span>{{end}}
+    </div>
+  </form>
+</div>
 
-<section class="output-panel">
-  <h2>Output</h2>
-  <div id="out" class="terminal-output"></div>
-</section>
+<div class="panel">
+  <div class="panel-title">Output</div>
+  <div id="out" class="terminal"></div>
+</div>
 
 <script>
 (function () {
@@ -99,35 +103,22 @@
   const STORE_KEY = 'script-form:' + slug;
   const releases = {{json $.Releases}};
 
-  // ---- Auto-fill from last successful submission (localStorage) ----
-  // Restores previously entered text/select/textarea values per script.
-  // Password inputs are intentionally excluded for security.
   function restoreSaved() {
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch (_) {}
     for (const el of form.elements) {
-      if (!el.name) continue;
-      if (el.type === 'password' || el.type === 'hidden') continue;
+      if (!el.name || el.type === 'password' || el.type === 'hidden') continue;
       if (!(el.name in saved)) continue;
-      if (el.type === 'checkbox') {
-        el.checked = !!saved[el.name];
-      } else if (el.value === '' || el.value === el.defaultValue) {
-        // Don't clobber server-provided defaults that the user hasn't touched.
-        el.value = saved[el.name];
-      }
+      if (el.type === 'checkbox') el.checked = !!saved[el.name];
+      else if (el.value === '' || el.value === el.defaultValue) el.value = saved[el.name];
     }
   }
 
   function persistOnSubmit() {
     const data = {};
     for (const el of form.elements) {
-      if (!el.name) continue;
-      if (el.type === 'password' || el.type === 'hidden') continue;
-      if (el.type === 'checkbox') {
-        data[el.name] = el.checked;
-      } else {
-        data[el.name] = el.value;
-      }
+      if (!el.name || el.type === 'password' || el.type === 'hidden') continue;
+      data[el.name] = el.type === 'checkbox' ? el.checked : el.value;
     }
     try { localStorage.setItem(STORE_KEY, JSON.stringify(data)); } catch (_) {}
   }
@@ -136,67 +127,65 @@
 
   function applyQueryPrefill() {
     const params = new URLSearchParams(window.location.search);
-    const aliases = new Map([
-      ['tenant', ['_pos_name', 'tenant', 'name']],
-    ]);
+    const aliases = new Map([['tenant', ['_pos_name', 'tenant', 'name']]]);
     params.forEach((value, key) => {
-      const names = aliases.get(key) || [key];
-      for (const name of names) {
+      for (const name of (aliases.get(key) || [key])) {
         const el = form.elements[name];
         if (!el || el.type === 'hidden') continue;
-        if (el.type === 'checkbox') {
-          el.checked = value === '1' || value === 'true' || value === 'on';
-        } else {
-          el.value = value;
-        }
+        if (el.type === 'checkbox') el.checked = value === '1' || value === 'true';
+        else el.value = value;
       }
     });
   }
-
   applyQueryPrefill();
+
+  // Populate image_version datalist from Docker Hub live tags
+  const imgDl = document.getElementById('dl-image_version');
+  if (imgDl) {
+    fetch('/api/image-tags')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data?.tags?.length) return;
+        imgDl.innerHTML = '';
+        data.tags.forEach(t => {
+          const o = document.createElement('option');
+          o.value = t;
+          imgDl.appendChild(o);
+        });
+      })
+      .catch(() => {});
+  }
 
   function selectedRelease() {
     const select = form.elements.image_version;
     if (!select || !select.value) return null;
-    return releases.find((release) => release.Tag === select.value) || null;
+    return releases.find(r => r.Tag === select.value) || null;
   }
 
   function renderVersionHint() {
     const hint = document.querySelector('[data-version-hint]');
     if (!hint) return;
     const release = selectedRelease();
-    if (!release) {
-      hint.hidden = true;
-      return;
-    }
-    const status = release.Broken ? 'broken' : (release.Status || 'ready');
+    if (!release) { hint.hidden = true; return; }
     hint.hidden = false;
     hint.classList.toggle('broken', !!release.Broken);
-    hint.querySelector('[data-version-title]').textContent = release.Tag + (release.Title && release.Title !== release.Tag ? ' - ' + release.Title : '');
+    hint.querySelector('[data-version-title]').textContent = release.Tag + (release.Title && release.Title !== release.Tag ? ' — ' + release.Title : '');
     const statusEl = hint.querySelector('[data-version-status]');
-    statusEl.textContent = status;
-    statusEl.className = release.Broken ? 'release-pill broken' : 'release-pill ok';
-    const notes = (release.Notes || []).slice(0, 2).join(' ');
-    hint.querySelector('[data-version-notes]').textContent = notes || 'No release notes recorded for this version.';
+    statusEl.textContent = release.Broken ? 'broken' : (release.Status || 'ready');
+    statusEl.className = 'badge ' + (release.Broken ? 'badge-danger' : 'badge-success');
+    hint.querySelector('[data-version-notes]').textContent = (release.Notes || []).slice(0, 2).join(' ') || 'No release notes for this version.';
   }
 
   form.elements.image_version?.addEventListener('change', renderVersionHint);
   renderVersionHint();
 
   function escapeHtml(s) {
-    return s
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;')
-      .replaceAll('"', '&quot;')
-      .replaceAll("'", '&#39;');
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
   function linkifyLine(s) {
-    const esc = escapeHtml(s);
-    return esc.replace(/(https?:\/\/[^\s<>"]+)/g, (u) => {
-      return '<a href="' + u + '" target="_blank" rel="noopener" class="text-sky-400 hover:text-sky-300 underline">' + u + '</a>';
-    });
+    return escapeHtml(s).replace(/(https?:\/\/[^\s<>"]+)/g, u =>
+      `<a href="${u}" target="_blank" rel="noopener" class="log-link">${u}</a>`);
   }
 
   function appendLine(line) {
@@ -207,20 +196,16 @@
     ev.preventDefault();
     if (danger && !confirm('This script may modify or delete data. Continue?')) return;
     const release = selectedRelease();
-    if (release && release.Broken && !confirm('Selected version ' + release.Tag + ' is marked broken. Continue?')) return;
+    if (release?.Broken && !confirm('Version ' + release.Tag + ' is marked broken. Continue?')) return;
     persistOnSubmit();
     const fd = new FormData(form);
     appendLine('');
     appendLine('--- run ' + new Date().toISOString() + ' ---');
     const res = await fetch('/scripts/{{.Slug}}/run', { method: 'POST', body: new URLSearchParams(fd) });
-    if (!res.ok) {
-      appendLine('✖ ' + res.status + ' ' + (await res.text()));
-      return;
-    }
+    if (!res.ok) { appendLine('✖ ' + res.status + ' ' + await res.text()); return; }
     const reader = res.body.getReader();
     const dec = new TextDecoder();
-    let buf = '';
-    let linePrefix = '';
+    let buf = '', linePrefix = '';
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -230,14 +215,9 @@
         const block = buf.slice(0, idx);
         buf = buf.slice(idx + 2);
         for (const ln of block.split('\n')) {
-          if (ln.startsWith('data: ')) {
-            appendLine(linePrefix + ln.slice(6));
-            linePrefix = '';
-          } else if (ln.startsWith('event: error')) {
-            linePrefix = '✖ ';
-          } else if (ln.startsWith('event: done')) {
-            appendLine('');
-          }
+          if (ln.startsWith('data: ')) { appendLine(linePrefix + ln.slice(6)); linePrefix = ''; }
+          else if (ln.startsWith('event: error')) linePrefix = '✖ ';
+          else if (ln.startsWith('event: done')) appendLine('');
         }
         out.scrollTop = out.scrollHeight;
       }

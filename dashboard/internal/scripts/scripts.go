@@ -91,18 +91,16 @@ func VersionOptions() []string {
 }
 
 func DefaultImageVersion() string {
-	versions := versionOptions()
+	// Explicit override always wins.
 	if v := strings.TrimSpace(os.Getenv("APP_IMAGE_VERSION_DEFAULT")); v != "" {
-		for _, candidate := range versions {
-			if candidate == v {
-				return v
-			}
-		}
+		return v
 	}
-	if len(versions) == 0 {
-		return "v0.0.1"
+	versions := versionOptions()
+	if len(versions) > 0 {
+		return versions[0]
 	}
-	return versions[0]
+	// No semver catalog configured — default to the rolling dev image.
+	return "dev"
 }
 
 func ResolveImageVersion(tag string) (ImageVersion, bool) {
@@ -119,18 +117,16 @@ func ResolveImageVersion(tag string) (ImageVersion, bool) {
 }
 
 func imageVersionField(required bool) Field {
-	f := Field{
-		Name:     "image_version",
-		Label:    "Version tag",
-		Type:     "select",
-		Required: required,
-		Options:  VersionOptions(),
-		Help:     "Deploys BACKEND_IMAGE:<tag> and FRONTEND_IMAGE:<tag>. Release notes show status and broken builds.",
+	return Field{
+		Name:        "image_version",
+		Label:       "Image tag",
+		Type:        "text",
+		Required:    required,
+		Placeholder: "e.g. dev, v1.2.3, or feature-my-branch",
+		Suggest:     []string{}, // populated client-side from /api/image-tags via datalist
+		Default:     DefaultImageVersion(),
+		Help:        "Tag applied to both BACKEND_IMAGE and FRONTEND_IMAGE. Type to search available tags from Docker Hub.",
 	}
-	if required {
-		f.Default = DefaultImageVersion()
-	}
-	return f
 }
 
 func imageRepo(envKey, suffix, fallback string) string {
@@ -141,6 +137,14 @@ func imageRepo(envKey, suffix, fallback string) string {
 		return user + "/" + suffix
 	}
 	return fallback
+}
+
+// BackendRepo returns the backend image repository name (no tag).
+func BackendRepo() string { return imageRepo("BACKEND_IMAGE", "ifritah-api", "ssdawweq/ifritah-api") }
+
+// FrontendRepo returns the frontend image repository name (no tag).
+func FrontendRepo() string {
+	return imageRepo("FRONTEND_IMAGE", "ifritah-web", "ssdawweq/ifritah-web")
 }
 
 func trimImageTag(image string) string {
@@ -194,6 +198,10 @@ func (s Script) ControlCommand() string {
 		return "tenant update"
 	case "backup-tenant":
 		return "tenant backup"
+	case "manage-backups":
+		return "tenant backups"
+	case "restore-tenant":
+		return "tenant restore"
 	case "tail-logs":
 		return "tenant logs"
 	case "verify-mysql":
@@ -252,14 +260,14 @@ func Catalog() []Script {
 				{Name: "admin_user", Label: "Admin username", Flag: "--env", Type: "text", Required: true, Placeholder: "admin",
 					Default: "admin", Suggest: []string{"admin"}},
 				{Name: "admin_password", Label: "Admin password", Flag: "--env", Type: "password", Required: true, Secret: true,
-					Placeholder: "Strong password for the admin user",
-					Help:        "Sent as ADMIN_PASSWORD to the backend; used to seed the initial admin account."},
+					Placeholder: "Strong password for the admin user (min 8 characters)",
+					Help:        "Minimum 8 characters required by the backend. Sent as ADMIN_PASSWORD to seed the initial admin account."},
 				{Name: "manager_user", Label: "Manager username", Flag: "--env", Type: "text", Placeholder: "manager",
 					Suggest: []string{"manager"},
 					Help:    "Optional. Leave blank to skip seeding a manager account."},
 				{Name: "manager_password", Label: "Manager password", Flag: "--env", Type: "password", Secret: true,
-					Placeholder: "Strong password for the manager user",
-					Help:        "Optional. Sent as MANAGER_PASSWORD to the backend; required if a Manager username is provided."},
+					Placeholder: "Strong password for the manager user (min 8 characters)",
+					Help:        "Optional. Minimum 8 characters. Sent as MANAGER_PASSWORD."},
 				{Name: "company_name", Label: "Company name", Flag: "--env", Type: "text", Required: true, Placeholder: "ACME Corp"},
 				imageVersionField(true),
 				{Name: "backend_image", Flag: "--backend-image", Type: "hidden"},
@@ -268,9 +276,10 @@ func Catalog() []Script {
 				// from the UI; defaults match the upstream images.
 				{Name: "backend_port", Flag: "--backend-port", Type: "hidden", Default: "8090"},
 				{Name: "frontend_port", Flag: "--frontend-port", Type: "hidden", Default: "8000"},
+				{Name: "update", Label: "Update existing tenant", Flag: "--update", Type: "checkbox", Boolean: true,
+					Help: "Check this if the tenant already exists and you want to re-deploy or re-seed it. Safe to use after a partial failure."},
 				{Name: "no_database", Label: "Skip database", Flag: "--no-database", Type: "checkbox", Boolean: true,
 					Help: "Only use this if the backend can boot without a DB, or if you provide DATABASE_URL/DB_* in Env vars."},
-				{Name: "git_only", Label: "Git-only (no deploy)", Flag: "--git-only", Type: "checkbox", Boolean: true},
 				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
 				{Name: "envs", Label: "Env vars", Flag: "--env", Type: "kv",
 					Help: "One KEY=VALUE per line; each becomes a separate --env flag. Use this for DATABASE_URL or DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD when not provisioning MySQL from this script."},
@@ -373,6 +382,45 @@ func Catalog() []Script {
 			Fields: []Field{
 				{Name: "_pos_name", Label: "Tenant (or leave blank with --all)", Type: "text"},
 				{Name: "all", Label: "All tenants", Flag: "--all", Type: "checkbox", Boolean: true},
+				{Name: "origin", Label: "Origin", Flag: "--origin", Type: "select", Options: []string{"user", "auto"}, Default: "user",
+					Help: "user backups are protected from the retention policy; auto backups are pruned by policy."},
+				{Name: "owner", Label: "Owner", Flag: "--owner", Type: "text", Placeholder: "admin",
+					Help: "Owner tag recorded in the backup manifest (used for delete ownership checks)."},
+				{Name: "retention_days", Label: "Retention days", Flag: "--retention-days", Type: "text", Placeholder: "30"},
+			},
+		},
+		{
+			Name: "manage-backups.sh", Title: "Manage backups",
+			Summary: "List, verify, delete, and prune tenant backups. User backups are protected from policy prune.",
+			Fields: []Field{
+				{Name: "_pos_action", Label: "Action", Type: "select", Required: true,
+					Options: []string{"list", "verify", "delete", "prune"}, Default: "list"},
+				{Name: "_pos_id", Label: "Backup ID", Type: "text",
+					Placeholder: "acme_20250101_120000",
+					Help:        "Required for verify/delete. Leave blank for list/prune."},
+				{Name: "json", Label: "JSON output", Flag: "--json", Type: "checkbox", Boolean: true},
+				{Name: "owner", Label: "Owner", Flag: "--owner", Type: "text",
+					Help: "For delete: must match a user backup's owner. For list: filter by owner."},
+				{Name: "force", Label: "Force (operator override)", Flag: "--force", Type: "checkbox", Boolean: true,
+					Help: "Delete a user backup regardless of owner. Use with care."},
+				{Name: "retention_days", Label: "Retention days (prune)", Flag: "--retention-days", Type: "text", Placeholder: "30"},
+				{Name: "dry_run", Label: "Dry run (prune)", Flag: "--dry-run", Type: "checkbox", Boolean: true},
+			},
+		},
+		{
+			Name: "restore-tenant.sh", Title: "Restore / rollback",
+			Summary: "Restore a tenant's files and/or database from any backup. Takes a verified safety backup first.",
+			Danger:  true,
+			Fields: []Field{
+				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true, Placeholder: "acme"},
+				{Name: "from", Label: "Backup ID", Flag: "--from", Type: "text", Required: true,
+					Placeholder: "acme_20250101_120000",
+					Help:        "The backup set to restore (see Manage backups → list)."},
+				{Name: "files_only", Label: "Files only", Flag: "--files-only", Type: "checkbox", Boolean: true},
+				{Name: "db_only", Label: "Database only", Flag: "--db-only", Type: "checkbox", Boolean: true},
+				{Name: "no_safety_backup", Label: "Skip safety backup", Flag: "--no-safety-backup", Type: "checkbox", Boolean: true,
+					Help: "NOT recommended. By default a verified backup of the current state is taken before restoring."},
+				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
 			},
 		},
 		{
@@ -446,6 +494,7 @@ type Runner struct {
 	runnerImage     string // e.g. "mysql:8.0" — has bash, curl, mysql client
 	scriptsHostPath string // host path to /opt/deployment (mounted into runner)
 	configFile      string // optional --config path inside runner
+	backupDir       string // host path to backup dir (mounted rw so scripts can write)
 }
 
 // NewRunner builds a runner. scriptsHostPath is the path on the docker
@@ -460,6 +509,12 @@ func NewRunner(dockerBin, runnerImage, scriptsHostPath, configFile string) *Runn
 		scriptsHostPath: scriptsHostPath,
 		configFile:      configFile,
 	}
+}
+
+// SetBackupDir configures the host path for tenant backups.
+// The directory will be mounted into runner containers so scripts can write backup files.
+func (r *Runner) SetBackupDir(dir string) {
+	r.backupDir = dir
 }
 
 // safeArg only allows characters that cannot escape an argv slot. We split on
@@ -501,14 +556,30 @@ func (r *Runner) Run(ctx context.Context, w io.Writer, scriptName string, argv [
 		argv = append(argv, "--config", r.configFile)
 	}
 
+	// Docker socket path: Linux/macOS use a Unix socket; Windows Docker Desktop
+	// exposes a named pipe. We detect by checking for the pipe path first.
+	dockerSocket := "/var/run/docker.sock:/var/run/docker.sock"
+	if _, err := os.Stat(`\\.\pipe\dockerDesktopLinuxEngine`); err == nil {
+		dockerSocket = `//./pipe/dockerDesktopLinuxEngine://./pipe/dockerDesktopLinuxEngine`
+	} else if _, err := os.Stat(`\\.\pipe\docker_engine`); err == nil {
+		dockerSocket = `//./pipe/docker_engine://./pipe/docker_engine`
+	}
+
 	full := []string{
 		"run", "--rm", "-i",
 		"-e", "MYSQL_CLIENT_MODE=docker",
 		"-e", "TENANT_NAME_PREFIX=" + os.Getenv("TENANT_NAME_PREFIX"),
 		"-e", "TENANT_NAME_PREFIX_OVERRIDE=" + os.Getenv("TENANT_NAME_PREFIX"),
-		"-v", "/var/run/docker.sock:/var/run/docker.sock",
+		"-v", dockerSocket,
 		"-v", r.scriptsHostPath + ":/opt/deployment:ro",
 		"--network", "host",
+	}
+	// Mount the backup dir so backup scripts can write to the host filesystem
+	if r.backupDir != "" {
+		full = append(full, "-v", r.backupDir+":"+r.backupDir)
+		full = append(full, "-e", "BACKUP_DIR="+r.backupDir)
+	}
+	full = append(full,
 		img,
 		// CRLF tolerance: scripts authored on Windows have \r line endings
 		// which break bash. Stage to a writable dir, strip CRLF, then exec.
@@ -524,7 +595,7 @@ NAME="$1"; shift
 exec bash "scripts/deployctl.sh" "script" "$NAME" "$@"
 `,
 		"--", scriptName,
-	}
+	)
 	full = append(full, argv...)
 
 	cmd := exec.CommandContext(ctx, r.dockerBin, full...)

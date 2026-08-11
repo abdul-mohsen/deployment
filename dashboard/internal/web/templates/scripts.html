@@ -1,26 +1,25 @@
 {{define "content"}}
-<section class="ops-hero compact">
-  <div>
-    <div class="eyebrow">commands</div>
-    <h1>Deployment Command Center</h1>
-    <p>Every action maps to <code>scripts/deployctl.sh</code>.</p>
+<div class="page-header">
+  <div class="page-header-left">
+    <h1 class="page-title">Deployment Commands</h1>
+    <span class="page-subtitle">Every action maps to <code>scripts/deployctl.sh</code></span>
   </div>
-  <div class="hero-actions">
-    <a href="/releases" class="command-link secondary">Release notes</a>
-    <a href="/scripts/status" class="command-link">Run status</a>
+  <div class="page-header-right">
+    <a href="/releases" class="btn btn-secondary">Releases</a>
+    <a href="/scripts/status" class="btn btn-primary">Run status</a>
   </div>
-</section>
+</div>
 
 <div class="command-grid">
   {{range .Scripts}}
-  <a href="/scripts/{{.Slug}}" class="command-card group">
-    <div class="command-head">
-      <span class="command-group">{{.Group}}</span>
-      {{if .Danger}}<span class="danger-pill">danger</span>{{end}}
+  <a href="/scripts/{{.Slug}}" class="command-card">
+    <div class="cc-top">
+      <span class="cc-group">{{.Group}}</span>
+      {{if .Danger}}<span class="cc-danger">danger</span>{{end}}
     </div>
-    <h3>{{.Title}}</h3>
-    <p>{{.Summary}}</p>
-    <code>deployctl {{.ControlCommand}}</code>
+    <div class="cc-title">{{.Title}}</div>
+    <div class="cc-desc">{{.Summary}}</div>
+    <code class="cc-cmd">deployctl {{.ControlCommand}}</code>
   </a>
   {{end}}
 </div>

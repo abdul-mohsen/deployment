@@ -148,15 +148,11 @@ run_mysqldump() {
 # stopped, try to (re)create / start it via setup-dokku.sh, sourcing
 # install.env / config.env first so DOKKU_PORT and DOKKU_HOSTNAME come from
 # the operator's configuration. On failure, dump the last 200 lines of
-# `docker logs dokku` so the caller doesn't have to dig for the reason.
+# `docker logs <dokku-container>` so the caller doesn't have to dig for the reason.
 #
 # Idempotent and cheap: a running container short-circuits in O(1).
 ensure_dokku_running() {
     [ -n "${_DOKKU_ENSURED:-}" ] && return 0
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'dokku'; then
-        export _DOKKU_ENSURED=1
-        return 0
-    fi
 
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -173,21 +169,30 @@ ensure_dokku_running() {
         fi
     done
 
-    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'dokku'; then
+    # DOKKU_CONTAINER can be set in config.env (e.g. "dokku-test-local") or
+    # defaults to "dokku" for production installs.
+    local _dc="${DOKKU_CONTAINER:-dokku}"
+
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${_dc}"; then
+        export _DOKKU_ENSURED=1
+        return 0
+    fi
+
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${_dc}"; then
         echo "[+] dokku container exists but is not running — starting it..." >&2
-        if docker start dokku >/dev/null 2>&1; then
+        if docker start "${_dc}" >/dev/null 2>&1; then
             export _DOKKU_ENSURED=1
             return 0
         fi
         echo "[✗] Failed to start existing dokku container. Last 200 log lines:" >&2
-        docker logs --tail 200 dokku 2>&1 | sed 's/^/    /' >&2
+        docker logs --tail 200 "${_dc}" 2>&1 | sed 's/^/    /' >&2
         return 1
     fi
 
     echo "[+] dokku container not found — bootstrapping via setup-dokku.sh" >&2
     if ! bash "$script_dir/setup-dokku.sh" >&2; then
         echo "[✗] setup-dokku.sh failed. Last 200 log lines from dokku container (if any):" >&2
-        docker logs --tail 200 dokku 2>&1 | sed 's/^/    /' >&2 || true
+        docker logs --tail 200 "${_dc}" 2>&1 | sed 's/^/    /' >&2 || true
         return 1
     fi
     export _DOKKU_ENSURED=1
@@ -198,7 +203,7 @@ ensure_dokku_running() {
 dokku_shell() {
     ensure_dokku_running || return 1
     _dokku_fix_hostname
-    docker exec -i dokku bash -c "$*"
+    docker exec -i "${DOKKU_CONTAINER:-dokku}" bash -c "$*"
 }
 
 # Wrapper for the `dokku` CLI. Dokku always runs as a Docker container in this
@@ -210,7 +215,7 @@ dokku_shell() {
 dokku() {
     ensure_dokku_running || return 1
     _dokku_fix_hostname
-    docker exec -i dokku dokku "$@"
+    docker exec -i "${DOKKU_CONTAINER:-dokku}" dokku "$@"
 }
 
 # Deploy an app from a Docker image. Dokku's git:from-image returns non-zero
@@ -239,12 +244,13 @@ dokku_git_from_image() {
 # shell, and only if the entry is actually missing inside the container.
 _dokku_fix_hostname() {
     [ -n "${_DOKKU_HOSTS_FIXED:-}" ] && return 0
-    docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^dokku$' || return 0
+    local _dc="${DOKKU_CONTAINER:-dokku}"
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "${_dc}" || return 0
     local h
-    h=$(docker exec dokku hostname 2>/dev/null) || return 0
+    h=$(docker exec "${_dc}" hostname 2>/dev/null) || return 0
     [ -n "$h" ] || return 0
-    if ! docker exec dokku grep -q "[[:space:]]${h}\$" /etc/hosts 2>/dev/null; then
-        docker exec -u root dokku sh -c "echo '127.0.1.1 ${h}' >> /etc/hosts" 2>/dev/null || true
+    if ! docker exec "${_dc}" grep -q "[[:space:]]${h}\$" /etc/hosts 2>/dev/null; then
+        docker exec -u root "${_dc}" sh -c "echo '127.0.1.1 ${h}' >> /etc/hosts" 2>/dev/null || true
     fi
     export _DOKKU_HOSTS_FIXED=1
 }
@@ -316,4 +322,70 @@ get_remote_digest() {
         -H "Accept: application/vnd.oci.image.index.v1+json" \
         -I "https://registry-1.docker.io/v2/${repo}/manifests/${tag}" 2>/dev/null | \
         grep -i "docker-content-digest" | awk '{print $2}' | tr -d '\r'
+}
+
+# =============================================================================
+# Backup metadata helpers
+# =============================================================================
+# A backup "set" is one timestamped run for a tenant. It is described by a
+# sidecar manifest file named "<tenant>_<timestamp>.meta.json" living next to
+# the .tar.gz / .sql.gz artifacts in BACKUP_DIR. The manifest lets the backup
+# tooling distinguish user-created backups (protected from policy deletion)
+# from automatic backups (retained/deleted by the retention policy), and
+# records whether the artifacts passed integrity verification.
+
+# backup_id <tenant> <timestamp> -> the stable id for a backup set.
+backup_id() { printf '%s_%s' "$1" "$2"; }
+
+# json_escape <string> -> minimally escaped JSON string body (no quotes).
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s"
+}
+
+# Read a scalar string field from a backup manifest file. Best-effort JSON
+# scraping that avoids a jq dependency (the runner image may not ship jq).
+#   backup_meta_field <meta-file> <field>
+backup_meta_field() {
+    local file="$1" field="$2"
+    [ -f "$file" ] || return 1
+    sed -n "s/.*\"${field}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$file" | head -n1
+}
+
+# Verify a gzip artifact's integrity. Works for both .tar.gz (verifies the
+# tar stream too) and .sql.gz. Returns non-zero on any corruption/empty file.
+verify_gzip_artifact() {
+    local file="$1"
+    [ -f "$file" ] || return 1
+    [ -s "$file" ] || return 1
+    gzip -t "$file" 2>/dev/null || return 1
+    case "$file" in
+        *.tar.gz) tar -tzf "$file" >/dev/null 2>&1 || return 1 ;;
+    esac
+    return 0
+}
+
+# Write a backup manifest. Positional args keep callers simple:
+#   write_backup_manifest <meta-file> <tenant> <timestamp> <origin> <owner> \
+#                         <files-artifact|-> <db-artifact|-> <verified:true|false>
+write_backup_manifest() {
+    local meta="$1" tenant="$2" ts="$3" origin="$4" owner="$5" files="$6" db="$7" verified="$8"
+    local files_base="" db_base=""
+    [ "$files" != "-" ] && [ -n "$files" ] && files_base="$(basename "$files")"
+    [ "$db" != "-" ] && [ -n "$db" ] && db_base="$(basename "$db")"
+    cat > "$meta" <<EOF
+{
+  "id": "$(json_escape "$(backup_id "$tenant" "$ts")")",
+  "tenant": "$(json_escape "$tenant")",
+  "timestamp": "$(json_escape "$ts")",
+  "origin": "$(json_escape "$origin")",
+  "owner": "$(json_escape "$owner")",
+  "files_artifact": "$(json_escape "$files_base")",
+  "db_artifact": "$(json_escape "$db_base")",
+  "verified": ${verified},
+  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
 }

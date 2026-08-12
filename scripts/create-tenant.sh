@@ -533,36 +533,16 @@ if ! $NO_DATABASE; then
         fi
 
         log "Creating MySQL database: $TENANT_DB_NAME (user: $TENANT_DB_USER@'$MYSQL_TENANT_HOST')"
-        # CREATE USER IF NOT EXISTS + ALTER USER ensures the password is always
-        # set correctly even if the user exists from a previous run.
-        # We also explicitly DROP any @'localhost' version of the user that may
-        # have been created by a direct shell run (where mysql client runs via
-        # unix socket and creates users as @'localhost' instead of @'%').
 
-        # ---- Dev-only diagnostic block (DASHBOARD_ENV=dev) ------------------
-        # Reveals the actual runtime-resolved values and the SQL that will be
-        # sent. Guarded so it never runs in prod.
+        # dev-only diag
         if [ "${DASHBOARD_ENV:-}" = "dev" ]; then
-            info "[dev-diag] MYSQL_CLIENT_MODE=${MYSQL_CLIENT_MODE:-<unset>}"
-            info "[dev-diag] _MYSQL_VIA=${_MYSQL_VIA:-<unset>}"
-            info "[dev-diag] MYSQL_HOST=${MYSQL_HOST:-<unset>}  MYSQL_PORT=${MYSQL_PORT:-<unset>}"
-            info "[dev-diag] MYSQL_ROOT_USER=${MYSQL_ROOT_USER:-<unset>}"
-            info "[dev-diag] MYSQL_TENANT_HOST='${MYSQL_TENANT_HOST}'  (default '%' unless overridden)"
-            info "[dev-diag] MYSQL_APP_HOST=${MYSQL_APP_HOST}"
-            info "[dev-diag] TENANT_DB_USER=${TENANT_DB_USER}"
-            info "[dev-diag] TENANT_DB_NAME=${TENANT_DB_NAME}"
-            info "[dev-diag] SQL heredoc (password redacted) about to be sent:"
-            info "[dev-diag]   CREATE DATABASE IF NOT EXISTS \`${TENANT_DB_NAME}\` ...;"
-            info "[dev-diag]   DROP USER IF EXISTS '${TENANT_DB_USER}'@'localhost';"
-            info "[dev-diag]   CREATE USER IF NOT EXISTS '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY '***';"
-            info "[dev-diag]   ALTER  USER              '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY '***';"
-            info "[dev-diag]   GRANT ALL PRIVILEGES ON \`${TENANT_DB_NAME}\`.* TO '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}';"
+            info "[dev-diag] MYSQL_CLIENT_MODE=${MYSQL_CLIENT_MODE:-<unset>} _MYSQL_VIA=${_MYSQL_VIA:-<unset>}"
+            info "[dev-diag] MYSQL_HOST=${MYSQL_HOST:-<unset>} MYSQL_PORT=${MYSQL_PORT:-<unset>} MYSQL_ROOT_USER=${MYSQL_ROOT_USER:-<unset>}"
+            info "[dev-diag] MYSQL_TENANT_HOST='${MYSQL_TENANT_HOST}' MYSQL_APP_HOST=${MYSQL_APP_HOST}"
+            info "[dev-diag] TENANT_DB_USER=${TENANT_DB_USER} TENANT_DB_NAME=${TENANT_DB_NAME}"
+            info "[dev-diag] SQL: DROP @'localhost'; CREATE/ALTER @'${MYSQL_TENANT_HOST}'; GRANT ON ${TENANT_DB_NAME}.*"
+            set +e
         fi
-        # ---------------------------------------------------------------------
-
-        # Temporarily disable `set -e` around the SQL block so we can log the
-        # exit code before the shell dies. Only when dev diagnostics on.
-        if [ "${DASHBOARD_ENV:-}" = "dev" ]; then set +e; fi
         run_mysql <<SQLEOF
 CREATE DATABASE IF NOT EXISTS \`${TENANT_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 DROP USER IF EXISTS '${TENANT_DB_USER}'@'localhost';
@@ -572,14 +552,12 @@ GRANT ALL PRIVILEGES ON \`${TENANT_DB_NAME}\`.* TO '${TENANT_DB_USER}'@'${MYSQL_
 SQLEOF
         _mysql_rc=$?
         if [ "${DASHBOARD_ENV:-}" = "dev" ]; then
-            info "[dev-diag] run_mysql exit code: ${_mysql_rc}"
-            info "[dev-diag] Post-create mysql.user rows for ${TENANT_DB_USER}:"
-            run_mysql -N -B -e "SELECT CONCAT(user,'@',host) FROM mysql.user WHERE user='${TENANT_DB_USER}';" 2>&1 \
-                | sed 's/^/[dev-diag]   /' || info "[dev-diag]   (SELECT failed with exit $?)"
+            info "[dev-diag] run_mysql exit=${_mysql_rc}; mysql.user rows for ${TENANT_DB_USER}:"
+            run_mysql -N -B -e "SELECT CONCAT(user,'@',host) FROM mysql.user WHERE user='${TENANT_DB_USER}';" 2>&1 | sed 's/^/[dev-diag]   /' || true
             set -e
         fi
         if [ "${_mysql_rc}" -ne 0 ]; then
-            error "MySQL tenant provisioning failed (exit ${_mysql_rc}). See [dev-diag] lines above (or set DASHBOARD_ENV=dev on the dashboard for detail)."
+            error "MySQL tenant provisioning failed (exit ${_mysql_rc})"
             exit "${_mysql_rc}"
         fi
 

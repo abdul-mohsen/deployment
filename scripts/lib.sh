@@ -116,8 +116,6 @@ tenant_from_app_name() {
 run_mysql() {
     local host
     host="$(_resolve_mysql_host)"
-    # Dev-only trace: show which invocation path we take and the resolved host,
-    # so mismatches between "host" and "docker" modes are visible in the log.
     if [ "${DASHBOARD_ENV:-}" = "dev" ]; then
         echo -e "${BLUE:-}[i]${NC:-} [dev-diag] run_mysql via=${_MYSQL_VIA} host=${host} port=${MYSQL_PORT:-3306} user=${MYSQL_ROOT_USER:-root} args=[$*]" >&2
     fi

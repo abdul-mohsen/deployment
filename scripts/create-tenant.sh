@@ -521,8 +521,16 @@ if ! $NO_DATABASE; then
     if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
         warn "MYSQL_ROOT_PASSWORD not set in config.env — skipping database creation."
     else
-        # Generate a random password for the tenant DB user
-        TENANT_DB_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)
+        # Generate a random password — but if the tenant backend already has a
+        # DB_PASSWORD in Dokku config (re-run scenario), reuse it so the running
+        # container does not get a mismatched credential.
+        TENANT_DB_PASS=""
+        if dokku apps:exists "$BACKEND_APP" 2>/dev/null; then
+            TENANT_DB_PASS="$(dokku config:get "$BACKEND_APP" DB_PASSWORD 2>/dev/null || true)"
+        fi
+        if [ -z "$TENANT_DB_PASS" ]; then
+            TENANT_DB_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)
+        fi
 
         log "Creating MySQL database: $TENANT_DB_NAME (user: $TENANT_DB_USER@'$MYSQL_TENANT_HOST')"
         # CREATE USER IF NOT EXISTS + ALTER USER ensures the password is always

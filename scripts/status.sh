@@ -234,8 +234,8 @@ render_once() {
         [ -n "$(tenant_name_prefix)" ] && printf "  Tenant prefix   : %s\n" "$(tenant_name_prefix)"
         printf "  Auto-pull cron  : %s\n" "$(cron_has_autopull)"
         printf "  Repo commit     : %s (%s)\n" \
-            "$(git -C "$SCRIPT_DIR/.." rev-parse --short HEAD 2>/dev/null || echo unknown)" \
-            "$(git -C "$SCRIPT_DIR/.." branch --show-current 2>/dev/null || echo unknown)"
+            "$(git -c safe.directory='*' -C "$SCRIPT_DIR/.." rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+            "$(git -c safe.directory='*' -C "$SCRIPT_DIR/.." branch --show-current 2>/dev/null || echo unknown)"
         echo ""
     fi
 

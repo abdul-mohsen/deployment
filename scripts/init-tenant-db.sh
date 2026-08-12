@@ -94,6 +94,16 @@ else
     exit 1
 fi
 
+# Also source install.env if present — it holds MYSQL_ROOT_PASSWORD and other
+# admin credentials that create-tenant.sh gets via lib.sh but this script
+# doesn't (it sources config.env only). Without this, run_mysql inherits an
+# empty password and gets 1045 access denied.
+INSTALL_ENV_FILE="$(dirname "$CONFIG_FILE")/install.env"
+if [ -f "$INSTALL_ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$INSTALL_ENV_FILE"
+fi
+
 TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
 
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"

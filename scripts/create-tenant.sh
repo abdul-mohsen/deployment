@@ -533,11 +533,16 @@ if ! $NO_DATABASE; then
         fi
 
         log "Creating MySQL database: $TENANT_DB_NAME (user: $TENANT_DB_USER@'$MYSQL_TENANT_HOST')"
-        # CREATE USER IF NOT EXISTS + ALTER USER ensures the password is always
-        # set correctly even if the user exists from a previous run.
-        # We also explicitly DROP any @'localhost' version of the user that may
-        # have been created by a direct shell run (where mysql client runs via
-        # unix socket and creates users as @'localhost' instead of @'%').
+
+        # dev-only diag
+        if [ "${DASHBOARD_ENV:-}" = "dev" ]; then
+            info "[dev-diag] MYSQL_CLIENT_MODE=${MYSQL_CLIENT_MODE:-<unset>} _MYSQL_VIA=${_MYSQL_VIA:-<unset>}"
+            info "[dev-diag] MYSQL_HOST=${MYSQL_HOST:-<unset>} MYSQL_PORT=${MYSQL_PORT:-<unset>} MYSQL_ROOT_USER=${MYSQL_ROOT_USER:-<unset>}"
+            info "[dev-diag] MYSQL_TENANT_HOST='${MYSQL_TENANT_HOST}' MYSQL_APP_HOST=${MYSQL_APP_HOST}"
+            info "[dev-diag] TENANT_DB_USER=${TENANT_DB_USER} TENANT_DB_NAME=${TENANT_DB_NAME}"
+            info "[dev-diag] SQL: DROP @'localhost'; CREATE/ALTER @'${MYSQL_TENANT_HOST}'; GRANT ON ${TENANT_DB_NAME}.*"
+            set +e
+        fi
         run_mysql <<SQLEOF
 CREATE DATABASE IF NOT EXISTS \`${TENANT_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 DROP USER IF EXISTS '${TENANT_DB_USER}'@'localhost';
@@ -545,6 +550,16 @@ CREATE USER IF NOT EXISTS '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED 
 ALTER USER '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY '${TENANT_DB_PASS}';
 GRANT ALL PRIVILEGES ON \`${TENANT_DB_NAME}\`.* TO '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}';
 SQLEOF
+        _mysql_rc=$?
+        if [ "${DASHBOARD_ENV:-}" = "dev" ]; then
+            info "[dev-diag] run_mysql exit=${_mysql_rc}; mysql.user rows for ${TENANT_DB_USER}:"
+            run_mysql -N -B -e "SELECT CONCAT(user,'@',host) FROM mysql.user WHERE user='${TENANT_DB_USER}';" 2>&1 | sed 's/^/[dev-diag]   /' || true
+            set -e
+        fi
+        if [ "${_mysql_rc}" -ne 0 ]; then
+            error "MySQL tenant provisioning failed (exit ${_mysql_rc})"
+            exit "${_mysql_rc}"
+        fi
 
         # Register in master database
         log "Registering tenant in master database..."

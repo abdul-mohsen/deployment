@@ -505,9 +505,12 @@ done
 
 # ---- 7. External MySQL database ----
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
-# Restrict tenant DB users to the docker bridge subnet (defaults to 172.%).
-# Override with MYSQL_TENANT_HOST in config.env if your bridge is elsewhere.
-MYSQL_TENANT_HOST="${MYSQL_TENANT_HOST:-172.%}"
+# Host pattern for the tenant DB user. '%' works for all setups:
+# - MySQL as a host service: containers connect from their Docker IP
+# - MySQL in Docker: same
+# The old default '172.%' broke when MySQL runs on the host and the GRANT
+# was created via a unix socket (localhost), or when Docker uses a non-172 subnet.
+MYSQL_TENANT_HOST="${MYSQL_TENANT_HOST:-%}"
 MYSQL_APP_HOST="$(mysql_host_for_container "${MYSQL_HOST:-host.docker.internal}")"
 
 TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"

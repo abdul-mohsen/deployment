@@ -311,7 +311,10 @@ func Catalog() []Script {
 			Name: "remove-tenant.sh", Title: "Remove tenant", Summary: "Tear down a tenant.", Danger: true,
 			Fields: []Field{
 				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true},
-				{Name: "delete_data", Label: "Delete data", Flag: "--delete-data", Type: "checkbox", Boolean: true},
+				{Name: "keep_data", Label: "Keep data", Flag: "--keep-data", Type: "checkbox", Boolean: true,
+					Help: "Preserve persistent tenant files under STORAGE_ROOT/<tenant>. Default: delete."},
+				{Name: "keep_backups", Label: "Keep backups", Flag: "--keep-backups", Type: "checkbox", Boolean: true,
+					Help: "Preserve backup archives under BACKUP_DIR. Default: delete."},
 				{Name: "force", Label: "Force", Flag: "--force", Type: "checkbox", Boolean: true},
 			},
 		},

@@ -69,7 +69,7 @@ fi
 : "${MYSQL_ROOT_USER:=dokku_admin}"
 : "${MYSQL_ROOT_PASSWORD:=}"
 : "${MYSQL_MASTER_DB:=zatca_master}"
-: "${MYSQL_TENANT_HOST:=172.%}"
+: "${MYSQL_TENANT_HOST:=%}"
 : "${DOCKERHUB_USERNAME:=}"
 : "${PULL_TAG:=latest}"
 : "${APPS:=backend frontend}"

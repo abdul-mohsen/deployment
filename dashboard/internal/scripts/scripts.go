@@ -570,6 +570,9 @@ func (r *Runner) Run(ctx context.Context, w io.Writer, scriptName string, argv [
 		"-e", "MYSQL_CLIENT_MODE=docker",
 		"-e", "TENANT_NAME_PREFIX=" + os.Getenv("TENANT_NAME_PREFIX"),
 		"-e", "TENANT_NAME_PREFIX_OVERRIDE=" + os.Getenv("TENANT_NAME_PREFIX"),
+		// Propagate DASHBOARD_ENV so scripts can gate dev-only diagnostic
+		// logging behind `[ "$DASHBOARD_ENV" = "dev" ]`. Empty in prod.
+		"-e", "DASHBOARD_ENV=" + os.Getenv("DASHBOARD_ENV"),
 		"-v", dockerSocket,
 		"-v", r.scriptsHostPath + ":/opt/deployment:ro",
 		"--network", "host",

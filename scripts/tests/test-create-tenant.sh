@@ -65,4 +65,12 @@ else
 fi
 
 echo ""
+echo "=== dokku container attached to tenant network ==="
+if grep -q "docker network connect \"\$TENANT_NETWORK\" \"\$DOKKU_CONTAINER\"" scripts/create-tenant.sh; then
+    pass "dokku container is attached to the tenant network"
+else
+    fail "dokku container is NOT attached to tenant network — dokku's nginx will 502 when proxying <app>.web hostnames"
+fi
+
+echo ""
 echo "=== all create-tenant.sh tests passed ==="

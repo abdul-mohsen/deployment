@@ -80,4 +80,18 @@ else
 fi
 
 echo ""
+echo "=== dev-diag prints register URL ==="
+if grep -q '\[dev-diag\] http_post_register url=' scripts/init-tenant-db.sh; then
+    pass "http_post_register logs the URL in dev mode"
+else
+    fail "http_post_register does not log URL when DASHBOARD_ENV=dev"
+fi
+
+if grep -q '\[dev-diag\] register attempt=' scripts/init-tenant-db.sh; then
+    pass "register retry loop logs attempts in dev mode"
+else
+    fail "register retry loop does not log attempts when DASHBOARD_ENV=dev"
+fi
+
+echo ""
 echo "=== all tests passed ==="

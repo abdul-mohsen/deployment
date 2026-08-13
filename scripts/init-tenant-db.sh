@@ -503,6 +503,9 @@ http_post_register() {
     # create-tenant.sh). Use the same prefix so this matches the deployed backend.
     local basepath="${BASEURL:-/api/v2}"
     local url="http://127.0.0.1:${DOKKU_PORT}${basepath}/register"
+    if [ "${DASHBOARD_ENV:-}" = "dev" ]; then
+        info "[dev-diag] http_post_register url=${url} host=${TENANT_DOMAIN}"
+    fi
     local -a args=(-sS -w $'\n%{http_code}' -H "Host: ${TENANT_DOMAIN}" -H "Content-Type: application/json" --data "$payload" "$url")
 
     if command -v curl >/dev/null 2>&1; then
@@ -590,6 +593,9 @@ register_seed_user() {
         response="$(http_post_register "$payload" 2>&1 || true)"
         status="${response##*$'\n'}"
         body="${response%$'\n'$status}"
+        if [ "${DASHBOARD_ENV:-}" = "dev" ]; then
+            info "[dev-diag] register attempt=${attempt} status='${status}' body_len=${#body} body_head=$(printf '%.120s' "$body")"
+        fi
 
         if [ "$status" = "201" ] || [ "$status" = "200" ] || [ "$status" = "409" ]; then
             [ "$status" = "409" ] && warn "User '$username' already exists; updating role and permissions."

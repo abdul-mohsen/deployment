@@ -334,6 +334,17 @@ func Catalog() []Script {
 			},
 		},
 		{
+			Name:    "dev-shell.sh",
+			Title:   "TEMP: Dev shell (docker only)",
+			Summary: "TEMPORARY — run a `docker ...` command in the runner sidecar. First token must be `docker`; shell metacharacters rejected. Refuses to run unless DASHBOARD_ENV=dev. Delete once tenant provisioning is stable.",
+			Danger:  true,
+			Fields: []Field{
+				{Name: "cmd", Label: "docker command", Flag: "--cmd", Type: "text", Required: true,
+					Placeholder: `docker run --rm --network web curlimages/curl -sS http://bx03-backend.web:8090/api/v2/register`,
+					Help:        "Must start with 'docker'. No pipes, redirects, backticks, $, or newlines."},
+			},
+		},
+		{
 			Name: "deploy-all.sh", Title: "Deploy version image",
 			Summary: "Roll one versioned backend or frontend image to all tenants (canary-first), or a single tenant.",
 			Danger:  true,

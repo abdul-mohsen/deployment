@@ -502,7 +502,11 @@ http_post_register() {
     # Backend routes are mounted under BASEURL (default /api/v2 — set by
     # create-tenant.sh). Use the same prefix so this matches the deployed backend.
     local basepath="${BASEURL:-/api/v2}"
-    local url="http://127.0.0.1:${DOKKU_PORT}${basepath}/register"
+    # dokku_host_port() inspects the actual dokku container instead of trusting
+    # $DOKKU_PORT from config, which can drift from the running container.
+    local dokku_port
+    dokku_port="$(dokku_host_port)"
+    local url="http://127.0.0.1:${dokku_port}${basepath}/register"
     if [ "${DASHBOARD_ENV:-}" = "dev" ]; then
         info "[dev-diag] http_post_register url=${url} host=${TENANT_DOMAIN}"
     fi

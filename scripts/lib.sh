@@ -68,6 +68,22 @@ mysql_host_for_container() {
     esac
 }
 
+# Discover the actual host port the Dokku container publishes 80/tcp on.
+# Falls back to $DOKKU_PORT (or 8080) if docker inspection fails. Config
+# drift (config.env says 8080 but dokku was started with -p 8085:80) was
+# a real 404-source for the tenant-seed step.
+dokku_host_port() {
+    local port container
+    container="${DOKKU_CONTAINER:-dokku}"
+    port="$(docker port "$container" 80/tcp 2>/dev/null | awk -F':' 'NR==1 {print $NF; exit}')"
+    if [ -n "$port" ]; then
+        echo "$port"
+    else
+        echo "${DOKKU_PORT:-8080}"
+    fi
+}
+
+
 sanitize_tenant_name() {
     printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/^-*//;s/-*$//'
 }

@@ -27,10 +27,10 @@ else
     fail "http_post_register does not use BASEURL prefix — will POST to wrong path"
 fi
 
-if grep -qE 'local\s+url="http://127\.0\.0\.1:\$\{DOKKU_PORT\}\$\{basepath\}/register"' scripts/init-tenant-db.sh; then
-    pass "register URL composed as {DOKKU_PORT}{basepath}/register"
+if grep -qE 'dokku_host_port' scripts/init-tenant-db.sh; then
+    pass "register uses dokku_host_port helper (auto-detect dokku port)"
 else
-    fail "register URL construction changed — check http_post_register"
+    fail "register still uses hardcoded DOKKU_PORT — will 404 when host port drifts from config"
 fi
 
 echo ""

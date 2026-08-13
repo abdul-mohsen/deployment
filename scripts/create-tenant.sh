@@ -457,8 +457,18 @@ mkdir -p "$STORAGE_ROOT/$TENANT_NAME/uploads"
 mkdir -p "$STORAGE_ROOT/$TENANT_NAME/data"
 chown -R 32767:32767 "$STORAGE_ROOT/$TENANT_NAME" 2>/dev/null || true
 
-dokku storage:mount "$BACKEND_APP" "$STORAGE_ROOT/$TENANT_NAME/uploads:/app/uploads"
-dokku storage:mount "$BACKEND_APP" "$STORAGE_ROOT/$TENANT_NAME/data:/app/data"
+# Idempotent mount: skip if the mount pair is already registered. Prevents
+# --update / retry-after-partial-failure from aborting on "Mount path already exists".
+ensure_storage_mount() {
+    local app="$1" spec="$2"
+    if dokku storage:list "$app" 2>/dev/null | grep -qF "$spec"; then
+        info "Storage mount already exists: $spec"
+    else
+        dokku storage:mount "$app" "$spec"
+    fi
+}
+ensure_storage_mount "$BACKEND_APP" "$STORAGE_ROOT/$TENANT_NAME/uploads:/app/uploads"
+ensure_storage_mount "$BACKEND_APP" "$STORAGE_ROOT/$TENANT_NAME/data:/app/data"
 
 # ---- 6. Environment variables ----
 log "Setting environment variables..."

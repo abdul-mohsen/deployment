@@ -65,8 +65,10 @@ fi
 echo "[dev-shell] running: $CMD"
 echo "[dev-shell] ---------- output ----------"
 set +e
-# shellcheck disable=SC2086
-$CMD
+# eval so double-quoted arguments (e.g. `-H "Authorization: Bearer xxx"`)
+# survive as a single argv element. Shell metacharacters are already blocked
+# above so eval can't chain commands or expand variables.
+eval "$CMD"
 rc=$?
 set -e
 echo "[dev-shell] ---------- end ----------"

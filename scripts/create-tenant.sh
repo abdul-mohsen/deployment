@@ -726,6 +726,24 @@ elif [ -n "$MIGRATE_CMD" ] && [ -z "$BACKEND_IMAGE" ]; then
     warn "Run manually after deploy: dokku run $BACKEND_APP $MIGRATE_CMD"
 fi
 
+# ---- DNS wildcard check ----
+# Fail loudly if *.BASE_DOMAIN doesn't resolve — the tenant URL below will
+# 404 in a browser otherwise, with no obvious hint that DNS is the problem.
+dns_ok=true
+if command -v getent >/dev/null 2>&1; then
+    if ! getent hosts "$TENANT_DOMAIN" >/dev/null 2>&1; then
+        dns_ok=false
+    fi
+elif command -v dig >/dev/null 2>&1; then
+    if [ -z "$(dig +short "$TENANT_DOMAIN" A 2>/dev/null)" ]; then
+        dns_ok=false
+    fi
+elif command -v nslookup >/dev/null 2>&1; then
+    if ! nslookup "$TENANT_DOMAIN" >/dev/null 2>&1; then
+        dns_ok=false
+    fi
+fi
+
 # ---- Done ----
 echo ""
 log "============================================"
@@ -735,6 +753,16 @@ log "  Frontend: ${PROTOCOL}://${TENANT_DOMAIN}"
 log "  API:      ${PROTOCOL}://${TENANT_DOMAIN}/api"
 log "  Storage:  ${STORAGE_ROOT}/${TENANT_NAME}/"
 log ""
+if ! $dns_ok; then
+    warn ""
+    warn "  DNS: ${TENANT_DOMAIN} does NOT resolve yet."
+    warn "  Add a WILDCARD A record on your DNS provider (one time, not per tenant):"
+    warn "      Host:   *.${BASE_DOMAIN%.*.*}   (short label, e.g. *.odoo)"
+    warn "      Type:   A"
+    warn "      Answer: <this server's public IP>"
+    warn "  Every future tenant will resolve automatically once the wildcard is live."
+    warn ""
+fi
 log "  Routing: host nginx (operator-managed TLS) → 127.0.0.1:${DOKKU_PORT} → Dokku → ${TENANT_DOMAIN}"
 log "  No per-tenant host port; Dokku routes by Host header."
 log ""

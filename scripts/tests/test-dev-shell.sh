@@ -59,6 +59,27 @@ echo "$out" | grep -q "\[dev-shell\] running:" && pass "reaches run stage for 'd
 echo "$out" | grep -q "exit=" && pass "records exit code" || fail "no exit line"
 
 echo ""
+echo "=== preserves quoted args (spaces in header values) ==="
+# Use a fake docker that echoes its argv one per line — proves the shell
+# passed "Bearer xxx" as a single argument, not split into "Bearer" + "xxx".
+tmpdir="$(mktemp -d)"
+cat > "$tmpdir/docker" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do echo "ARG: $a"; done
+EOF
+chmod +x "$tmpdir/docker"
+PATH="$tmpdir:$PATH" out="$(bash scripts/dev-shell.sh --cmd 'docker run -H "Authorization: Bearer abcxyz"' 2>&1)"
+rm -rf "$tmpdir"
+if echo "$out" | grep -qF 'ARG: Authorization: Bearer abcxyz'; then
+    pass "quoted 'Authorization: Bearer abcxyz' stays as one argv element"
+else
+    echo "--- output ---"
+    echo "$out"
+    echo "--------------"
+    fail "quoted arg got word-split — eval not respected"
+fi
+
+echo ""
 echo "=== rejects empty --cmd ==="
 rc=0
 out="$(bash scripts/dev-shell.sh 2>&1)" || rc=$?

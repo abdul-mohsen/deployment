@@ -499,7 +499,10 @@ SQLEOF
 
 http_post_register() {
     local payload="$1"
-    local url="http://127.0.0.1:${DOKKU_PORT}/api/register"
+    # Backend routes are mounted under BASEURL (default /api/v2 — set by
+    # create-tenant.sh). Use the same prefix so this matches the deployed backend.
+    local basepath="${BASEURL:-/api/v2}"
+    local url="http://127.0.0.1:${DOKKU_PORT}${basepath}/register"
     local -a args=(-sS -w $'\n%{http_code}' -H "Host: ${TENANT_DOMAIN}" -H "Content-Type: application/json" --data "$payload" "$url")
 
     if command -v curl >/dev/null 2>&1; then

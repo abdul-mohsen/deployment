@@ -440,6 +440,22 @@ log "Attaching apps to $TENANT_NETWORK"
 dokku network:set "$BACKEND_APP"  attach-post-create "$TENANT_NETWORK"
 dokku network:set "$FRONTEND_APP" attach-post-create "$TENANT_NETWORK"
 
+# Attach the dokku container itself to the tenant network so its internal
+# nginx can resolve <app>.web hostnames via Docker DNS (used by fix_nginx_upstream).
+# Without this, dokku's nginx runs only on 'bridge' and returns 502 when the
+# upstream block references a service hostname from a user-defined network.
+# `docker network connect` errors if already connected — swallow that.
+DOKKU_CONTAINER="${DOKKU_CONTAINER:-dokku}"
+if docker network inspect "$TENANT_NETWORK" --format '{{range $k,$v := .Containers}}{{$v.Name}}{{"\n"}}{{end}}' 2>/dev/null | grep -qx "$DOKKU_CONTAINER"; then
+    info "${DOKKU_CONTAINER} already attached to ${TENANT_NETWORK}"
+else
+    if docker network connect "$TENANT_NETWORK" "$DOKKU_CONTAINER" 2>&1; then
+        info "Attached ${DOKKU_CONTAINER} to ${TENANT_NETWORK}"
+    else
+        warn "Could not attach ${DOKKU_CONTAINER} to ${TENANT_NETWORK} — inter-app proxy may fail with 502"
+    fi
+fi
+
 # ---- 4. Set ports ----
 # Dokku edge nginx listens on :80 inside its own network; host nginx (if any)
 # just forwards to DOKKU_PORT.

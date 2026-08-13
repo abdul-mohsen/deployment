@@ -27,10 +27,16 @@ else
     fail "http_post_register does not use BASEURL prefix — will POST to wrong path"
 fi
 
-if grep -qE 'dokku_host_port' scripts/init-tenant-db.sh; then
-    pass "register uses dokku_host_port helper (auto-detect dokku port)"
+if grep -qE 'url="http://\$\{BACKEND_APP\}\.web:\$\{backend_port\}' scripts/init-tenant-db.sh; then
+    pass "register targets backend directly (bypasses frontend CSRF proxy)"
 else
-    fail "register still uses hardcoded DOKKU_PORT — will 404 when host port drifts from config"
+    fail "register still goes through Dokku edge — frontend proxy will return 403 CSRF"
+fi
+
+if grep -qE 'docker run --rm --network "\$network"' scripts/init-tenant-db.sh; then
+    pass "register uses docker run --network to reach backend"
+else
+    fail "register does not use docker network to reach backend"
 fi
 
 echo ""

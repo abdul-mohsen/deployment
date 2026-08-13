@@ -502,26 +502,28 @@ http_post_register() {
     # Backend routes are mounted under BASEURL (default /api/v2 — set by
     # create-tenant.sh). Use the same prefix so this matches the deployed backend.
     local basepath="${BASEURL:-/api/v2}"
-    # dokku_host_port() inspects the actual dokku container instead of trusting
-    # $DOKKU_PORT from config, which can drift from the running container.
-    local dokku_port
-    dokku_port="$(dokku_host_port)"
-    local url="http://127.0.0.1:${dokku_port}${basepath}/register"
+    # Hit the backend container DIRECTLY via the tenant docker network,
+    # bypassing Dokku's nginx + the frontend Go proxy. The frontend enforces
+    # a session-based CSRF token check on /api/* that the seed sidecar cannot
+    # satisfy (no browser session, no prior GET to obtain the token). The
+    # backend itself puts /register on nonAuthGroup with no CSRF middleware,
+    # so a direct hit succeeds.
+    local network="${TENANT_APP_NETWORK:-${TENANT_NETWORK:-web}}"
+    local backend_port="${BACKEND_PORT:-8090}"
+    local url="http://${BACKEND_APP}.web:${backend_port}${basepath}/register"
     if [ "${DASHBOARD_ENV:-}" = "dev" ]; then
-        info "[dev-diag] http_post_register url=${url} host=${TENANT_DOMAIN}"
+        info "[dev-diag] http_post_register url=${url} network=${network}"
     fi
-    local -a args=(-sS -w $'\n%{http_code}' -H "Host: ${TENANT_DOMAIN}" -H "Content-Type: application/json" --data "$payload" "$url")
+    local -a args=(-sS -w $'\n%{http_code}' -H "Content-Type: application/json" --data "$payload" "$url")
 
-    if command -v curl >/dev/null 2>&1; then
-        curl "${args[@]}"
-        return $?
+    if ! command -v docker >/dev/null 2>&1; then
+        error "docker is required to register seed users via the tenant network."
+        return 1
     fi
-    if command -v docker >/dev/null 2>&1; then
-        docker run --rm --network host curlimages/curl:8.10.1 "${args[@]}"
-        return $?
-    fi
-    error "Neither curl nor docker is available to register seed users."
-    return 1
+    docker run --rm --network "$network" \
+        curlimages/curl:8.10.1 \
+        "${args[@]}"
+    return $?
 }
 
 set_user_role() {

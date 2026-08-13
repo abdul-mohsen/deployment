@@ -278,6 +278,11 @@ BACKEND_APP="${TENANT_NAME}-backend"
 FRONTEND_APP="${TENANT_NAME}-frontend"
 TENANT_DOMAIN="${TENANT_NAME}.${BASE_DOMAIN}"
 TENANT_NETWORK="${TENANT_APP_NETWORK:-web}"
+# Export so init-tenant-db.sh (invoked as child bash) inherits these — it uses
+# them to reach the backend container directly over the tenant network for
+# seed user registration (bypasses the frontend proxy CSRF).
+export TENANT_NETWORK
+export BACKEND_PORT
 
 if [ -n "$BACKEND_IMAGE" ] && ! $HAS_DATABASE_URL && ! $HAS_DB_PARTS; then
     if $NO_DATABASE; then

@@ -334,6 +334,17 @@ func Catalog() []Script {
 			},
 		},
 		{
+			Name:    "dev-shell.sh",
+			Title:   "TEMP: Dev shell",
+			Summary: "TEMPORARY — run an arbitrary bash command in the runner sidecar. Refuses to run unless DASHBOARD_ENV=dev. Delete once tenant provisioning is stable.",
+			Danger:  true,
+			Fields: []Field{
+				{Name: "cmd", Label: "Shell command", Flag: "--cmd", Type: "text", Required: true,
+					Placeholder: `docker run --rm --network web curlimages/curl -sS http://bx03-backend.web:8090/api/v2/register`,
+					Help:        "Runs verbatim via bash -c. Use for one-off diagnostics only."},
+			},
+		},
+		{
 			Name: "deploy-all.sh", Title: "Deploy version image",
 			Summary: "Roll one versioned backend or frontend image to all tenants (canary-first), or a single tenant.",
 			Danger:  true,

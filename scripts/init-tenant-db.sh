@@ -582,7 +582,7 @@ register_seed_user() {
 
     log "Registering ${role} seed user: $username"
     if $DRY_RUN; then
-        info "Would POST /api/register for '$username' on $TENANT_DOMAIN"
+        info "Would POST ${BASEURL:-/api/v2}/register for '$username' on $TENANT_DOMAIN"
         return 0
     fi
 

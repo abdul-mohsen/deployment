@@ -20,14 +20,14 @@ FROM golang:1.25-alpine AS builder
 
 WORKDIR /src
 
-# Download deps first — cached layer, only reruns when go.mod/go.sum change.
-COPY go.mod go.sum ./
-RUN go mod download
+# Vendored deps: everything is under ./vendor, so no network at build time
+# (works on air-gapped servers). No `go mod download` needed since the
+# modules already live in the tree.
+COPY . .
 
 # Build a fully static binary.
-COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-s -w" -trimpath -o /dashboard .
+    go build -mod=vendor -ldflags="-s -w" -trimpath -o /dashboard .
 
 # ── Stage 2: minimal runtime ─────────────────────────────────────────────────
 # Use alpine (12 MB) instead of docker:27-cli (278 MB).

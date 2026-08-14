@@ -1165,7 +1165,7 @@ func (s *server) handleTenantUpdateCredentials(w http.ResponseWriter, r *http.Re
 
 	// Call the backend's admin password reset endpoint
 	// POST /api/v2/user/:id/password requires admin JWT — instead use MySQL directly
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?timeout=10s", user, password, host, port, dbName)
+	dsn := mysqlDSN(user, password, host, port, dbName, 10*time.Second, false)
 	if err := updateUserPasswordMySQL(ctx, dsn, username, newPassword); err != nil {
 		// Log but don't fail — Dokku config was already updated
 		_ = backendURL

@@ -164,11 +164,6 @@ type Script struct {
 	Danger  bool    // confirmation required in UI
 	Image   string  // override runner image; empty -> Runner.runnerImage default
 	Fields  []Field // ordered
-	// RawArgs skips the Go-side arg-character allowlist so the script sees
-	// exactly what the caller sent (including `{}`, `"`, `%`, etc.). Only
-	// enable on scripts that do their own metachar validation. Used by
-	// dev-shell.sh whose own guard blocks `; | & $ < > \` + newlines.
-	RawArgs bool
 }
 
 // Slug returns the URL-safe identifier for the script (file name without
@@ -336,18 +331,6 @@ func Catalog() []Script {
 					Help: "Required for unattended dashboard cleanup."},
 				{Name: "skip_storage_repair", Label: "Skip storage registry repair", Flag: "--skip-storage-repair", Type: "checkbox", Boolean: true},
 				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
-			},
-		},
-		{
-			Name:    "dev-shell.sh",
-			Title:   "TEMP: Dev shell (docker only)",
-			Summary: "TEMPORARY — run a `docker ...` command in the runner sidecar. First token must be `docker`; shell metacharacters rejected. Refuses to run unless DASHBOARD_ENV=dev. Delete once tenant provisioning is stable.",
-			Danger:  true,
-			RawArgs: true, // bypass the Go arg allowlist; dev-shell.sh has its own guard
-			Fields: []Field{
-				{Name: "cmd", Label: "docker command", Flag: "--cmd", Type: "text", Required: true,
-					Placeholder: `docker run --rm --network web curlimages/curl -sS http://bx03-backend.web:8090/api/v2/register`,
-					Help:        "Must start with 'docker'. No pipes, redirects, backticks, $, or newlines."},
 			},
 		},
 		{
@@ -569,10 +552,8 @@ func (r *Runner) Run(ctx context.Context, w io.Writer, scriptName string, argv [
 	if r.scriptsHostPath == "" {
 		return errors.New("SCRIPTS_HOST_PATH is not set; cannot mount scripts into runner container")
 	}
-	if !sc.RawArgs {
-		if err := validateArgs(argv); err != nil {
-			return err
-		}
+	if err := validateArgs(argv); err != nil {
+		return err
 	}
 	if r.configFile != "" {
 		argv = append(argv, "--config", r.configFile)

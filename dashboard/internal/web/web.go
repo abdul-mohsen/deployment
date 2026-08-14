@@ -98,8 +98,9 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireAuth)
 		r.Get("/", s.handleIndex)
-		r.Get("/tenants/{name}", s.handleTenant)
-		r.Post("/tenants/{name}/{verb}", s.handleTenantAction)
+	r.Get("/tenants/{name}", s.handleTenant)
+	r.Post("/tenants/{name}/{verb}", s.handleTenantAction)
+	r.Post("/tenants/{name}/delete", s.handleTenantDelete)
 		r.Get("/apps/{name}", s.handleApp)
 		r.Post("/apps/{name}/{verb}", s.handleAction)
 		r.Get("/apps/{name}/logs", s.handleLogStream)
@@ -354,6 +355,47 @@ func (s *server) handleTenantAction(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 	}
 	fmt.Fprint(w, body.String())
+}
+
+// handleTenantDelete tears down a tenant end-to-end via remove-tenant.sh.
+// Requires POST form field confirm=<tenant> (server-side type-to-confirm)
+// so an accidental navigation cannot destroy data. Streams the script's
+// output as SSE so the operator sees each step.
+func (s *server) handleTenantDelete(w http.ResponseWriter, r *http.Request) {
+	tenant := chi.URLParam(r, "name")
+	if !validAppName(tenant) {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	if r.FormValue("confirm") != tenant {
+		http.Error(w, "confirmation mismatch: POST confirm=<tenant> required", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	fmt.Fprintf(w, "data: Deleting tenant %s (apps + DB + storage + backups)...\n\n", tenant)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+
+	// remove-tenant.sh <name> --force  (full cleanup is the default since #115)
+	argv := []string{tenant, "--force"}
+	if err := s.runner.Run(ctx, w, "remove-tenant.sh", argv); err != nil {
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+	}
+	s.snapshots.RefreshSoon()
+	fmt.Fprint(w, "event: done\ndata: end\n\n")
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {

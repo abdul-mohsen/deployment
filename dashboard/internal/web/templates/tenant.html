@@ -79,6 +79,8 @@
       <button data-tenant-act="stop"    class="tenant-act btn btn-danger"  data-confirm="Stop {{.Tenant}}?">⏹ Stop</button>
       <button data-tenant-act="restart" class="tenant-act btn btn-secondary" data-confirm="Restart {{.Tenant}}?">↺ Restart</button>
       <button data-tenant-act="rebuild" class="tenant-act btn btn-secondary" data-confirm="Rebuild {{.Tenant}}?">⟳ Rebuild</button>
+      <button id="tenant-delete-btn" class="btn btn-danger"
+              style="margin-left:8px;border:1px solid #b91c1c;background:#7f1d1d">🗑 Delete tenant</button>
     </div>
   </div>
 
@@ -248,6 +250,38 @@
       append(await res.text());
     });
   });
+
+  // ── Delete tenant (type-to-confirm; streams remove-tenant.sh output) ────
+  const deleteBtn = document.getElementById('tenant-delete-btn');
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', async () => {
+      const typed = prompt(
+        'This will permanently delete tenant "' + tenant + '":\n' +
+        '  • Dokku apps (backend + frontend)\n' +
+        '  • MySQL database and user\n' +
+        '  • Master DB row (dashboard entry)\n' +
+        '  • Persistent data under STORAGE_ROOT\n' +
+        '  • All backup archives\n' +
+        '  • Host nginx vhost\n\n' +
+        'Type the tenant name to confirm:'
+      );
+      if (typed !== tenant) {
+        if (typed !== null) append('✖ Delete cancelled (typed name did not match).');
+        return;
+      }
+      deleteBtn.disabled = true;
+      append('--- deleting ' + tenant + ' ---');
+      const body = new URLSearchParams({ confirm: tenant });
+      try {
+        await streamSSE('/tenants/' + tenant + '/delete', 'POST', body);
+        append('--- tenant deleted; returning to fleet in 3s ---');
+        setTimeout(() => { window.location.href = '/'; }, 3000);
+      } catch (e) {
+        deleteBtn.disabled = false;
+        append('✖ delete failed: ' + (e && e.message ? e.message : e));
+      }
+    });
+  }
 
   // ── Auto-redeploy toggle ───────────────────────────────────
   const toggle = document.getElementById('auto-redeploy-toggle');

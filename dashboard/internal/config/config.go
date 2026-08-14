@@ -78,8 +78,21 @@ func Load() (Config, error) {
 		if err != nil {
 			return c, fmt.Errorf("SESSION_KEY must be hex: %w", err)
 		}
+		if len(raw) < 32 {
+			return c, fmt.Errorf("SESSION_KEY too short: need at least 32 bytes (64 hex chars), got %d", len(raw))
+		}
 		c.SessionKey = raw
 	} else {
+		// In prod, missing SESSION_KEY silently invalidates every logged-in
+		// session on every dashboard restart and makes multi-replica setups
+		// impossible (each replica would sign cookies with a different key).
+		// Refuse to start so the operator sees the misconfig immediately.
+		if c.EnvName == "prod" {
+			return c, fmt.Errorf(
+				"SESSION_KEY is required when DASHBOARD_ENV=prod. Generate with:\n" +
+					"    openssl rand -hex 32\n" +
+					"and set SESSION_KEY=<hex> in your dashboard.env")
+		}
 		c.SessionKey = make([]byte, 32)
 		if _, err := rand.Read(c.SessionKey); err != nil {
 			return c, err

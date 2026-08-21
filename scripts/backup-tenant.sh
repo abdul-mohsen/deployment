@@ -14,6 +14,7 @@
 #                         auto backups are pruned by the retention policy.
 #   --owner <name>        Owner tag stored in the manifest (default: system,
 #                         or BACKUP_OWNER from the environment).
+#   --label <text>        Optional human-readable label stored in the manifest.
 #   --retention-days <n>  Override BACKUP_RETENTION_DAYS for the prune step.
 #   --no-prune            Skip the retention prune at the end of this run.
 #   --require-verified    Exit non-zero if any produced artifact fails
@@ -34,7 +35,9 @@ source "$SCRIPT_DIR/lib.sh"
 CONFIG_FILE="$PROJECT_DIR/config.env"
 ORIGIN="auto"
 OWNER="${BACKUP_OWNER:-system}"
+OWNER_EXPLICIT=0
 RETENTION_OVERRIDE=""
+LABEL=""
 DO_PRUNE=1
 REQUIRE_VERIFIED=0
 ARGS=()
@@ -42,7 +45,8 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --config)           CONFIG_FILE="$2"; shift 2 ;;
         --origin)           ORIGIN="$2"; shift 2 ;;
-        --owner)            OWNER="$2"; shift 2 ;;
+        --owner)            OWNER="$2"; OWNER_EXPLICIT=1; shift 2 ;;
+        --label)            LABEL="$2"; shift 2 ;;
         --retention-days)   RETENTION_OVERRIDE="$2"; shift 2 ;;
         --no-prune)         DO_PRUNE=0; shift ;;
         --require-verified) REQUIRE_VERIFIED=1; shift ;;
@@ -57,6 +61,9 @@ case "$ORIGIN" in
 esac
 
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+if [ "$OWNER_EXPLICIT" -eq 0 ]; then
+    OWNER="${BACKUP_OWNER:-system}"
+fi
 
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
 BACKUP_DIR="${BACKUP_DIR:-/opt/tenant-backups}"
@@ -74,6 +81,11 @@ NC='\033[0m'
 log()  { echo -e "${GREEN}[+]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 err()  { echo -e "${RED}[✗]${NC} $*" >&2; }
+
+if [ ${#LABEL} -gt 120 ] || [[ "$LABEL" == *$'\n'* || "$LABEL" == *$'\r'* || "$LABEL" == *$'\t'* ]]; then
+    err "Backup label must be at most 120 characters and contain no control characters."
+    exit 2
+fi
 
 mkdir -p "$BACKUP_DIR"
 
@@ -100,6 +112,7 @@ backup_tenant() {
         fi
     else
         warn "No data directory for tenant '$tenant'."
+        LAST_VERIFIED="false"
     fi
 
     # Backup MySQL database from external server
@@ -109,23 +122,34 @@ backup_tenant() {
         if run_mysql -e "USE \`${tenant_db}\`" 2>/dev/null; then
             db_dest="$BACKUP_DIR/${tenant}_mysql_${TIMESTAMP}.sql.gz"
             log "Backing up MySQL: $tenant_db → $db_dest"
-            run_mysqldump \
-                --single-transaction --routines --triggers "$tenant_db" | gzip > "$db_dest"
-            echo "  Size: $(du -h "$db_dest" | cut -f1)"
-            if verify_gzip_artifact "$db_dest"; then
-                log "  Verified MySQL dump OK"
+            if run_mysqldump \
+                --single-transaction --routines --triggers "$tenant_db" | gzip > "$db_dest"; then
+                echo "  Size: $(du -h "$db_dest" | cut -f1)"
+                if verify_gzip_artifact "$db_dest"; then
+                    log "  Verified MySQL dump OK"
+                else
+                    err "  MySQL dump failed verification: $db_dest"
+                    LAST_VERIFIED="false"
+                fi
             else
-                err "  MySQL dump failed verification: $db_dest"
+                err "  MySQL dump failed: $tenant_db"
+                rm -f "$db_dest"
                 LAST_VERIFIED="false"
             fi
+        else
+            warn "MySQL database '$tenant_db' does not exist."
+            LAST_VERIFIED="false"
         fi
+    else
+        warn "MYSQL_ROOT_PASSWORD is not configured; cannot create SQL backup for '$tenant_db'."
+        LAST_VERIFIED="false"
     fi
 
     # Write the manifest sidecar describing this backup set.
     local meta="$BACKUP_DIR/${tenant}_${TIMESTAMP}.meta.json"
     write_backup_manifest "$meta" "$tenant" "$TIMESTAMP" "$ORIGIN" "$OWNER" \
-        "${files_dest:--}" "${db_dest:--}" "$LAST_VERIFIED"
-    log "Manifest: $meta (origin=$ORIGIN owner=$OWNER verified=$LAST_VERIFIED)"
+        "${files_dest:--}" "${db_dest:--}" "$LAST_VERIFIED" "$LABEL"
+    log "Manifest: $meta (origin=$ORIGIN owner=$OWNER verified=$LAST_VERIFIED${LABEL:+ label=$LABEL})"
 }
 
 OVERALL_VERIFIED="true"

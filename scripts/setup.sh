@@ -214,7 +214,7 @@ MYSQL_MASTER_DB=${MYSQL_MASTER_DB}
 
 # Docker Hub
 DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME}
-PULL_TAG=latest
+PULL_TAG=dev
 ENVFILE
 
     # Optional sections
@@ -483,8 +483,8 @@ if prompt_yn "Create your first tenant now?" "y"; then
 
         if [ -n "$DOCKERHUB_USERNAME" ]; then
             RELEASE_TAG="${APP_IMAGE_VERSION_DEFAULT:-${PULL_TAG:-v0.0.1}}"
-            BACKEND_IMG="${DOCKERHUB_USERNAME}/api:${RELEASE_TAG}"
-            FRONTEND_IMG="${DOCKERHUB_USERNAME}/web:${RELEASE_TAG}"
+            BACKEND_IMG="${BACKEND_IMAGE:-${DOCKERHUB_USERNAME}/ifritah-api}:${RELEASE_TAG}"
+            FRONTEND_IMG="${FRONTEND_IMAGE:-${DOCKERHUB_USERNAME}/ifritah-web}:${RELEASE_TAG}"
 
             info "Will deploy from: $BACKEND_IMG + $FRONTEND_IMG"
             if prompt_yn "Are images already pushed to Docker Hub?" "n"; then
@@ -537,7 +537,7 @@ if [ -n "$DOCKERHUB_USERNAME" ]; then
 fi
 log ""
 log "  Create more tenants:"
-log "    sudo ./scripts/create-tenant.sh <name> --backend-image ${DOCKERHUB_USERNAME:-youruser}/api:${APP_IMAGE_VERSION_DEFAULT:-v0.0.1} --frontend-image ${DOCKERHUB_USERNAME:-youruser}/web:${APP_IMAGE_VERSION_DEFAULT:-v0.0.1}"
+log "    sudo ./scripts/create-tenant.sh <name> --backend-image ${BACKEND_IMAGE:-${DOCKERHUB_USERNAME:-youruser}/ifritah-api}:${APP_IMAGE_VERSION_DEFAULT:-dev} --frontend-image ${FRONTEND_IMAGE:-${DOCKERHUB_USERNAME:-youruser}/ifritah-web}:${APP_IMAGE_VERSION_DEFAULT:-dev}"
 log ""
 log "==========================================="
 echo ""

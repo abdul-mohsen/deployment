@@ -20,6 +20,7 @@ import (
 	"github.com/abdul-mohsen/deployment/dashboard/internal/config"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/dokku"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/logbuf"
+	"github.com/abdul-mohsen/deployment/dashboard/internal/retention"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/scripts"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/tenantstate"
 	"github.com/go-chi/chi/v5"
@@ -98,9 +99,9 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireAuth)
 		r.Get("/", s.handleIndex)
-	r.Get("/tenants/{name}", s.handleTenant)
-	r.Post("/tenants/{name}/{verb}", s.handleTenantAction)
-	r.Post("/tenants/{name}/delete", s.handleTenantDelete)
+		r.Get("/tenants/{name}", s.handleTenant)
+		r.Post("/tenants/{name}/{verb}", s.handleTenantAction)
+		r.Post("/tenants/{name}/delete", s.handleTenantDelete)
 		r.Get("/apps/{name}", s.handleApp)
 		r.Post("/apps/{name}/{verb}", s.handleAction)
 		r.Get("/apps/{name}/logs", s.handleLogStream)
@@ -307,17 +308,43 @@ func (s *server) handleTenant(w http.ResponseWriter, r *http.Request) {
 	}
 	autoRedeploy := s.tenantState.IsAutoRedeployEnabled(name)
 	s.render(w, "tenant.html", map[string]any{
-		"Env":            s.cfg.EnvName,
-		"Base":           s.cfg.BaseDomain,
-		"Tenant":         name,
-		"Apps":           apps,
-		"Backend":        backend,
-		"Frontend":       frontend,
-		"Versions":       scripts.VersionCatalog(),
-		"DefaultVersion": scripts.DefaultImageVersion(),
-		"AutoRedeploy":   autoRedeploy,
-		"MaxUserBackups": 50,
+		"Env":                 s.cfg.EnvName,
+		"Base":                s.cfg.BaseDomain,
+		"Tenant":              name,
+		"Apps":                apps,
+		"Backend":             backend,
+		"Frontend":            frontend,
+		"Versions":            scripts.VersionCatalog(),
+		"DefaultVersion":      tenantSyncVersion(backend, frontend, scripts.DefaultImageVersion()),
+		"AutoRedeploy":        autoRedeploy,
+		"BackupRetentionDays": backupRetentionDays(s.cfg.BackupRetentionDays),
+		"MaxUserBackups":      50,
 	})
+}
+
+func backupRetentionDays(days int) int {
+	if days <= 0 {
+		return retention.DefaultRetentionDays
+	}
+	return days
+}
+
+// tenantSyncVersion returns the image tag to pre-fill the Sync-version form
+// with. It prefers the tenant's currently deployed tag (backend first, then
+// frontend) so the details reflect the selected/deployed version instead of the
+// fleet default. When neither app reports a version it falls back to def.
+func tenantSyncVersion(backend, frontend *dokku.App, def string) string {
+	if backend != nil {
+		if v := strings.TrimSpace(backend.Version); v != "" {
+			return v
+		}
+	}
+	if frontend != nil {
+		if v := strings.TrimSpace(frontend.Version); v != "" {
+			return v
+		}
+	}
+	return def
 }
 
 func (s *server) handleTenantAction(w http.ResponseWriter, r *http.Request) {
@@ -485,13 +512,13 @@ func (s *server) handleImageTags(w http.ResponseWriter, r *http.Request) {
 
 // TagMeta holds per-tag metadata returned alongside the tag list.
 type TagMeta struct {
-	Tag           string `json:"tag"`
-	LastPushed    string `json:"last_pushed,omitempty"` // ISO8601
-	Digest        string `json:"digest,omitempty"`       // first 19 chars of "sha256:..."
-	IsBranch      bool   `json:"is_branch"`              // true when not a semver vX.Y.Z tag
-	InBoth        bool   `json:"in_both"`                // true when tag exists in both backend AND frontend repos
-	BackendOnly   bool   `json:"backend_only,omitempty"` // true when only in backend repo
-	FrontendOnly  bool   `json:"frontend_only,omitempty"` // true when only in frontend repo
+	Tag          string `json:"tag"`
+	LastPushed   string `json:"last_pushed,omitempty"`   // ISO8601
+	Digest       string `json:"digest,omitempty"`        // first 19 chars of "sha256:..."
+	IsBranch     bool   `json:"is_branch"`               // true when not a semver vX.Y.Z tag
+	InBoth       bool   `json:"in_both"`                 // true when tag exists in both backend AND frontend repos
+	BackendOnly  bool   `json:"backend_only,omitempty"`  // true when only in backend repo
+	FrontendOnly bool   `json:"frontend_only,omitempty"` // true when only in frontend repo
 }
 
 // fetchImageTagsWithMeta returns the filtered tag list + per-tag metadata including

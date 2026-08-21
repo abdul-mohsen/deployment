@@ -25,7 +25,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/api
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/ifritah-api
 
 jobs:
   build-and-push:

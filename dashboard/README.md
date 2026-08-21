@@ -37,17 +37,28 @@ runtime besides the docker socket.
 | `DASHBOARD_ENV_FILE`  | no       | —               |
 | `TENANT_NAME_PREFIX`  | no       | —               |
 
-Version picker values are exact SemVer image tags such as `v0.0.1`, not channels such as
-`latest`, `stable`, or `dev`. The dashboard deploys the selected tag to both apps:
+The image picker accepts exact SemVer releases and branch/channel tags such as
+`dev`, `latest`, or a PR branch tag. Tags are discovered from the configured
+Docker Hub backend and frontend repositories, and the dashboard marks whether
+each tag exists in both repositories before it is deployed to both apps:
 
 ```sh
 BACKEND_IMAGE=ssdawweq/ifritah-api
 FRONTEND_IMAGE=ssdawweq/ifritah-web
 APP_IMAGE_VERSIONS=v0.0.1
-APP_IMAGE_VERSION_DEFAULT=v0.0.1
+APP_IMAGE_VERSION_DEFAULT=dev
 ```
 
-Use `TENANT_NAME_PREFIX` when dev and prod dashboards share one server or MySQL. With `TENANT_NAME_PREFIX=dev-`, creating tenant `acme` creates Dokku apps `dev-acme-backend` / `dev-acme-frontend` and database `tenant_dev_acme`. Use `TENANT_NAME_PREFIX=prod-` for prod so prod creates `tenant_prod_acme` instead. For two dashboards on one server, set this in each dashboard's `dashboard.env`; keep the shared `config.env` prefix unset or point each dashboard at a matching `DEPLOY_CONFIG_FILE`.
+The tenant details page reads the deployed `APP_IMAGE_VERSION` from the
+running app, so the Sync form remains on the selected tag instead of falling
+back to a catalog placeholder. Use `TENANT_NAME_PREFIX` when dev and prod
+dashboards share one server or MySQL. With `TENANT_NAME_PREFIX=dev-`, creating
+tenant `acme` creates Dokku apps `dev-acme-backend` /
+`dev-acme-frontend` and database `tenant_dev_acme`. Use
+`TENANT_NAME_PREFIX=prod-` for prod so prod creates `tenant_prod_acme` instead.
+For two dashboards on one server, set this in each dashboard's
+`dashboard.env`; keep the shared `config.env` prefix unset or point each
+dashboard at a matching `DEPLOY_CONFIG_FILE`.
 
 Publishing `BACKEND_IMAGE:v0.0.1` and `FRONTEND_IMAGE:v0.0.1` makes `v0.0.1` selectable as a compatible pair. Re-pushing without changing `VERSION` overwrites that same image tag; increment `VERSION` only for a new feature or bug-fix release.
 
@@ -69,8 +80,8 @@ The equivalent shell workflow uses the same command vocabulary:
 
 ```sh
 sudo ./scripts/deployctl.sh tenant status acme
-sudo ./scripts/deployctl.sh tenant update acme --backend-image repo/api:v0.0.1 --frontend-image repo/web:v0.0.1
-sudo ./scripts/deployctl.sh fleet sync repo/api:v0.0.1 --type backend --tenant acme
+sudo ./scripts/deployctl.sh tenant update acme --backend-image repo/ifritah-api:v0.0.1 --frontend-image repo/ifritah-web:v0.0.1
+sudo ./scripts/deployctl.sh fleet sync repo/ifritah-api:v0.0.1 --type backend --tenant acme
 ```
 
 ## Local perf check

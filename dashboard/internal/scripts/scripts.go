@@ -95,11 +95,11 @@ func DefaultImageVersion() string {
 	if v := strings.TrimSpace(os.Getenv("APP_IMAGE_VERSION_DEFAULT")); v != "" {
 		return v
 	}
-	versions := versionOptions()
-	if len(versions) > 0 {
-		return versions[0]
-	}
-	// No semver catalog configured — default to the rolling dev image.
+	// Branch-only automation: the create/sync forms take a free-text Docker tag
+	// (dev, latest, a branch name or a semver). The rolling "dev" image is the
+	// sensible default. A placeholder semver release catalog (e.g. the bundled
+	// v0.0.1 entry) must NOT hijack this default — only an explicit
+	// APP_IMAGE_VERSION_DEFAULT should pin the forms to a specific release.
 	return "dev"
 }
 

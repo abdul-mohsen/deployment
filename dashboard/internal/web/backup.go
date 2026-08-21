@@ -2,10 +2,10 @@
 package web
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -28,6 +28,7 @@ type backupManifest struct {
 	Owner         string `json:"owner"`
 	FilesArtifact string `json:"files_artifact"`
 	DBArtifact    string `json:"db_artifact"`
+	Label         string `json:"label,omitempty"`
 	Verified      bool   `json:"verified"`
 	CreatedAt     string `json:"created_at"`
 }
@@ -47,15 +48,43 @@ func validBackupID(id string) bool {
 	return true
 }
 
+func backupDirPath(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return "/opt/tenant-backups"
+	}
+	return dir
+}
+
+// backupArtifactPath only permits artifacts stored directly in the configured
+// backup directory. Manifest contents are server-controlled files, but still
+// must not be able to turn a download into an arbitrary file read.
+func backupArtifactPath(dir, artifact string) (string, error) {
+	if artifact == "" || filepath.IsAbs(artifact) ||
+		filepath.Base(artifact) != artifact ||
+		strings.ContainsAny(artifact, `/\`) {
+		return "", fmt.Errorf("invalid backup artifact")
+	}
+	root, err := filepath.Abs(backupDirPath(dir))
+	if err != nil {
+		return "", err
+	}
+	path, err := filepath.Abs(filepath.Join(root, artifact))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("backup artifact escapes backup directory")
+	}
+	return path, nil
+}
+
 // ── listBackupsForTenant reads .meta.json files directly from the backup dir ──
 // This avoids running a sidecar container just to list files — the backup dir
 // is mounted directly into the dashboard container via BACKUP_DIR env / volume.
 
 func (s *server) listBackupsForTenant(ctx context.Context, tenant string) ([]backupManifest, error) {
-	backupDir := s.cfg.BackupDir
-	if backupDir == "" {
-		backupDir = "/opt/tenant-backups"
-	}
+	backupDir := backupDirPath(s.cfg.BackupDir)
 
 	// Glob for all manifest files belonging to this tenant
 	pattern := filepath.Join(backupDir, tenant+"_*.meta.json")
@@ -168,10 +197,16 @@ func (s *server) handleTenantBackup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid name", http.StatusBadRequest)
 		return
 	}
-	_ = r.ParseForm()
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
 	label := strings.TrimSpace(r.FormValue("label"))
-	if label != "" {
-		_ = s.tenantState.SetBackupLabel(tenant, label)
+	if len(label) > 120 || strings.IndexFunc(label, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		http.Error(w, "backup label must be at most 120 printable characters", http.StatusBadRequest)
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
@@ -186,6 +221,9 @@ func (s *server) handleTenantBackup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	argv := []string{tenant, "--origin", "user", "--owner", "dashboard"}
+	if label != "" {
+		argv = append(argv, "--label", label)
+	}
 	if err := s.runner.Run(ctx, w, "backup-tenant.sh", argv); err != nil {
 		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
 	}
@@ -225,7 +263,7 @@ func (s *server) handleTenantBackupDownload(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	backupDir := s.cfg.BackupDir
+	backupDir := backupDirPath(s.cfg.BackupDir)
 	metaPath := filepath.Join(backupDir, backupID+".meta.json")
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -243,7 +281,11 @@ func (s *server) handleTenantBackupDownload(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	sqlPath := filepath.Join(backupDir, m.DBArtifact)
+	sqlPath, err := backupArtifactPath(backupDir, m.DBArtifact)
+	if err != nil {
+		http.Error(w, "invalid SQL artifact path", http.StatusInternalServerError)
+		return
+	}
 	f, err := os.Open(sqlPath)
 	if err != nil {
 		http.Error(w, "SQL artifact file not found", http.StatusNotFound)
@@ -258,24 +300,7 @@ func (s *server) handleTenantBackupDownload(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(m.DBArtifact)))
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	buf := make([]byte, 32*1024)
-	var fErr error
-	for {
-		n, readErr := f.Read(buf)
-		if n > 0 {
-			if _, wErr := w.Write(buf[:n]); wErr != nil {
-				break
-			}
-		}
-		if readErr != nil {
-			fErr = readErr
-			break
-		}
-	}
-	_ = fErr
-	_ = scanner
+	_, _ = io.Copy(w, f)
 }
 
 // ── POST /tenants/{name}/backups/{id}/delete ─────────────────────────────────
@@ -289,7 +314,7 @@ func (s *server) handleTenantBackupDelete(w http.ResponseWriter, r *http.Request
 	}
 
 	// Verify the backup belongs to this tenant and is user-origin
-	backupDir := s.cfg.BackupDir
+	backupDir := backupDirPath(s.cfg.BackupDir)
 	metaPath := filepath.Join(backupDir, backupID+".meta.json")
 	data, err := os.ReadFile(metaPath)
 	if err != nil {

@@ -1,0 +1,40 @@
+version: 2
+
+updates:
+  # Go modules for the dashboard binary.
+  - package-ecosystem: gomod
+    directory: /dashboard
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: UTC
+    open-pull-requests-limit: 5
+    groups:
+      # Batch minor + patch bumps into one PR per group so review is manageable.
+      go-runtime:
+        patterns: ['*']
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions pinned in .github/workflows/*.yml. Prevents supply-chain
+  # drift on the CI side (setup-go / checkout / codeql-action).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: UTC
+    open-pull-requests-limit: 3
+
+  # Playwright / Node deps used by the e2e suite.
+  - package-ecosystem: npm
+    directory: /dashboard/e2e
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: UTC
+    open-pull-requests-limit: 3

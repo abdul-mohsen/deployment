@@ -541,6 +541,13 @@ func validateArgs(argv []string) error {
 // Run executes a script with already-built argv (extra flags after the script
 // name). Output is streamed to w line-by-line as SSE `data:` frames.
 func (r *Runner) Run(ctx context.Context, w io.Writer, scriptName string, argv []string) error {
+	return r.RunWithCallback(ctx, w, scriptName, argv, nil)
+}
+
+// RunWithCallback executes a script like Run and invokes onLine for every
+// normalized output line before it is streamed to the caller. The callback is
+// useful for durable operation history and must not write to w.
+func (r *Runner) RunWithCallback(ctx context.Context, w io.Writer, scriptName string, argv []string, onLine func(string)) error {
 	sc := Find(scriptName)
 	if sc == nil {
 		return fmt.Errorf("script %q is not in the catalog", scriptName)
@@ -616,6 +623,9 @@ exec bash "scripts/deployctl.sh" "script" "$NAME" "$@"
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := stripAnsi(scanner.Text())
+		if onLine != nil {
+			onLine(line)
+		}
 		if _, werr := fmt.Fprintf(w, "data: %s\n\n", line); werr != nil {
 			_ = cmd.Process.Kill()
 			break

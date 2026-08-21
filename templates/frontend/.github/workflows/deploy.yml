@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/web
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/ifritah-web
 
 jobs:
   build-and-push:

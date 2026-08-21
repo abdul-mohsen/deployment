@@ -110,6 +110,10 @@ func (c *Client) containerSummary(ctx context.Context, cid string) containerSumm
 {{.Config.Image}}
 {{.RestartCount}}
 {{range .Config.Env}}{{println .}}{{end}}`, cid)
+	return parseContainerSummary(out)
+}
+
+func parseContainerSummary(out string) containerSummary {
 	lines := strings.Split(out, "\n")
 	summary := containerSummary{}
 	if len(lines) > 0 {
@@ -121,7 +125,7 @@ func (c *Client) containerSummary(ctx context.Context, cid string) containerSumm
 	if len(lines) > 2 {
 		summary.RestartCnt = strings.TrimSpace(lines[2])
 	}
-	for _, line := range lines[3:] {
+	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "APP_IMAGE_VERSION=") {
 			summary.Version = strings.TrimPrefix(line, "APP_IMAGE_VERSION=")

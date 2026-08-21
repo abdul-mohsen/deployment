@@ -264,8 +264,31 @@
   });
 
   // ── SSE stream ────────────────────────────────────────────
+  let currentSSE = null;
+  let reconnectTimer = null;
+  let reconnectDelay = 3000;
+  let stableTimer = null;
+
+  function scheduleSSEReconnect() {
+    if (reconnectTimer !== null) return;
+    const delay = reconnectDelay;
+    reconnectDelay = Math.min(reconnectDelay * 2, 60000);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      connectSSE();
+    }, delay);
+  }
+
   function connectSSE() {
+    if (reconnectTimer !== null) return;
+    if (currentSSE) currentSSE.close();
+
     const es = new EventSource('/events');
+    currentSSE = es;
+    es.addEventListener('open', () => {
+      clearTimeout(stableTimer);
+      stableTimer = setTimeout(() => { reconnectDelay = 3000; }, 30000);
+    });
     es.addEventListener('snapshot', ev => {
       try {
         const data = JSON.parse(ev.data);
@@ -289,10 +312,23 @@
         }
       } catch (_) {}
     });
-    es.onerror = () => setTimeout(connectSSE, 3000);
+    es.onerror = () => {
+      if (currentSSE !== es) return;
+      clearTimeout(stableTimer);
+      es.close();
+      currentSSE = null;
+      scheduleSSEReconnect();
+    };
   }
 
-  if (document.getElementById('tenant-tbody')) connectSSE();
+  if (document.getElementById('tenant-tbody')) {
+    connectSSE();
+    window.addEventListener('beforeunload', () => {
+      clearTimeout(reconnectTimer);
+      clearTimeout(stableTimer);
+      if (currentSSE) currentSSE.close();
+    });
+  }
 
   // ── Image tag live-search dropdown ───────────────────────
   // API: GET /api/image-tags?q=<query>

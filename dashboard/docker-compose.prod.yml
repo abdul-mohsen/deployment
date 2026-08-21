@@ -28,6 +28,7 @@ services:
       DASHBOARD_ENV_FILE: /app/dashboard.env
       BACKUP_DIR: ${BACKUP_DIR:-/opt/tenant-backups}
       STORAGE_ROOT: ${STORAGE_ROOT:-/opt/tenant-data}
+      TENANT_STATE_DIR: ${TENANT_STATE_DIR:-/opt/tenant-state}
       DOCKERHUB_USERNAME: ${DOCKERHUB_USERNAME:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
@@ -35,6 +36,7 @@ services:
       - ${SCRIPTS_HOST_PATH:-/opt/deployment}:/opt/deployment:ro
       - ${BACKUP_DIR:-/opt/tenant-backups}:${BACKUP_DIR:-/opt/tenant-backups}
       - ${STORAGE_ROOT:-/opt/tenant-data}:/opt/tenant-data
+      - ${TENANT_STATE_DIR:-/opt/tenant-state}:${TENANT_STATE_DIR:-/opt/tenant-state}
     logging:
       driver: json-file
       options:

@@ -30,6 +30,7 @@ type Config struct {
 	TenantPrefix        string // optional tenant name prefix, e.g. "dev-" or "prod-".
 	TenantStateDir      string // directory for per-tenant JSON state files (auto_redeploy etc.).
 	BackupDir           string // host path where backup files are stored.
+	StorageRoot         string // host path where tenant persistent files are stored.
 	BackupRetentionDays int    // age in days before automatic backups are pruned.
 	MySQLHost           string // MySQL host for accounting export queries.
 	MySQLPort           string // MySQL port for accounting export queries.
@@ -52,6 +53,7 @@ type Config struct {
 //	LOG_BUFFER_LINES=2000
 //	LOG_DIR=/opt/dashboard-logs
 //	COOKIE_SECURE=false
+//	STORAGE_ROOT=/opt/tenant-data
 //	BACKUP_RETENTION_DAYS=30
 func Load() (Config, error) {
 	c := Config{
@@ -72,6 +74,7 @@ func Load() (Config, error) {
 		TenantPrefix:        normalizeTenantPrefix(os.Getenv("TENANT_NAME_PREFIX")),
 		TenantStateDir:      envOr("TENANT_STATE_DIR", "/opt/tenant-state"),
 		BackupDir:           envOr("BACKUP_DIR", "/opt/tenant-backups"),
+		StorageRoot:         envOr("STORAGE_ROOT", "/opt/tenant-data"),
 		BackupRetentionDays: envInt("BACKUP_RETENTION_DAYS", 30),
 		MySQLHost:           envOr("MYSQL_HOST", "127.0.0.1"),
 		MySQLPort:           envOr("MYSQL_PORT", "3306"),

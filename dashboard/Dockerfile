@@ -39,7 +39,6 @@ FROM alpine:3.20
 
 # Copy ca-certificates from the builder (avoids apk network calls on restricted networks).
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 
 # Docker CLI binary from the official image.
 COPY --from=docker-bin /usr/local/bin/docker /usr/local/bin/docker

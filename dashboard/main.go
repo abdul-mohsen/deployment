@@ -49,6 +49,9 @@ func main() {
 	if cfg.BackupDir != "" {
 		runner.SetBackupDir(cfg.BackupDir)
 	}
+	if cfg.StorageRoot != "" {
+		runner.SetStorageRoot(cfg.StorageRoot)
+	}
 
 	// Start the daily backup retention policy. User-origin backups are never
 	// pruned by this policy.

@@ -428,14 +428,14 @@ if [ -n "$DOCKERHUB_USERNAME" ]; then
     log "Setting up auto-deploy from Docker Hub..."
 
     # ---- 8a: Polling cron (safety net, checks every 2 min) ----
-    CRON_LINE="*/2 * * * * $SCRIPT_DIR/auto-pull.sh --config $CONFIG_FILE >> /var/log/auto-pull.log 2>&1"
-    if crontab -l 2>/dev/null | grep -qF "auto-pull.sh"; then
-        log "Auto-pull cron already installed."
+    mkdir -p "$(auto_pull_state_dir)"
+    if ensure_auto_pull_schedule "$SCRIPT_DIR/auto-pull.sh" "$CONFIG_FILE"; then
+        log "Auto-pull cron installed and verified (checks Docker Hub every 2 min)."
     else
-        (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
-        log "Auto-pull cron installed (checks Docker Hub every 2 min)."
+        error "Auto-pull cron could not be installed or verified."
+        error "Run: sudo bash $SCRIPT_DIR/setup.sh --config $CONFIG_FILE"
+        exit 1
     fi
-    mkdir -p /var/lib/auto-pull
 
     # ---- 8c: Daily backup cron (3am) ----
     BACKUP_CRON="0 3 * * * $SCRIPT_DIR/backup-tenant.sh --all --config $CONFIG_FILE >> /var/log/tenant-backup.log 2>&1"

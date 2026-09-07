@@ -9,7 +9,7 @@
 #   - Domains, internal Dokku-network port, host-published port (if any)
 #   - HTTP probe (in-container) result
 #   - Master-DB tenant pin (next image auto-pull will deploy)
-#   - Auto-pull cron presence
+#   - Auto-pull cron state (active/absent/error) and diagnostics
 #
 # Usage:
 #   sudo bash scripts/status.sh                  # all tenants, summary
@@ -49,6 +49,8 @@ fi
 
 BASE_DOMAIN="${BASE_DOMAIN:-<unset>}"
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
+AUTO_PULL_STATUS_LINE="$(auto_pull_cron_status "$SCRIPT_DIR/auto-pull.sh")"
+IFS=$'\t' read -r AUTO_PULL_STATE AUTO_PULL_DIAGNOSTIC <<< "$AUTO_PULL_STATUS_LINE"
 
 # ---- Colors (auto-disabled if not a TTY or --json) ---------------------------
 if $JSON || [ ! -t 1 ]; then
@@ -220,6 +222,11 @@ colorize_http() {
     esac
 }
 
+json_auto_pull_field() {
+    printf '"auto_pull_cron":{"state":"%s","diagnostic":"%s"}' \
+        "$AUTO_PULL_STATE" "$(json_escape "$AUTO_PULL_DIAGNOSTIC")"
+}
+
 # ---- One pass of the report --------------------------------------------------
 render_once() {
     local dstate; dstate=$(dokku_state)
@@ -232,7 +239,7 @@ render_once() {
         printf "  Dokku container : %s\n" "$(colorize_state "$dstate")"
         printf "  Dokku host ports: %s\n" "${dports:-<none>}"
         [ -n "$(tenant_name_prefix)" ] && printf "  Tenant prefix   : %s\n" "$(tenant_name_prefix)"
-        printf "  Auto-pull cron  : %s\n" "$(cron_has_autopull)"
+        printf "  Auto-pull cron  : %s — %s\n" "$AUTO_PULL_STATE" "$AUTO_PULL_DIAGNOSTIC"
         printf "  Repo commit     : %s (%s)\n" \
             "$(git -c safe.directory='*' -C "$SCRIPT_DIR/.." rev-parse --short HEAD 2>/dev/null || echo unknown)" \
             "$(git -c safe.directory='*' -C "$SCRIPT_DIR/.." branch --show-current 2>/dev/null || echo unknown)"
@@ -241,7 +248,7 @@ render_once() {
 
     if [ "$dstate" != "running" ]; then
         $JSON || echo "${R}Dokku is not running — no app data to report.${N}"
-        $JSON && echo '{"dokku":"'"$dstate"'","apps":[]}'
+        $JSON && printf '{"dokku":"%s",%s,"apps":[]}\n' "$dstate" "$(json_auto_pull_field)"
         return
     fi
 
@@ -264,7 +271,8 @@ render_once() {
 
     if [ -z "$apps" ]; then
         if $JSON; then
-            printf '{"dokku":"running","host_ports":"%s","apps":[]}\n' "$dports"
+            printf '{"dokku":"running","host_ports":"%s",%s,"apps":[]}\n' \
+                "$dports" "$(json_auto_pull_field)"
         else
             echo "  ${Y}No Dokku apps registered.${N}"
             echo "  ${D}Raw 'dokku apps:list' output:${N}"
@@ -278,7 +286,7 @@ render_once() {
     fi
 
     if $JSON; then
-        printf '{"dokku":"running","host_ports":"%s","apps":[' "$dports"
+        printf '{"dokku":"running","host_ports":"%s",%s,"apps":[' "$dports" "$(json_auto_pull_field)"
     else
         printf "  ${D}%-18s %-8s %-9s %-3s %-5s %-6s %-7s %-32s %s${N}\n" \
             "APP" "ROLE" "STATE" "RST" "HTTP" "INTPORT" "PROCS" "IMAGE (running)" "DOMAINS"

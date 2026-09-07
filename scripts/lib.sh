@@ -331,16 +331,151 @@ get_remote_digest() {
     local repo="$image"
     [[ "$repo" != *"/"* ]] && repo="library/$repo"
 
-    local token
-    token=$(curl -sf "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull" | \
-        grep -o '"token":"[^"]*"' | cut -d'"' -f4 2>/dev/null || echo "")
-    [ -z "$token" ] && return 1
+    local token_response token headers digest
+    token_response=$(curl -fsS "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull") || {
+        echo "Docker Hub token request failed for ${image}:${tag}" >&2
+        return 1
+    }
+    token=$(printf '%s' "$token_response" | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+    [ -n "$token" ] || {
+        echo "Docker Hub token response did not contain a token for ${image}:${tag}" >&2
+        return 1
+    }
 
-    curl -sf -H "Authorization: Bearer $token" \
+    headers=$(curl -fsS -D - -o /dev/null -H "Authorization: Bearer ${token}" \
         -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
         -H "Accept: application/vnd.oci.image.index.v1+json" \
-        -I "https://registry-1.docker.io/v2/${repo}/manifests/${tag}" 2>/dev/null | \
-        grep -i "docker-content-digest" | awk '{print $2}' | tr -d '\r'
+        "https://registry-1.docker.io/v2/${repo}/manifests/${tag}") || {
+        echo "Docker Hub manifest request failed for ${image}:${tag}" >&2
+        return 1
+    }
+    digest=$(printf '%s\n' "$headers" | grep -i "docker-content-digest" | awk '{print $2}' | tr -d '\r' | head -n1)
+    [ -n "$digest" ] || {
+        echo "Docker Hub did not return a digest for ${image}:${tag}" >&2
+        return 1
+    }
+    printf '%s\n' "$digest"
+}
+
+# Canonical state helpers shared by the poller and webhook. The state key
+# includes the app type and tag, so a webhook for DEV_TAG updates the exact
+# file read by auto-pull.sh instead of creating a second cache entry.
+auto_pull_state_dir() {
+    printf '%s' "${AUTO_PULL_STATE_DIR:-/var/lib/auto-pull}"
+}
+
+auto_pull_digest_component() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g'
+}
+
+auto_pull_digest_key() {
+    local app_type tag
+    app_type="$(auto_pull_digest_component "$1")"
+    tag="$(auto_pull_digest_component "${2:-latest}")"
+    [ -n "$app_type" ] && [ -n "$tag" ] || return 1
+    printf '%s-%s' "$app_type" "$tag"
+}
+
+auto_pull_digest_path() {
+    local app_type="$1" tag="${2:-latest}" state_dir="${3:-$(auto_pull_state_dir)}"
+    printf '%s/%s.digest' "$state_dir" "$(auto_pull_digest_key "$app_type" "$tag")"
+}
+
+# Read the last deployed digest. Older installs wrote <type>.digest; use that
+# file only for the configured DEV_TAG and migrate it on the next successful
+# deployment, which avoids replaying an already deployed webhook.
+auto_pull_digest_read() {
+    local app_type="$1" tag="${2:-latest}" state_dir="${3:-$(auto_pull_state_dir)}"
+    local path legacy value
+    path="$(auto_pull_digest_path "$app_type" "$tag" "$state_dir")" || return 1
+    if [ -f "$path" ]; then
+        value="$(sed -n 's/^last_deployed_digest=//p' "$path" | head -n1)"
+        [ -n "$value" ] && { printf '%s\n' "$value"; return 0; }
+        sed -n '1p' "$path"
+        return 0
+    fi
+    legacy="${state_dir}/$(auto_pull_digest_component "$app_type").digest"
+    if [ "$tag" = "${DEV_TAG:-}" ] && [ "$legacy" != "$path" ] && [ -f "$legacy" ]; then
+        sed -n '1p' "$legacy"
+    fi
+}
+
+# Write reconciliation state with a same-directory rename so readers never see
+# a partial file. Callers must invoke this only after a successful deployment.
+auto_pull_digest_write() {
+    local app_type="$1" tag="$2" digest="$3" image="${4:-}" state_dir="${5:-$(auto_pull_state_dir)}"
+    local path tmp
+    [ -n "$digest" ] || return 1
+    path="$(auto_pull_digest_path "$app_type" "$tag" "$state_dir")" || return 1
+    mkdir -p "$state_dir"
+    tmp="${path}.$$"
+    umask 077
+    {
+        printf 'last_seen_digest=%s\n' "$digest"
+        printf 'last_deployed_digest=%s\n' "$digest"
+        [ -n "$image" ] && printf 'image=%s\n' "$image"
+        printf 'tag=%s\n' "$tag"
+        printf 'updated_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    } > "$tmp" || { rm -f "$tmp"; return 1; }
+    mv -f "$tmp" "$path"
+}
+
+auto_pull_cron_line() {
+    local script="$1" config="$2"
+    printf '*/2 * * * * %q --config %q >> /var/log/auto-pull.log 2>&1' "$script" "$config"
+}
+
+# Install exactly one poller entry while preserving unrelated crontab entries.
+ensure_auto_pull_schedule() {
+    local script="$1" config="$2" existing filtered line
+    command -v crontab >/dev/null 2>&1 || {
+        echo "crontab is unavailable; install cron before enabling auto-pull." >&2
+        return 1
+    }
+    existing="$(crontab -l 2>/dev/null || true)"
+    filtered="$(printf '%s\n' "$existing" | grep -v 'auto-pull\.sh' || true)"
+    line="$(auto_pull_cron_line "$script" "$config")"
+    {
+        [ -z "$filtered" ] || printf '%s\n' "$filtered"
+        printf '%s\n' "$line"
+    } | crontab - || {
+        echo "failed to install auto-pull crontab entry." >&2
+        return 1
+    }
+    if ! crontab -l 2>/dev/null | grep -Fq -- "$script"; then
+        echo "auto-pull crontab verification failed; expected ${script}." >&2
+        return 1
+    fi
+}
+
+auto_pull_cron_status() {
+    local script="${1:-}" output rc
+    if ! command -v crontab >/dev/null 2>&1; then
+        printf 'error\tcrontab command unavailable; install cron and rerun setup.sh'
+        return 0
+    fi
+    if output="$(crontab -l 2>&1)"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then
+        if printf '%s' "$output" | grep -qi 'no crontab for'; then
+            printf 'absent\tNo user crontab exists; run sudo bash %s' "${script:-scripts/setup.sh}"
+        else
+            printf 'error\tUnable to read user crontab (exit %s): %s' "$rc" "$output"
+        fi
+        return 0
+    fi
+    if ! printf '%s\n' "$output" | grep -q 'auto-pull\.sh'; then
+        printf 'absent\tAuto-pull cron entry is missing; run sudo bash %s' "${script:-scripts/setup.sh}"
+        return 0
+    fi
+    if [ -n "$script" ] && [ ! -x "$script" ]; then
+        printf 'error\tAuto-pull cron exists but script is missing or not executable: %s' "$script"
+        return 0
+    fi
+    printf 'active\tAuto-pull cron is installed and references auto-pull.sh'
 }
 
 # =============================================================================

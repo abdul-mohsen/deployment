@@ -43,6 +43,12 @@ warn()  { echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] ${YELLOW}[!]${NC} $*"; }
 error() { echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] ${RED}[✗]${NC} $*"; }
 info()  { echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] ${BLUE}[i]${NC} $*"; }
 
+send_response() {
+    local status="$1" body="$2"
+    printf 'HTTP/1.1 %s\r\nContent-Length: %s\r\nConnection: close\r\n\r\n%s' \
+        "$status" "${#body}" "$body"
+}
+
 CONFIG_FILE="$PROJECT_DIR/config.env"
 WEBHOOK_PORT=9999
 LOG_FILE="/var/log/webhook-deploy.log"
@@ -111,7 +117,7 @@ handle_request() {
     # ---- Validate auth ----
     if [ "$auth_header" != "$WEBHOOK_SECRET" ]; then
         warn "Unauthorized request (bad token)"
-        echo -ne "HTTP/1.1 401 Unauthorized\r\nContent-Length: 24\r\nConnection: close\r\n\r\n{\"error\":\"unauthorized\"}"
+        send_response "401 Unauthorized" '{"error":"unauthorized"}'
         return
     fi
 
@@ -121,54 +127,82 @@ handle_request() {
     path=$(echo "$request" | head -1 | awk '{print $2}')
 
     if [ "$method" != "POST" ] || [ "$path" != "/deploy" ]; then
-        echo -ne "HTTP/1.1 404 Not Found\r\nContent-Length: 21\r\nConnection: close\r\n\r\n{\"error\":\"not found\"}"
+        send_response "404 Not Found" '{"error":"not found"}'
         return
     fi
 
     # ---- Parse JSON body (minimal — extract type and image) ----
-    local app_type image tenant_flag
+    local app_type image tenant
     app_type=$(echo "$body" | grep -o '"type" *: *"[^"]*"' | cut -d'"' -f4 || echo "backend")
     image=$(echo "$body" | grep -o '"image" *: *"[^"]*"' | cut -d'"' -f4 || echo "")
-    local tenant
     tenant=$(echo "$body" | grep -o '"tenant" *: *"[^"]*"' | cut -d'"' -f4 || echo "")
 
     if [ -z "$image" ]; then
-        echo -ne "HTTP/1.1 400 Bad Request\r\nContent-Length: 26\r\nConnection: close\r\n\r\n{\"error\":\"image required\"}"
+        send_response "400 Bad Request" '{"error":"image required"}'
         return
     fi
 
-    log "Deploy triggered: type=$app_type image=$image tenant=${tenant:-all}"
+    case "$app_type" in
+        backend|frontend) ;;
+        *)
+            send_response "400 Bad Request" '{"error":"type must be backend or frontend"}'
+            return
+            ;;
+    esac
 
-    # Respond immediately (deploy runs async)
-    echo -ne "HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}"
-
-    # Build command
-    tenant_flag=""
-    if [ -n "$tenant" ]; then
-        tenant_flag="--tenant $tenant"
+    local img_name="$image" img_tag="latest" digest
+    if [[ "$image" == *@* ]]; then
+        img_name="${image%@*}"
+        img_tag="${image#*@}"
+    elif [[ "$image" == *:* ]]; then
+        img_name="${image%:*}"
+        img_tag="${image##*:}"
     fi
 
-    # Run deploy in background and update digest so auto-pull.sh doesn't re-deploy
-    (
-        if "$SCRIPT_DIR/deploy-all.sh" "$image" --type "$app_type" $tenant_flag \
-            >> "$LOG_FILE" 2>&1; then
-            log "Deploy succeeded: $image ($app_type)" >> "$LOG_FILE" 2>&1
+    local lock_file="$(auto_pull_state_dir)/auto-pull.lock"
+    if ! mkdir -p "$(auto_pull_state_dir)" || ! { exec 8>"$lock_file"; }; then
+        send_response "500 Internal Server Error" '{"error":"reconciliation state directory is unavailable"}'
+        return
+    fi
+    if ! flock -n 8; then
+        exec 8>&-
+        send_response "409 Conflict" '{"error":"another reconciliation is in progress; retry"}'
+        return
+    fi
 
-            # Update auto-pull digest so poller doesn't re-deploy the same image
-            local digest_dir="/var/lib/auto-pull"
-            mkdir -p "$digest_dir"
-            local img_name="${image%%:*}"
-            local img_tag="${image#*:}"
-            [ "$img_tag" = "$img_name" ] && img_tag="latest"
-            local digest
-            digest=$(get_remote_digest "$img_name" "$img_tag" 2>/dev/null || echo "")
-            if [ -n "$digest" ]; then
-                echo "$digest" > "${digest_dir}/${app_type}.digest"
-            fi
-        else
-            warn "Deploy failed: $image ($app_type)" >> "$LOG_FILE" 2>&1
+    if ! digest=$(get_remote_digest "$img_name" "$img_tag"); then
+        flock -u 8
+        exec 8>&-
+        warn "Webhook could not resolve digest for $image"
+        send_response "502 Bad Gateway" '{"error":"digest lookup failed; deployment was not attempted"}'
+        return
+    fi
+
+    log "Deploy triggered: type=$app_type image=$image digest=$digest tenant=${tenant:-all}"
+    local -a deploy_args=("$image" --type "$app_type")
+    [ -n "$tenant" ] && deploy_args+=(--tenant "$tenant")
+
+    local output
+    if output=$("$SCRIPT_DIR/deploy-all.sh" "${deploy_args[@]}" 2>&1); then
+        printf '%s\n' "$output" >> "$LOG_FILE"
+        if ! auto_pull_digest_write "$app_type" "$img_tag" "$digest" "$img_name"; then
+            flock -u 8
+            exec 8>&-
+            warn "Deploy succeeded but digest state could not be persisted for $image"
+            send_response "500 Internal Server Error" '{"error":"deployment succeeded but reconciliation state was not saved"}'
+            return
         fi
-    ) &
+        flock -u 8
+        exec 8>&-
+        log "Deploy succeeded: $image ($app_type)"
+        send_response "200 OK" '{"status":"deployed","digest":"'"$digest"'"}'
+    else
+        printf '%s\n' "$output" >> "$LOG_FILE"
+        flock -u 8
+        exec 8>&-
+        warn "Deploy failed: $image ($app_type)"
+        send_response "502 Bad Gateway" '{"error":"deployment failed; retryable"}'
+    fi
 }
 
 # Bind address — default localhost only (so HTTPS proxy must front it).

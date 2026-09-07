@@ -50,7 +50,7 @@ scripts/                    # ops automation (run on the server)
   remove-tenant.sh
   update-tenant.sh
   deploy-all.sh             # MANUAL prod deploy (per-client or all)
-  auto-pull.sh              # optional cron: dev-only auto-deploy from DEV_TAG
+  auto-pull.sh              # verified cron: dev-only auto-deploy from DEV_TAG
   rollback-tenant.sh
   set-tenant-image.sh       # pin a tenant to a specific image
   list-tenants.sh
@@ -187,3 +187,8 @@ have a matching image.
 | `WEBHOOK_SECRET` | optional | must match `WEBHOOK_SECRET` in `config.env` |
 
 Polling (cron + `auto-pull.sh`) is the safety net and works without any webhook.
+`setup.sh` installs and verifies the cron entry when Docker Hub is configured;
+`status.sh` reports `active`, `absent`, or `error` with an actionable
+diagnostic. Webhook and polling share the canonical
+`/var/lib/auto-pull/<type>-<tag>.digest` state, which is written atomically
+only after deployment succeeds.

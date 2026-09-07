@@ -119,6 +119,44 @@ app_image() {
     docker inspect -f '{{.Config.Image}}' "$cid" 2>/dev/null
 }
 
+app_env() {
+    local app="$1" key="$2" cid
+    cid=$(app_container_id "$app")
+    [ -z "$cid" ] && return 0
+    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid" 2>/dev/null \
+        | awk -F= -v key="$key" '$1==key {sub(/^[^=]*=/,""); print; exit}'
+}
+
+app_image_digest() {
+    local app="$1" cid image_id ref
+    cid=$(app_container_id "$app")
+    [ -z "$cid" ] && return 0
+    image_id=$(docker inspect -f '{{.Image}}' "$cid" 2>/dev/null)
+    ref=$(docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$image_id" 2>/dev/null \
+        | awk -F@ 'NF==2 {print $2; exit}')
+    printf '%s' "$ref"
+}
+
+app_identity_status() {
+    local app="$1" missing="" key value declared_digest observed_digest
+    for key in APP_IMAGE_CHANNEL APP_IMAGE_VERSION APP_IMAGE_COMMIT APP_IMAGE_REF APP_WORKFLOW_RUN APP_DEPLOYED_AT; do
+        value=$(app_env "$app" "$key")
+        [ -n "$value" ] || missing="${missing:+$missing, }${key#APP_IMAGE_}"
+    done
+    declared_digest=$(app_env "$app" APP_IMAGE_DIGEST)
+    observed_digest=$(app_image_digest "$app")
+    value="$declared_digest"
+    [ -n "$value" ] || value="$observed_digest"
+    [ -n "$value" ] || missing="${missing:+$missing, }digest"
+    if [ -n "$missing" ]; then
+        printf 'missing|missing build identity fields: %s' "$missing"
+    elif [ -n "$declared_digest" ] && [ -n "$observed_digest" ] && [ "$declared_digest" != "$observed_digest" ]; then
+        printf 'mismatch|recorded digest does not match the running image'
+    else
+        printf 'verified|'
+    fi
+}
+
 # Restart count for the app's running container
 app_restart_count() {
     local app="$1"
@@ -184,6 +222,54 @@ app_http_probe() {
     docker exec -i dokku bash -lc \
         "curl -sS -o /dev/null -w '%{http_code}' --max-time 5 http://${app}.web${path}" \
         2>/dev/null || echo "000"
+}
+
+app_http_probe_detail() {
+    local app="$1" path="${2:-/}"
+    docker exec -i dokku bash -lc \
+        "curl -sS -o /dev/null -w '%{http_code}\t%{errormsg}' --max-time 5 http://${app}.web${path}" \
+        2>/dev/null || true
+}
+
+external_http_probe_detail() {
+    local domain="$1" path="${2:-/}" scheme="https"
+    [ -z "$domain" ] && { printf '000\tno Dokku route is configured'; return; }
+    [[ "$domain" == *"://"* ]] && scheme="" || true
+    if [ -n "$scheme" ]; then
+        domain="${scheme}://${domain}"
+    fi
+    curl -k -sS -o /dev/null -w '%{http_code}\t%{errormsg}' --max-time 5 "${domain}${path}" 2>&1 || true
+}
+
+probe_code() {
+    local result="$1" code="${result%%$'\t'*}"
+    [ "${#code}" -eq 3 ] && printf '%s' "$code" || printf '000'
+}
+
+probe_reason() {
+    local result="$1"
+    if [[ "$result" == *$'\t'* ]]; then
+        printf '%s' "${result#*$'\t'}"
+    else
+        printf 'probe did not return an HTTP response'
+    fi
+}
+
+probe_status() {
+    case "$1" in
+        2*|3*) printf 'healthy' ;;
+        000)   printf 'unavailable' ;;
+        *)     printf 'unhealthy' ;;
+    esac
+}
+
+json_escape() {
+    local value="${1:-}"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\n'/\\n}"
+    printf '%s' "$value"
 }
 
 # Per-tenant pin from master DB (echoes "<backend>|<frontend>|<enabled>")
@@ -318,7 +404,9 @@ render_once() {
         local kind;   kind=$(app_kind "$app")
         local cid;    cid=$(app_container_id "$app")
 
-        local state rcount="-" image="-" probe="000" path="/"
+        local state rcount="-" image="-" probe="000" probe_reason="container is not running" path="/"
+        local internal_status="not-checked" external_code="000" external_status="not-checked"
+        local external_reason="container is not running" identity_status="missing" identity_reason="container has no build identity"
         # Ask Dokku first; only fall back to docker inspect to refine 'running'
         # into 'restarting'/'exited' when the container is mid-flap.
         state=$(app_dokku_state "$app")
@@ -334,8 +422,39 @@ render_once() {
         local hostports; hostports=$(app_host_ports "$app")
         local procs;     procs=$(app_process_types "$app")
         [ "$kind" = "backend" ] && path="/healthz"
-        [ -n "$cid" ] && probe=$(app_http_probe "$app" "$path")
         local domains; domains=$(docker exec -i dokku dokku domains:report "$app" --domains-app-vhosts 2>/dev/null | tr -s ' ')
+        if [ "$state" = "running" ]; then
+            local internal_detail; internal_detail=$(app_http_probe_detail "$app" "$path")
+            probe=$(probe_code "$internal_detail")
+            probe_reason=$(probe_reason "$internal_detail")
+            internal_status=$(probe_status "$probe")
+            local external_detail; external_detail=$(external_http_probe_detail "${domains%% *}" "$path")
+            external_code=$(probe_code "$external_detail")
+            external_reason=$(probe_reason "$external_detail")
+            external_status=$(probe_status "$external_code")
+        fi
+        if [ -n "$cid" ]; then
+            local identity_detail; identity_detail=$(app_identity_status "$app")
+            identity_status="${identity_detail%%|*}"
+            identity_reason="${identity_detail#*|}"
+        fi
+        local liveness_status="unknown"
+        case "$state" in
+            running) liveness_status="healthy" ;;
+            not-deployed|unknown|"") liveness_status="unknown" ;;
+            *) liveness_status="unhealthy" ;;
+        esac
+        local image_ref image_digest version commit short_commit channel workflow deployed_at
+        image_ref=$(app_env "$app" APP_IMAGE_REF)
+        image_digest=$(app_env "$app" APP_IMAGE_DIGEST)
+        [ -n "$image_digest" ] || image_digest=$(app_image_digest "$app")
+        version=$(app_env "$app" APP_IMAGE_VERSION)
+        commit=$(app_env "$app" APP_IMAGE_COMMIT)
+        short_commit=$(app_env "$app" APP_IMAGE_COMMIT_SHORT)
+        [ -n "$short_commit" ] || short_commit="${commit:0:7}"
+        channel=$(app_env "$app" APP_IMAGE_CHANNEL)
+        workflow=$(app_env "$app" APP_WORKFLOW_RUN)
+        deployed_at=$(app_env "$app" APP_DEPLOYED_AT)
 
         if $JSON; then
             $first || printf ','
@@ -350,14 +469,22 @@ render_once() {
             local p_digest="${p_rest%%|*}"; p_rest="${p_rest#*|}"
             local p_version="${p_rest%%|*}"; p_rest="${p_rest#*|}"
             local p_commit="${p_rest%%|*}"; local p_status="${p_rest#*|}"
-            printf '{"app":"%s","tenant":"%s","role":"%s","state":"%s","restarts":"%s","http":"%s","internal_port":"%s","host_ports":"%s","processes":"%s","image":"%s","domains":"%s","pinned_backend":"%s","pinned_frontend":"%s","enabled":"%s","provenance_ref":"%s","provenance_digest":"%s","provenance_version":"%s","provenance_commit":"%s","provenance_status":"%s"}' \
-                "$app" "$tenant" "$kind" "$state" "$rcount" "$probe" "$intport" "$hostports" "$procs" "$image" "$domains" "$pin_be" "$pin_fe" "$enabled" "$p_ref" "$p_digest" "$p_version" "$p_commit" "$p_status"
+            printf '{"app":"%s","tenant":"%s","role":"%s","state":"%s","restarts":"%s","http":"%s","http_reason":"%s","internal_port":"%s","host_ports":"%s","processes":"%s","image":"%s","domains":"%s","pinned_backend":"%s","pinned_frontend":"%s","enabled":"%s","health":{"liveness":{"status":"%s","reason":"%s"},"internal":{"status":"%s","http_code":"%s","reason":"%s"},"external":{"status":"%s","http_code":"%s","reason":"%s"}},"identity":{"channel":"%s","version":"%s","commit":"%s","short_commit":"%s","image_ref":"%s","digest":"%s","workflow_run":"%s","deployed_at":"%s","status":"%s","reason":"%s"}}' \
+            printf '{"app":"%s","tenant":"%s","role":"%s","state":"%s","restarts":"%s","http":"%s","http_reason":"%s","internal_port":"%s","host_ports":"%s","processes":"%s","image":"%s","domains":"%s","pinned_backend":"%s","pinned_frontend":"%s","enabled":"%s","health":{"liveness":{"status":"%s","reason":"%s"},"internal":{"status":"%s","http_code":"%s","reason":"%s"},"external":{"status":"%s","http_code":"%s","reason":"%s"}},"identity":{"channel":"%s","version":"%s","commit":"%s","short_commit":"%s","image_ref":"%s","digest":"%s","workflow_run":"%s","deployed_at":"%s","status":"%s","reason":"%s"},"provenance":{"ref":"%s","digest":"%s","version":"%s","commit":"%s","status":"%s"}}' \
+                "$(json_escape "$app")" "$(json_escape "$tenant")" "$(json_escape "$kind")" "$(json_escape "$state")" "$(json_escape "$rcount")" "$(json_escape "$probe")" "$(json_escape "$probe_reason")" "$(json_escape "$intport")" "$(json_escape "$hostports")" "$(json_escape "$procs")" "$(json_escape "$image")" "$(json_escape "$domains")" "$(json_escape "$pin_be")" "$(json_escape "$pin_fe")" "$(json_escape "$enabled")" \
+                "$(json_escape "$liveness_status")" "$(json_escape "$probe_reason")" "$(json_escape "$internal_status")" "$(json_escape "$probe")" "$(json_escape "$probe_reason")" "$(json_escape "$external_status")" "$(json_escape "$external_code")" "$(json_escape "$external_reason")" \
+                "$(json_escape "$channel")" "$(json_escape "$version")" "$(json_escape "$commit")" "$(json_escape "$short_commit")" "$(json_escape "$image_ref")" "$(json_escape "$image_digest")" "$(json_escape "$workflow")" "$(json_escape "$deployed_at")" "$(json_escape "$identity_status")" "$(json_escape "$identity_reason")" \
+                "$(json_escape "$p_ref")" "$(json_escape "$p_digest")" "$(json_escape "$p_version")" "$(json_escape "$p_commit")" "$(json_escape "$p_status")"
         else
             printf "  %-18s %-8s %s %-3s %s %-6s %-7s %-32s %s\n" \
                 "$app" "$kind" "$(printf '%-9s' "$(colorize_state "$state")")" \
                 "$rcount" \
                 "$(printf '%-5s' "$(colorize_http "$probe")")" \
                 "${intport:--}" "${procs:--}" "${image:--}" "${domains:--}"
+            [ "$probe" = "000" ] && printf "  ${D}%-18s   internal probe: %s${N}\n" "" "${probe_reason:-no HTTP response}"
+            [ "$external_code" = "000" ] && printf "  ${D}%-18s   external probe: %s${N}\n" "" "${external_reason:-no HTTP response}"
+            [ "$identity_status" != "verified" ] && printf "  ${D}%-18s   provenance: %s${N}\n" "" "${identity_reason:-unverified}"
+            [ -n "${image_ref:-}" ] && printf "  ${D}%-18s   source image: %s @ %s${N}\n" "" "$image_ref" "${image_digest:--}"
             [ -n "$hostports" ] && printf "  ${D}%-18s   host-published: %s${N}\n" "" "$hostports"
         fi
 

@@ -10,6 +10,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -37,6 +39,9 @@ type App struct {
 	State       string // running / stopped / not-deployed / restarting / mixed / unknown
 	Image       string
 	Version     string
+	ImageRef    string
+	ImageDigest string
+	Identity    BuildIdentity
 	RestartCnt  string
 	Procs       []string
 	IntPort     string
@@ -44,16 +49,50 @@ type App struct {
 	Domains     []string
 	HTTPCode    string
 	ContainerID string
+	Liveness    HealthCheck
+	Internal    HealthCheck
+	External    HealthCheck
 }
 
 type containerSummary struct {
-	State      string
-	Image      string
-	Version    string
-	RestartCnt string
+	State       string
+	Image       string
+	ImageDigest string
+	Version     string
+	RestartCnt  string
+	Env         map[string]string
 }
 
-var nameLine = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+// HealthCheck is intentionally additive to the historical HTTPCode field. A
+// code of 000 is not a health state: Reason explains what prevented a response.
+type HealthCheck struct {
+	Status   string `json:"status"`
+	HTTPCode string `json:"http_code,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	URL      string `json:"url,omitempty"`
+}
+
+// BuildIdentity is the non-secret provenance contract recorded by deployment
+// scripts and OCI image labels.
+type BuildIdentity struct {
+	Channel     string `json:"channel,omitempty"`
+	Version     string `json:"version,omitempty"`
+	Commit      string `json:"commit,omitempty"`
+	ShortCommit string `json:"short_commit,omitempty"`
+	ImageRef    string `json:"image_ref,omitempty"`
+	Digest      string `json:"digest,omitempty"`
+	WorkflowRun string `json:"workflow_run,omitempty"`
+	DeployedAt  string `json:"deployed_at,omitempty"`
+	Status      string `json:"status"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+var (
+	nameLine          = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+	semanticVersion   = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
+	digestValue       = regexp.MustCompile(`^sha256:[0-9a-fA-F]{64}$`)
+	workflowRunNumber = regexp.MustCompile(`^[0-9]+$`)
+)
 
 // AppsList returns all Dokku apps registered on the host.
 func (c *Client) AppsList(ctx context.Context) ([]string, error) {
@@ -83,6 +122,10 @@ func (c *Client) AppSummaryFrom(ctx context.Context, name, containerID string, d
 	app.ContainerID = containerID
 	if app.ContainerID == "" {
 		app.State = "not-deployed"
+		app.Liveness = HealthCheck{Status: "unknown", Reason: "no running container"}
+		app.Internal = HealthCheck{Status: "not-checked", Reason: "no running container"}
+		app.External = externalUnavailable(domains, "container is not running")
+		app.Identity = missingIdentity("container has no build identity")
 		return app
 	}
 	container := c.containerSummary(ctx, app.ContainerID)
@@ -101,7 +144,23 @@ func (c *Client) AppSummaryFrom(ctx context.Context, name, containerID string, d
 	if app.Version == "" {
 		app.Version = imageTag(app.Image)
 	}
+	app.ImageRef = container.Env["APP_IMAGE_REF"]
+	app.ImageDigest = container.ImageDigest
+	app.Identity = buildIdentity(container.Env, app.ImageRef, app.ImageDigest, app.Version)
 	app.RestartCnt = container.RestartCnt
+	app.Liveness = livenessForState(app.State)
+	path := "/"
+	if app.Role == "backend" {
+		path = "/healthz"
+	}
+	if app.State == "running" {
+		app.Internal = c.httpProbe(ctx, name, path)
+		app.HTTPCode = app.Internal.HTTPCode
+		app.External = c.externalProbe(ctx, domains, path)
+	} else {
+		app.Internal = HealthCheck{Status: "not-checked", HTTPCode: "000", Reason: "container is not running"}
+		app.External = externalUnavailable(domains, "container is not running")
+	}
 	return app
 }
 
@@ -109,9 +168,10 @@ func (c *Client) containerSummary(ctx context.Context, cid string) containerSumm
 	out, _ := c.exec(ctx, c.dockerBin, "inspect", "-f", `{{.State.Status}}
 {{.Config.Image}}
 {{.RestartCount}}
+{{.Image}}
 {{range .Config.Env}}{{println .}}{{end}}`, cid)
 	lines := strings.Split(out, "\n")
-	summary := containerSummary{}
+	summary := containerSummary{Env: map[string]string{}}
 	if len(lines) > 0 {
 		summary.State = strings.TrimSpace(lines[0])
 	}
@@ -121,14 +181,32 @@ func (c *Client) containerSummary(ctx context.Context, cid string) containerSumm
 	if len(lines) > 2 {
 		summary.RestartCnt = strings.TrimSpace(lines[2])
 	}
-	for _, line := range lines[3:] {
+	imageID := ""
+	if len(lines) > 3 {
+		imageID = strings.TrimSpace(lines[3])
+	}
+	if imageID != "" {
+		summary.ImageDigest = c.inspectImageDigest(ctx, imageID)
+	}
+	for _, line := range lines[4:] {
 		line = strings.TrimSpace(line)
+		if i := strings.IndexByte(line, '='); i > 0 {
+			summary.Env[line[:i]] = line[i+1:]
+		}
 		if strings.HasPrefix(line, "APP_IMAGE_VERSION=") {
 			summary.Version = strings.TrimPrefix(line, "APP_IMAGE_VERSION=")
-			break
 		}
 	}
 	return summary
+}
+
+func (c *Client) inspectImageDigest(ctx context.Context, imageID string) string {
+	out, _ := c.exec(ctx, c.dockerBin, "image", "inspect", "-f", "{{index .RepoDigests 0}}", imageID)
+	ref := strings.TrimSpace(out)
+	if at := strings.LastIndex(ref, "@"); at >= 0 {
+		return ref[at+1:]
+	}
+	return ""
 }
 
 func (c *Client) ContainerIDsByApp(ctx context.Context) map[string]string {
@@ -181,25 +259,36 @@ func (c *Client) AppDetails(ctx context.Context, name string) App {
 	a.ContainerID = c.containerID(ctx, name)
 	a.State = c.appState(ctx, name, a.ContainerID)
 	if a.ContainerID != "" {
-		a.Image = c.inspectField(ctx, a.ContainerID, "{{.Config.Image}}")
-		a.Version = c.envField(ctx, a.ContainerID, "APP_IMAGE_VERSION")
+		container := c.containerSummary(ctx, a.ContainerID)
+		a.Image = container.Image
+		a.Version = container.Version
 		if a.Version == "" {
 			a.Version = imageTag(a.Image)
 		}
-		a.RestartCnt = c.inspectField(ctx, a.ContainerID, "{{.RestartCount}}")
+		a.ImageRef = container.Env["APP_IMAGE_REF"]
+		a.ImageDigest = container.ImageDigest
+		a.Identity = buildIdentity(container.Env, a.ImageRef, a.ImageDigest, a.Version)
+		a.RestartCnt = container.RestartCnt
 		a.HostPorts = c.hostPorts(ctx, a.ContainerID)
 	}
 	a.IntPort = c.intPort(ctx, name)
 	a.Procs = c.procTypes(ctx, name)
 	a.Domains = c.domains(ctx, name)
-	if a.ContainerID != "" {
+	if a.ContainerID != "" && a.State == "running" {
 		path := "/"
 		if a.Role == "backend" {
 			path = "/healthz"
 		}
-		a.HTTPCode = c.httpProbe(ctx, name, path)
+		a.Liveness = livenessForState(a.State)
+		a.Internal = c.httpProbe(ctx, name, path)
+		a.External = c.externalProbe(ctx, a.Domains, path)
+		a.HTTPCode = a.Internal.HTTPCode
 	} else {
 		a.HTTPCode = "000"
+		a.Liveness = livenessForState(a.State)
+		a.Internal = HealthCheck{Status: "not-checked", HTTPCode: "000", Reason: "container is not running"}
+		a.External = externalUnavailable(a.Domains, "container is not running")
+		a.Identity = missingIdentity("container has no build identity")
 	}
 	return a
 }
@@ -348,14 +437,181 @@ func (c *Client) domains(ctx context.Context, app string) []string {
 	return strings.Fields(out)
 }
 
-func (c *Client) httpProbe(ctx context.Context, app, path string) string {
-	out, _ := c.exec(ctx, c.dockerBin, "exec", "-i", c.dokkuName, "bash", "-lc",
-		fmt.Sprintf(`curl -sS -o /dev/null -w '%%{http_code}' --max-time 5 http://%s.web%s`, app, path))
-	out = strings.TrimSpace(out)
-	if out == "" {
-		return "000"
+func (c *Client) httpProbe(ctx context.Context, app, path string) HealthCheck {
+	target := fmt.Sprintf("http://%s.web%s", app, path)
+	out, err := c.exec(ctx, c.dockerBin, "exec", "-i", c.dokkuName, "bash", "-lc",
+		fmt.Sprintf(`curl -sS -o /dev/null -w '%%{http_code}\t%%{errormsg}' --max-time 5 %s`, target))
+	return probeResult(target, out, err, "internal service")
+}
+
+func (c *Client) externalProbe(ctx context.Context, domains []string, path string) HealthCheck {
+	if len(domains) == 0 || strings.TrimSpace(domains[0]) == "" {
+		return externalUnavailable(domains, "no Dokku route is configured")
 	}
-	return out
+	host := strings.TrimSpace(domains[0])
+	if !strings.Contains(host, "://") {
+		host = "https://" + host
+	}
+	u, err := url.Parse(host)
+	if err != nil || u.Host == "" {
+		return HealthCheck{Status: "unavailable", HTTPCode: "000", Reason: "invalid Dokku route"}
+	}
+	u.Path = path
+	target := u.String()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return HealthCheck{Status: "unavailable", HTTPCode: "000", Reason: "could not create external probe: " + err.Error(), URL: target}
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return HealthCheck{Status: "unavailable", HTTPCode: "000", Reason: actionableProbeError(err), URL: target}
+	}
+	defer resp.Body.Close()
+	return HealthCheck{Status: probeStatus(resp.StatusCode), HTTPCode: fmt.Sprintf("%d", resp.StatusCode), URL: target}
+}
+
+func probeResult(target, output string, err error, service string) HealthCheck {
+	output = strings.TrimSpace(output)
+	code := "000"
+	reason := ""
+	if tab := strings.LastIndexByte(output, '\t'); tab >= 3 {
+		candidate := strings.TrimSpace(output[:tab])
+		if len(candidate) >= 3 && allDigits(candidate[len(candidate)-3:]) {
+			code = candidate[len(candidate)-3:]
+			reason = strings.TrimSpace(output[tab+1:])
+		}
+	} else if len(output) >= 3 && allDigits(output[:3]) {
+		code = output[:3]
+		reason = strings.TrimSpace(output[3:])
+	}
+	if code == "" {
+		code = "000"
+	}
+
+	if code == "000" {
+		if reason == "" && err != nil {
+			reason = actionableProbeError(err)
+		}
+		if reason == "" {
+			reason = service + " did not return an HTTP response"
+		}
+		return HealthCheck{Status: "unavailable", HTTPCode: code, Reason: reason, URL: target}
+	}
+	return HealthCheck{Status: probeStatusString(code), HTTPCode: code, Reason: reason, URL: target}
+}
+
+func allDigits(value string) bool {
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return value != ""
+}
+
+func probeStatus(code int) string {
+	return probeStatusString(fmt.Sprintf("%d", code))
+}
+
+func probeStatusString(code string) string {
+	if len(code) == 3 && (strings.HasPrefix(code, "2") || strings.HasPrefix(code, "3")) {
+		return "healthy"
+	}
+	return "unhealthy"
+}
+
+func livenessForState(state string) HealthCheck {
+	switch state {
+	case "running":
+		return HealthCheck{Status: "healthy", Reason: "container is running"}
+	case "not-deployed":
+		return HealthCheck{Status: "unknown", Reason: "app has not been deployed"}
+	case "", "unknown":
+		return HealthCheck{Status: "unknown", Reason: "container state is unknown"}
+	default:
+		return HealthCheck{Status: "unhealthy", Reason: "container state is " + state}
+	}
+}
+
+func externalUnavailable(domains []string, reason string) HealthCheck {
+	check := HealthCheck{Status: "unavailable", HTTPCode: "000", Reason: reason}
+	if len(domains) > 0 {
+		check.URL = strings.TrimSpace(domains[0])
+	}
+	return check
+}
+
+func actionableProbeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return "external route unavailable: " + err.Error()
+}
+
+func missingIdentity(reason string) BuildIdentity {
+	return BuildIdentity{Status: "missing", Reason: reason}
+}
+
+func buildIdentity(env map[string]string, imageRef, imageDigest, version string) BuildIdentity {
+	declaredDigest := firstNonEmpty(env["APP_IMAGE_DIGEST"])
+	identity := BuildIdentity{
+		Channel:     firstNonEmpty(env["APP_IMAGE_CHANNEL"], env["BUILD_CHANNEL"]),
+		Version:     firstNonEmpty(env["APP_IMAGE_VERSION"], version),
+		Commit:      firstNonEmpty(env["APP_IMAGE_COMMIT"], env["APP_SOURCE_COMMIT"], env["BUILD_COMMIT"]),
+		ShortCommit: firstNonEmpty(env["APP_IMAGE_COMMIT_SHORT"], env["APP_SOURCE_COMMIT_SHORT"]),
+		ImageRef:    firstNonEmpty(imageRef, env["APP_IMAGE_REF"]),
+		Digest:      firstNonEmpty(declaredDigest, imageDigest),
+		WorkflowRun: firstNonEmpty(env["APP_WORKFLOW_RUN"], env["BUILD_WORKFLOW_RUN"]),
+		DeployedAt:  firstNonEmpty(env["APP_DEPLOYED_AT"], env["DEPLOYED_AT"]),
+		Status:      "verified",
+	}
+	if identity.ShortCommit == "" && len(identity.Commit) > 7 {
+		identity.ShortCommit = identity.Commit[:7]
+	}
+	missing := []string{}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{"channel", identity.Channel},
+		{"version", identity.Version},
+		{"commit", identity.Commit},
+		{"image ref", identity.ImageRef},
+		{"digest", identity.Digest},
+		{"workflow run", identity.WorkflowRun},
+		{"deployed_at", identity.DeployedAt},
+	} {
+		if strings.TrimSpace(field.value) == "" {
+			missing = append(missing, field.name)
+		}
+	}
+	if len(missing) > 0 {
+		identity.Status = "missing"
+		identity.Reason = "missing build identity fields: " + strings.Join(missing, ", ")
+	} else if declaredDigest != "" && imageDigest != "" && !strings.EqualFold(declaredDigest, imageDigest) {
+		identity.Status = "mismatch"
+		identity.Reason = "recorded digest does not match the running image"
+	} else if identity.Version != "dev" && !semanticVersion.MatchString(identity.Version) {
+		identity.Status = "invalid"
+		identity.Reason = "version is not semantic vMAJOR.MINOR.PATCH"
+	} else if !digestValue.MatchString(identity.Digest) {
+		identity.Status = "invalid"
+		identity.Reason = "digest is not an immutable sha256 digest"
+	} else if !workflowRunNumber.MatchString(identity.WorkflowRun) {
+		identity.Status = "invalid"
+		identity.Reason = "workflow run is not numeric"
+	}
+	return identity
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // Action runs a Dokku lifecycle action against an app.

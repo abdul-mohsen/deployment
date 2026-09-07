@@ -114,6 +114,14 @@ DASHBOARD_LOCAL_DOKKU_PERF=1 go test ./internal/web -run TestLocalDokkuSnapshotT
 
 The dashboard grid uses cached snapshots and a bounded parallel summary collector. Increase `DASHBOARD_SNAPSHOT_WORKERS` only if the host can handle more concurrent Docker inspect work.
 
+`GET /api/status` returns the cached status snapshot. It keeps the legacy
+`image`, `version`, and `http` fields and adds separate liveness, internal
+health, external routing, and provenance results. Each app includes an
+`identity` object with the non-secret channel, version, full/short commit,
+source image ref, resolved digest, workflow run, deployment time, and
+verification status. A `000` result includes an actionable `reason`; a stale
+snapshot is reported with `status: "stale"` rather than being treated as live.
+
 Generate a password hash:
 
 ```sh

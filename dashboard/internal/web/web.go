@@ -106,6 +106,7 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		r.Get("/apps/{name}/logs", s.handleLogStream)
 		r.Get("/apps/{name}/logs.txt", s.handleLogDump)
 		r.Get("/api/apps", s.handleAPIApps)
+		r.Get("/api/status", s.handleAPIStatus)
 		r.Get("/api/image-tags", s.handleImageTags)
 		r.Get("/api/releases", s.handleAPIReleases)
 		r.Get("/events", s.handleEvents)
@@ -457,6 +458,12 @@ func (s *server) handleAPIApps(w http.ResponseWriter, r *http.Request) {
 	snap, _ := s.snapshots.Snapshot()
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprint(w, appsJSON(snap.Apps))
+}
+
+func (s *server) handleAPIStatus(w http.ResponseWriter, _ *http.Request) {
+	snap, _ := s.snapshots.Snapshot()
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprint(w, snapshotJSON(snap))
 }
 
 func (s *server) handleAPIReleases(w http.ResponseWriter, _ *http.Request) {
@@ -852,6 +859,12 @@ func buildReleaseViews(catalog []scripts.ImageVersion, apps []dokku.App) []relea
 				view.FailureSummary = app.Name + " is " + app.State
 			}
 		}
+		if app.Identity.Status != "verified" {
+			view.Failed++
+			if view.FailureSummary == "" {
+				view.FailureSummary = app.Name + " has unverified build provenance"
+			}
+		}
 	}
 	views := make([]releaseView, 0, len(order))
 	for _, tag := range order {
@@ -1230,6 +1243,11 @@ func (s *server) collectSnapshot(ctx context.Context) appSnapshot {
 	snap := appSnapshot{
 		Apps:    out,
 		Healthy: s.dokku.DokkuContainerHealthy(ctx),
+	}
+	if snap.Healthy {
+		snap.Liveness = dokku.HealthCheck{Status: "healthy", Reason: "Dokku container is running"}
+	} else {
+		snap.Liveness = dokku.HealthCheck{Status: "unhealthy", Reason: "Dokku container is not running"}
 	}
 	if err != nil {
 		snap.Error = err.Error()

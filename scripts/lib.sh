@@ -257,6 +257,41 @@ dokku_git_from_image() {
     return "$rc"
 }
 
+# Record the public, non-secret build identity alongside the Dokku config.
+# Dokku often replaces the configured image with a local dokku/<app>:latest
+# image, so status must retain the requested image ref and resolved digest.
+record_build_identity() {
+    local app="$1" image="$2" version digest commit short_commit channel workflow deployed_at
+    version="$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' "$image" 2>/dev/null || true)"
+    [ -z "$version" ] || [ "$version" = "<no value>" ] && version=""
+    if [ -z "$version" ]; then
+        version="${image##*:}"
+    fi
+    digest="$(docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$image" 2>/dev/null \
+        | awk -F@ 'NF==2 {print $2; exit}')"
+    if [ -z "$digest" ] && [[ "$image" == *@sha256:* ]]; then
+        digest="${image##*@}"
+    fi
+    commit="$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image" 2>/dev/null || true)"
+    [ "$commit" = "<no value>" ] && commit=""
+    short_commit="$commit"
+    [ ${#short_commit} -gt 7 ] && short_commit="${short_commit:0:7}"
+    channel="$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.channel"}}' "$image" 2>/dev/null || true)"
+    [ "$channel" = "<no value>" ] && channel=""
+    workflow="$(docker image inspect -f '{{index .Config.Labels "com.afrita.workflow.run"}}' "$image" 2>/dev/null || true)"
+    [ "$workflow" = "<no value>" ] && workflow=""
+    deployed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    dokku config:set --no-restart "$app" \
+        APP_IMAGE_CHANNEL="$channel" \
+        APP_IMAGE_VERSION="$version" \
+        APP_IMAGE_COMMIT="$commit" \
+        APP_IMAGE_COMMIT_SHORT="$short_commit" \
+        APP_IMAGE_REF="$image" \
+        APP_IMAGE_DIGEST="$digest" \
+        APP_WORKFLOW_RUN="$workflow" \
+        APP_DEPLOYED_AT="$deployed_at"
+}
+
 # Silence the harmless but noisy "sudo: unable to resolve host <containerid>"
 # warning that Dokku's internal sudo calls produce when the dokku container
 # was started without --hostname. Idempotent: only writes /etc/hosts once per

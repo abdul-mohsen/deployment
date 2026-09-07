@@ -13,11 +13,14 @@ import (
 type appSnapshot struct {
 	Apps       []dokku.App
 	Healthy    bool
+	Liveness   dokku.HealthCheck
 	UpdatedAt  time.Time
 	Duration   time.Duration
 	Refreshing bool
 	Error      string
 }
+
+const snapshotStaleAfter = 2 * time.Minute
 
 type snapshotCache struct {
 	mu       sync.RWMutex
@@ -133,12 +136,37 @@ func appsJSON(apps []dokku.App) string {
 
 func snapshotJSON(s appSnapshot) string {
 	var b strings.Builder
+	stale := snapshotIsStale(s, time.Now())
+	status := snapshotStatus(s, stale)
 	b.WriteByte('{')
-	fmt.Fprintf(&b, `"healthy":%t,"refreshing":%t,"updated_at":%q,"duration_ms":%d,"error":%q,"apps":`,
-		s.Healthy, s.Refreshing, s.UpdatedAt.UTC().Format(time.RFC3339), s.Duration.Milliseconds(), s.Error)
+	fmt.Fprintf(&b, `"healthy":%t,"status":%q,"stale":%t,"refreshing":%t,"updated_at":%q,"duration_ms":%d,"error":%q,"liveness":%s,"apps":`,
+		s.Healthy, status, stale, s.Refreshing, s.UpdatedAt.UTC().Format(time.RFC3339), s.Duration.Milliseconds(), s.Error,
+		healthJSON(s.Liveness))
 	writeAppsJSONArray(&b, s.Apps)
 	b.WriteByte('}')
 	return b.String()
+}
+
+func snapshotIsStale(s appSnapshot, now time.Time) bool {
+	return s.UpdatedAt.IsZero() || now.Sub(s.UpdatedAt) > snapshotStaleAfter
+}
+
+func snapshotStatus(s appSnapshot, stale bool) string {
+	if stale {
+		return "stale"
+	}
+	if !s.Healthy {
+		return "unhealthy"
+	}
+	for _, app := range s.Apps {
+		if app.Liveness.Status != "" && app.Liveness.Status != "healthy" ||
+			app.Internal.Status != "" && app.Internal.Status != "healthy" ||
+			app.External.Status != "" && app.External.Status != "healthy" ||
+			app.Identity.Status != "" && app.Identity.Status != "verified" {
+			return "degraded"
+		}
+	}
+	return "healthy"
 }
 
 func writeAppsJSONArray(b *strings.Builder, apps []dokku.App) {
@@ -148,9 +176,31 @@ func writeAppsJSONArray(b *strings.Builder, apps []dokku.App) {
 			b.WriteByte(',')
 		}
 		fmt.Fprintf(b,
-			`{"name":%q,"role":%q,"tenant":%q,"state":%q,"image":%q,"version":%q,"http":%q,"int_port":%q,"host_ports":%q,"procs":%q,"domains":%q}`,
-			a.Name, a.Role, a.Tenant, a.State, a.Image, a.Version, a.HTTPCode, a.IntPort, a.HostPorts,
-			strings.Join(a.Procs, ","), strings.Join(a.Domains, ","))
+			`{"name":%q,"role":%q,"tenant":%q,"state":%q,"image":%q,"version":%q,"http":%q,"http_reason":%q,"int_port":%q,"host_ports":%q,"procs":%q,"domains":%q,"image_ref":%q,"image_digest":%q,"commit":%q,"deployed_at":%q,"provenance_status":%q,"liveness":%s,"internal_health":%s,"external_probe":%s,"identity":%s}`,
+			a.Name, a.Role, a.Tenant, a.State, a.Image, a.Version, a.HTTPCode, a.Internal.Reason,
+			a.IntPort, a.HostPorts, strings.Join(a.Procs, ","), strings.Join(a.Domains, ","),
+			a.Identity.ImageRef, a.Identity.Digest, a.Identity.Commit, a.Identity.DeployedAt, a.Identity.Status,
+			healthJSON(a.Liveness), healthJSON(a.Internal), healthJSON(a.External), identityJSON(a.Identity))
 	}
 	b.WriteByte(']')
+}
+
+func healthJSON(check dokku.HealthCheck) string {
+	var b strings.Builder
+	b.WriteByte('{')
+	fmt.Fprintf(&b, `"status":%q,"http_code":%q,"reason":%q,"url":%q`,
+		check.Status, check.HTTPCode, check.Reason, check.URL)
+	b.WriteByte('}')
+	return b.String()
+}
+
+func identityJSON(identity dokku.BuildIdentity) string {
+	var b strings.Builder
+	b.WriteByte('{')
+	fmt.Fprintf(&b, `"channel":%q,"version":%q,"commit":%q,"short_commit":%q,"image_ref":%q,"digest":%q,"workflow_run":%q,"deployed_at":%q,"status":%q,"reason":%q`,
+		identity.Channel, identity.Version, identity.Commit, identity.ShortCommit,
+		identity.ImageRef, identity.Digest, identity.WorkflowRun, identity.DeployedAt,
+		identity.Status, identity.Reason)
+	b.WriteByte('}')
+	return b.String()
 }

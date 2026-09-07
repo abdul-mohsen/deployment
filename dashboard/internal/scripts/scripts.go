@@ -41,14 +41,20 @@ type Field struct {
 // shared by both images so operators choose a version instead of pasting image
 // names into forms.
 type ImageVersion struct {
-	Tag           string
-	BackendImage  string
-	FrontendImage string
-	Date          string
-	Status        string
-	Broken        bool
-	Title         string
-	Notes         []string
+	Tag              string   `json:"tag"`
+	BackendImage     string   `json:"backend_image"`
+	FrontendImage    string   `json:"frontend_image"`
+	BackendVersion   string   `json:"backend_version"`
+	FrontendVersion  string   `json:"frontend_version"`
+	BackendDigest    string   `json:"backend_digest,omitempty"`
+	FrontendDigest   string   `json:"frontend_digest,omitempty"`
+	Date             string   `json:"date,omitempty"`
+	Status           string   `json:"status"`
+	Broken           bool     `json:"broken"`
+	Ready            bool     `json:"ready"`
+	ValidationErrors []string `json:"validation_errors,omitempty"`
+	Title            string   `json:"title"`
+	Notes            []string `json:"notes,omitempty"`
 }
 
 func ReleaseCatalog() []ImageVersion {
@@ -64,20 +70,52 @@ func VersionCatalog() []ImageVersion {
 	for _, tag := range versions {
 		meta := metadata[tag]
 		if meta.Status == "" {
-			meta.Status = "ready"
+			meta.Status = "not-ready"
 		}
 		if meta.Title == "" {
 			meta.Title = tag
 		}
+		backendImage := backendRepo + ":" + tag
+		frontendImage := frontendRepo + ":" + tag
+		backendVersion, frontendVersion := tag, tag
+		backendDigest, frontendDigest := "", ""
+		ready := false
+		validationErrors := []string{"release manifest metadata is missing"}
+		if len(meta.Components) > 0 {
+			if component, ok := meta.Components["backend"]; ok {
+				backendImage = component.Image
+				backendVersion = component.Version
+				backendDigest = component.Digest
+			}
+			if component, ok := meta.Components["frontend"]; ok {
+				frontendImage = component.Image
+				frontendVersion = component.Version
+				frontendDigest = component.Digest
+			}
+			ready = meta.Validation.Ready && len(meta.Validation.Errors) == 0 && meta.Status == "ready"
+			validationErrors = append([]string(nil), meta.Validation.Errors...)
+			if len(validationErrors) == 0 && !ready {
+				validationErrors = []string{"release manifest has not passed validation"}
+			}
+			if !ready && meta.Status == "ready" {
+				meta.Status = "not-ready"
+			}
+		}
 		out = append(out, ImageVersion{
-			Tag:           tag,
-			BackendImage:  backendRepo + ":" + tag,
-			FrontendImage: frontendRepo + ":" + tag,
-			Date:          meta.Date,
-			Status:        meta.Status,
-			Broken:        meta.Broken,
-			Title:         meta.Title,
-			Notes:         meta.Notes,
+			Tag:              tag,
+			BackendImage:     backendImage,
+			FrontendImage:    frontendImage,
+			BackendVersion:   backendVersion,
+			FrontendVersion:  frontendVersion,
+			BackendDigest:    backendDigest,
+			FrontendDigest:   frontendDigest,
+			Date:             meta.Date,
+			Status:           meta.Status,
+			Broken:           meta.Broken,
+			Ready:            ready,
+			ValidationErrors: validationErrors,
+			Title:            meta.Title,
+			Notes:            meta.Notes,
 		})
 	}
 	return out
@@ -94,6 +132,9 @@ func DefaultImageVersion() string {
 	// Explicit override always wins.
 	if v := strings.TrimSpace(os.Getenv("APP_IMAGE_VERSION_DEFAULT")); v != "" {
 		return v
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("DASHBOARD_ENV")), "dev") {
+		return "dev"
 	}
 	versions := versionOptions()
 	if len(versions) > 0 {

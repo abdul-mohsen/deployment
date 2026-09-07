@@ -161,7 +161,13 @@ Each app repo CI reads `VERSION`, validates strict `vMAJOR.MINOR.PATCH`, and bui
 - `:vX.X.X` from `VERSION` → primary deploy tag. Re-running CI with the same version overwrites that tag.
 - `:<sha>` on every push → immutable reference for rollbacks/debugging.
 
-Backend and frontend releases must use the same `VERSION` value. The dashboard version picker deploys that one tag to both apps. CI fails if `VERSION` is lower than the latest GitHub Release tag; equal is allowed for overwrite builds.
+Backend and frontend releases are component-independent. A release catalog records
+the selected image, immutable digest, semantic version, source repository/commit,
+and workflow run for each component. When only one component changes, the
+unchanged component reuses its previous known-good digest. The dashboard release
+picker deploys the exact recorded component refs; CI fails if a component
+`VERSION` is lower than its latest GitHub Release tag, while equal is allowed for
+overwrite builds.
 
 Each app repo also ships a **PR branch-image workflow**
 (`.github/workflows/qa-branch-image.yml`, templated in

@@ -44,26 +44,57 @@ Version picker values are exact SemVer image tags such as `v0.0.1`, not channels
 BACKEND_IMAGE=ssdawweq/ifritah-api
 FRONTEND_IMAGE=ssdawweq/ifritah-web
 APP_IMAGE_VERSIONS=v0.0.1
-APP_IMAGE_VERSION_DEFAULT=v0.0.1
+# APP_IMAGE_VERSION_DEFAULT=v0.0.1  # omit in dev to default to dev
 ```
 
 Use `TENANT_NAME_PREFIX` when dev and prod dashboards share one server or MySQL. With `TENANT_NAME_PREFIX=dev-`, creating tenant `acme` creates Dokku apps `dev-acme-backend` / `dev-acme-frontend` and database `tenant_dev_acme`. Use `TENANT_NAME_PREFIX=prod-` for prod so prod creates `tenant_prod_acme` instead. For two dashboards on one server, set this in each dashboard's `dashboard.env`; keep the shared `config.env` prefix unset or point each dashboard at a matching `DEPLOY_CONFIG_FILE`.
 
 Publishing `BACKEND_IMAGE:v0.0.1` and `FRONTEND_IMAGE:v0.0.1` makes `v0.0.1` selectable as a compatible pair. Re-pushing without changing `VERSION` overwrites that same image tag; increment `VERSION` only for a new feature or bug-fix release.
 
-Release notes are best kept in GitHub Releases, then mirrored into `dashboard/releases.json` for the server dashboard, or into `APP_IMAGE_RELEASES_FILE` when set. Broken status is not read from the file: the dashboard marks a version broken when the latest Dokku deployment currently running that version is not healthy. The file shape is:
+Release notes are best kept in GitHub Releases, then mirrored into `dashboard/releases.json` for the server dashboard, or into `APP_IMAGE_RELEASES_FILE` when set. A release is not ready from a tag string alone: both components must have an immutable digest and OCI version/revision identity validated against the selected image manifests. Broken status is still added when a deployed app is unhealthy. The versioned file shape is:
 
 ```json
-[
-  {
-    "tag": "vX.X.X",
-    "date": "YYYY-MM-DD",
-    "status": "ready",
+{
+  "schema_version": 1,
+  "releases": [{
+    "id": "vX.X.X",
+    "channel": "stable",
     "title": "Short release title",
-    "notes": ["Human-written release note."]
-  }
-]
+    "notes": ["Human-written release note."],
+    "components": {
+      "backend": {
+        "image": "owner/api:vX.X.X",
+        "digest": "sha256:<64 hex characters>",
+        "version": "vX.X.X",
+        "source_commit": "<git sha>",
+        "repository": "owner/backend",
+        "workflow_run": "123"
+      },
+      "frontend": {
+        "image": "owner/web:vX.X.X",
+        "digest": "sha256:<64 hex characters>",
+        "version": "vX.X.X",
+        "source_commit": "<git sha>",
+        "repository": "owner/frontend",
+        "workflow_run": "456"
+      }
+    }
+  }]
+}
 ```
+
+Generate or validate a catalog deterministically without Docker credentials:
+
+```sh
+go run ./cmd/release-manifest generate -input release.json -previous releases.json -output releases.json
+go run ./cmd/release-manifest validate -manifest releases.json
+```
+
+`validate -dockerhub` additionally checks Docker Hub tag/digest and OCI config
+labels. A failed or unavailable remote check remains `not-ready`; remote checks
+are runtime-only when the registry is private or unreachable. A release input
+may omit the unchanged component only when `-previous` supplies its last
+known-good digest.
 
 The equivalent shell workflow uses the same command vocabulary:
 

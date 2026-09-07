@@ -32,3 +32,22 @@ func TestBuildReleaseViewsIgnoresChannelTags(t *testing.T) {
 		t.Fatalf("expected channel tags to be ignored, got %+v", views)
 	}
 }
+
+func TestBuildReleaseViewsMatchesIndependentComponentVersions(t *testing.T) {
+	catalog := []scripts.ImageVersion{{
+		Tag:             "v0.0.3",
+		BackendVersion:  "v0.0.3",
+		FrontendVersion: "v0.0.2",
+		BackendImage:    "repo/api:v0.0.3",
+		FrontendImage:   "repo/web:v0.0.2",
+		Status:          "not-ready",
+	}}
+	apps := []dokku.App{
+		{Name: "acme-backend", Role: "backend", Version: "v0.0.3", Image: "repo/api:v0.0.3", State: "running"},
+		{Name: "acme-frontend", Role: "frontend", Version: "v0.0.2", Image: "repo/web:v0.0.2", State: "running"},
+	}
+	views := buildReleaseViews(catalog, apps)
+	if len(views) != 1 || views[0].Deployed != 2 {
+		t.Fatalf("expected both component versions to map to one release: %+v", views)
+	}
+}

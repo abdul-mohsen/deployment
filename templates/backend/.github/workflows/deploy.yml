@@ -83,6 +83,8 @@ jobs:
           labels: |
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.workflow.run=${{ github.run_id }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

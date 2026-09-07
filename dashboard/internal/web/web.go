@@ -98,15 +98,16 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireAuth)
 		r.Get("/", s.handleIndex)
-	r.Get("/tenants/{name}", s.handleTenant)
-	r.Post("/tenants/{name}/{verb}", s.handleTenantAction)
-	r.Post("/tenants/{name}/delete", s.handleTenantDelete)
+		r.Get("/tenants/{name}", s.handleTenant)
+		r.Post("/tenants/{name}/{verb}", s.handleTenantAction)
+		r.Post("/tenants/{name}/delete", s.handleTenantDelete)
 		r.Get("/apps/{name}", s.handleApp)
 		r.Post("/apps/{name}/{verb}", s.handleAction)
 		r.Get("/apps/{name}/logs", s.handleLogStream)
 		r.Get("/apps/{name}/logs.txt", s.handleLogDump)
 		r.Get("/api/apps", s.handleAPIApps)
 		r.Get("/api/image-tags", s.handleImageTags)
+		r.Get("/api/releases", s.handleAPIReleases)
 		r.Get("/events", s.handleEvents)
 		r.Get("/settings/password", s.handlePasswordPage)
 		r.Post("/settings/password", s.handlePasswordSubmit)
@@ -458,6 +459,15 @@ func (s *server) handleAPIApps(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, appsJSON(snap.Apps))
 }
 
+func (s *server) handleAPIReleases(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schema_version": scripts.ReleaseManifestSchemaVersion,
+		"releases":       scripts.ReleaseCatalog(),
+		"default":        scripts.DefaultImageVersion(),
+	})
+}
+
 // handleImageTags returns available image tags from Docker Hub for autocomplete.
 // Optional ?q=<substr> filters results to tags whose name contains the substring.
 // Each tag entry includes metadata (is_branch, digest, last_pushed) for branch-name tags.
@@ -485,13 +495,13 @@ func (s *server) handleImageTags(w http.ResponseWriter, r *http.Request) {
 
 // TagMeta holds per-tag metadata returned alongside the tag list.
 type TagMeta struct {
-	Tag           string `json:"tag"`
-	LastPushed    string `json:"last_pushed,omitempty"` // ISO8601
-	Digest        string `json:"digest,omitempty"`       // first 19 chars of "sha256:..."
-	IsBranch      bool   `json:"is_branch"`              // true when not a semver vX.Y.Z tag
-	InBoth        bool   `json:"in_both"`                // true when tag exists in both backend AND frontend repos
-	BackendOnly   bool   `json:"backend_only,omitempty"` // true when only in backend repo
-	FrontendOnly  bool   `json:"frontend_only,omitempty"` // true when only in frontend repo
+	Tag          string `json:"tag"`
+	LastPushed   string `json:"last_pushed,omitempty"`   // ISO8601
+	Digest       string `json:"digest,omitempty"`        // first 19 chars of "sha256:..."
+	IsBranch     bool   `json:"is_branch"`               // true when not a semver vX.Y.Z tag
+	InBoth       bool   `json:"in_both"`                 // true when tag exists in both backend AND frontend repos
+	BackendOnly  bool   `json:"backend_only,omitempty"`  // true when only in backend repo
+	FrontendOnly bool   `json:"frontend_only,omitempty"` // true when only in frontend repo
 }
 
 // fetchImageTagsWithMeta returns the filtered tag list + per-tag metadata including
@@ -793,11 +803,33 @@ func buildReleaseViews(catalog []scripts.ImageVersion, apps []dokku.App) []relea
 	}
 	for _, app := range apps {
 		tag := strings.TrimSpace(app.Version)
-		if !scripts.IsImageVersionTag(tag) {
-			continue
+		var view *releaseView
+		for _, candidateTag := range order {
+			candidate := byTag[candidateTag]
+			if candidate == nil {
+				continue
+			}
+			switch app.Role {
+			case "backend":
+				if tag == candidate.BackendVersion || app.Image == candidate.BackendImage {
+					view = candidate
+				}
+			case "frontend":
+				if tag == candidate.FrontendVersion || app.Image == candidate.FrontendImage {
+					view = candidate
+				}
+			}
+			if view != nil {
+				break
+			}
 		}
-		view := byTag[tag]
+		if view == nil && scripts.IsImageVersionTag(tag) {
+			view = byTag[tag]
+		}
 		if view == nil {
+			if !scripts.IsImageVersionTag(tag) {
+				continue
+			}
 			view = add(scripts.ImageVersion{Tag: tag, Status: "deployed", Title: tag})
 		}
 		if view == nil {

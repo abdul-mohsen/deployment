@@ -42,6 +42,7 @@ done
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
+source "$SCRIPT_DIR/tenant-provenance.sh"
 
 if [ -n "$TENANT_FILTER" ]; then
     TENANT_FILTER="$(tenant_full_name "$TENANT_FILTER")" || exit 1
@@ -198,6 +199,24 @@ tenant_pin() {
         | awk -F'\t' '{printf "%s|%s|%s", $1, $2, $3}'
 }
 
+# Echoes the verified identity for the app kind:
+# image_ref|digest|version|commit|status
+tenant_provenance() {
+    local name="$1" kind="$2" p
+    case "$kind" in backend|frontend) p="$kind" ;; *) echo "||||"; return ;; esac
+    if ! command -v mysql &>/dev/null && [ "${_MYSQL_VIA:-host}" = "docker" ]; then
+        echo "||||"
+        return
+    fi
+    run_mysql -N -B -e \
+        "SELECT IFNULL(${p}_image_ref,''), IFNULL(${p}_image_digest,''),
+                IFNULL(${p}_version,''), IFNULL(${p}_commit,''),
+                IFNULL(${p}_deployment_status,'unknown')
+           FROM \`${MYSQL_MASTER_DB}\`.tenant
+          WHERE name='${name//\'/}' LIMIT 1;" 2>/dev/null \
+        | awk -F'\t' '{printf "%s|%s|%s|%s|%s", $1,$2,$3,$4,$5}'
+}
+
 cron_has_autopull() {
     crontab -l 2>/dev/null | grep -q 'auto-pull.sh' && echo "yes" || echo "no"
 }
@@ -326,8 +345,13 @@ render_once() {
             local rest="${pin#*|}"
             local pin_fe; pin_fe="${rest%%|*}"
             local enabled="${rest##*|}"
-            printf '{"app":"%s","tenant":"%s","role":"%s","state":"%s","restarts":"%s","http":"%s","internal_port":"%s","host_ports":"%s","processes":"%s","image":"%s","domains":"%s","pinned_backend":"%s","pinned_frontend":"%s","enabled":"%s"}' \
-                "$app" "$tenant" "$kind" "$state" "$rcount" "$probe" "$intport" "$hostports" "$procs" "$image" "$domains" "$pin_be" "$pin_fe" "$enabled"
+            local provenance; provenance=$(tenant_provenance "$tenant" "$kind")
+            local p_ref="${provenance%%|*}" p_rest="${provenance#*|}"
+            local p_digest="${p_rest%%|*}"; p_rest="${p_rest#*|}"
+            local p_version="${p_rest%%|*}"; p_rest="${p_rest#*|}"
+            local p_commit="${p_rest%%|*}"; local p_status="${p_rest#*|}"
+            printf '{"app":"%s","tenant":"%s","role":"%s","state":"%s","restarts":"%s","http":"%s","internal_port":"%s","host_ports":"%s","processes":"%s","image":"%s","domains":"%s","pinned_backend":"%s","pinned_frontend":"%s","enabled":"%s","provenance_ref":"%s","provenance_digest":"%s","provenance_version":"%s","provenance_commit":"%s","provenance_status":"%s"}' \
+                "$app" "$tenant" "$kind" "$state" "$rcount" "$probe" "$intport" "$hostports" "$procs" "$image" "$domains" "$pin_be" "$pin_fe" "$enabled" "$p_ref" "$p_digest" "$p_version" "$p_commit" "$p_status"
         else
             printf "  %-18s %-8s %s %-3s %s %-6s %-7s %-32s %s\n" \
                 "$app" "$kind" "$(printf '%-9s' "$(colorize_state "$state")")" \
@@ -345,6 +369,8 @@ render_once() {
             local enabled="${rest##*|}"
             echo ""
             echo "  ${D}Pinned in master DB :${N} backend=${pin_be:-<unset>} frontend=${pin_fe:-<unset>} enabled=${enabled:-?}"
+            local provenance; provenance=$(tenant_provenance "$tenant" "$kind")
+            echo "  ${D}Verified provenance :${N} ${provenance:-<unavailable>}"
             echo ""
             echo "  ${D}Recent ${app} logs:${N}"
             docker exec -i dokku dokku logs "$app" --tail 15 2>/dev/null | sed 's/^/    /' || true

@@ -169,6 +169,11 @@ picker deploys the exact recorded component refs; CI fails if a component
 `VERSION` is lower than its latest GitHub Release tag, while equal is allowed for
 overwrite builds.
 
+Release pairs may use the same `VERSION` value when published together, but
+tenant deployments do not require backend and frontend versions to match:
+component-only updates are supported. CI fails if `VERSION` is lower than the
+latest GitHub Release tag; equal is allowed for overwrite builds.
+
 Each app repo also ships a **PR branch-image workflow**
 (`.github/workflows/qa-branch-image.yml`, templated in
 `templates/{backend,frontend}/.github/workflows/qa-release.yml`). On every pull
@@ -198,3 +203,35 @@ Polling (cron + `auto-pull.sh`) is the safety net and works without any webhook.
 diagnostic. Webhook and polling share the canonical
 `/var/lib/auto-pull/<type>-<tag>.digest` state, which is written atomically
 only after deployment succeeds.
+
+## Tenant image provenance and migration safety
+
+`update-tenant.sh` and `deploy-all.sh` resolve every requested tag to a full
+OCI repository digest before changing Dokku. The image must carry the
+BuildIdentity labels for channel, semantic version, full commit, workflow run,
+image ref, and build time (the short commit is derived from the full commit
+when it is not separately labelled). The scripts pass that identity as
+`APP_VERSION`, `APP_COMMIT`, `APP_BUILD_CHANNEL`, `APP_BUILD_WORKFLOW_RUN`,
+`APP_BUILT_AT`, `APP_IMAGE_REF`, and `APP_IMAGE_DIGEST`; legacy
+`APP_IMAGE_VERSION` remains informational only.
+
+The accepted label names are `org.opencontainers.image.version`,
+`org.opencontainers.image.revision`, `org.opencontainers.image.created`, and
+the deployment labels `com.ifritah.build.channel`,
+`com.ifritah.build.workflow_run`, `com.ifritah.build.image_ref`, and
+`com.ifritah.build.digest` (the digest is independently checked against
+Docker's `RepoDigests`).
+
+After the swap, the app's `/version` response must report the same identity.
+The last verified identity is stored per component in `zatca_master.tenant`;
+failed attempts are recorded in `tenant_deployment_audit` without replacing
+the last-known-good fields. Backend updates replay the migrations bundled in
+the target image before the Dokku swap. A migration or verification failure
+therefore cannot be reported as a successful deployment, and a later
+component failure restores earlier components where a prior image exists.
+
+The checks require a running Docker daemon, a reachable Dokku container,
+`curl` or `wget` inside the Dokku container, and MySQL access for the master
+database. These checks are intentionally not exercised as live deployments by
+the repository tests. `TENANT_PROVENANCE_OVERRIDE=1` is accepted only with a
+non-production `DEPLOY_ENV` and is intended for local/test images only.

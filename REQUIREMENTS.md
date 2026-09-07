@@ -79,6 +79,10 @@ Copy from [config.env.example](config.env.example) and fill:
   `atlas migrate apply --dir file:///app/migrations --url "$DATABASE_URL"`
 - Optional: `PUBLIC_PROTOCOL=https|http` (controls only the `API_URL` string),
   `NGINX_CLIENT_MAX_BODY_SIZE=50m`
+- Optional non-production verification controls:
+  `TENANT_PROVENANCE_OVERRIDE=1` together with `DEPLOY_ENV=dev|test|qa|sandbox|simulation`,
+  plus `TENANT_VERIFY_RETRIES` and `TENANT_VERIFY_DELAY`. The override is
+  refused for production deployments.
 
 ---
 
@@ -103,6 +107,11 @@ Rules learned the hard way:
   `CREATE USER` / `GRANT`.
 - `CREATE USER IF NOT EXISTS` does **not** update an existing password — always
   pair with `ALTER USER … IDENTIFIED BY` for idempotency.
+- Tenant image updates resolve tags to OCI digests, require BuildIdentity
+  labels, pass `APP_VERSION`/`APP_COMMIT` and the remaining identity fields to
+  Dokku, and verify the app `/version` response before persisting the new
+  identity. `APP_IMAGE_VERSION` is a legacy display field and is not used as
+  an application version or commit substitute.
 
 ---
 

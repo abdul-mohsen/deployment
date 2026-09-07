@@ -46,6 +46,14 @@ type server struct {
 	snapshots   *snapshotCache
 	tenantState *tenantstate.Store
 	authMu      sync.RWMutex
+	operationMu sync.RWMutex
+	operations  map[string]operationStatus
+}
+
+type operationStatus struct {
+	Name    string
+	At      time.Time
+	Failure string
 }
 
 // Router builds the HTTP handler.
@@ -77,7 +85,7 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		SameSite: http.SameSiteLaxMode,
 	}
 
-	s := &server{cfg: cfg, dokku: d, logs: l, runner: runner, pages: pages, store: store}
+	s := &server{cfg: cfg, dokku: d, logs: l, runner: runner, pages: pages, store: store, operations: map[string]operationStatus{}}
 	s.tenantState = tenantstate.NewStore(cfg.TenantStateDir)
 	s.snapshots = newSnapshotCache(60*time.Second, s.collectSnapshot)
 	s.snapshots.Start(context.Background())
@@ -308,6 +316,7 @@ func (s *server) handleTenant(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	autoRedeploy := s.tenantState.IsAutoRedeployEnabled(name)
+	snapshot, _ := s.snapshots.Snapshot()
 	s.render(w, "tenant.html", map[string]any{
 		"Env":            s.cfg.EnvName,
 		"Base":           s.cfg.BaseDomain,
@@ -318,6 +327,7 @@ func (s *server) handleTenant(w http.ResponseWriter, r *http.Request) {
 		"Versions":       scripts.VersionCatalog(),
 		"DefaultVersion": scripts.DefaultImageVersion(),
 		"AutoRedeploy":   autoRedeploy,
+		"Snapshot":       snapshot,
 		"MaxUserBackups": 50,
 	})
 }
@@ -345,10 +355,12 @@ func (s *server) handleTenantAction(w http.ResponseWriter, r *http.Request) {
 	for _, app := range apps {
 		out, err := s.dokku.Action(ctx, app.Name, verb)
 		if err != nil {
+			s.recordOperation(app.Name, verb, err)
 			failed = true
 			fmt.Fprintf(&body, "FAILED %s %s\n%s\n%v\n", verb, app.Name, out, err)
 			continue
 		}
+		s.recordOperation(app.Name, verb, nil)
 		fmt.Fprintf(&body, "OK %s %s\n%s\n", verb, app.Name, out)
 	}
 	s.snapshots.RefreshSoon()
@@ -410,6 +422,7 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	out, err := s.dokku.Action(ctx, name, verb)
+	s.recordOperation(name, verb, err)
 	s.snapshots.RefreshSoon()
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	if err != nil {
@@ -472,6 +485,11 @@ func (s *server) handleAPIReleases(w http.ResponseWriter, _ *http.Request) {
 		"schema_version": scripts.ReleaseManifestSchemaVersion,
 		"releases":       scripts.ReleaseCatalog(),
 		"default":        scripts.DefaultImageVersion(),
+		"default_components": map[string]string{
+			"channel":  scripts.DefaultImageVersion(),
+			"backend":  scripts.BackendRepo() + ":" + scripts.DefaultImageVersion(),
+			"frontend": scripts.FrontendRepo() + ":" + scripts.DefaultImageVersion(),
+		},
 	})
 }
 
@@ -479,18 +497,8 @@ func (s *server) handleAPIReleases(w http.ResponseWriter, _ *http.Request) {
 // Optional ?q=<substr> filters results to tags whose name contains the substring.
 // Each tag entry includes metadata (is_branch, digest, last_pushed) for branch-name tags.
 func (s *server) handleImageTags(w http.ResponseWriter, r *http.Request) {
-	backendRepo := strings.TrimSpace(os.Getenv("BACKEND_IMAGE"))
-	frontendRepo := strings.TrimSpace(os.Getenv("FRONTEND_IMAGE"))
-	if backendRepo == "" {
-		if u := strings.TrimSpace(os.Getenv("DOCKERHUB_USERNAME")); u != "" {
-			backendRepo = u + "/ifritah-api"
-		}
-	}
-	if frontendRepo == "" {
-		if u := strings.TrimSpace(os.Getenv("DOCKERHUB_USERNAME")); u != "" {
-			frontendRepo = u + "/ifritah-web"
-		}
-	}
+	backendRepo := scripts.BackendRepo()
+	frontendRepo := scripts.FrontendRepo()
 
 	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	tags, metas := fetchImageTagsWithMeta(r.Context(), backendRepo, frontendRepo, query)
@@ -927,8 +935,13 @@ func (s *server) handleScriptRun(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
-	if err := s.runner.Run(ctx, w, sc.Name, argv); err != nil {
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+	runErr := s.runner.Run(ctx, w, sc.Name, argv)
+	if tenant := strings.TrimSpace(r.PostForm.Get("_pos_name")); tenant != "" {
+		s.recordOperation(tenant+"-backend", sc.Slug(), runErr)
+		s.recordOperation(tenant+"-frontend", sc.Slug(), runErr)
+	}
+	if runErr != nil {
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", runErr.Error())
 	}
 	fmt.Fprint(w, "event: done\ndata: end\n\n")
 	if f, ok := w.(http.Flusher); ok {
@@ -999,59 +1012,87 @@ func buildArgv(sc *scripts.Script, form url.Values) ([]string, error) {
 }
 
 func expandImageVersion(sc *scripts.Script, form url.Values) (url.Values, error) {
-	version := strings.TrimSpace(form.Get("image_version"))
-	if version == "" {
-		version = defaultFieldValue(sc, "image_version")
+	shared := strings.TrimSpace(form.Get("image_version"))
+	if shared == "" {
+		shared = defaultFieldValue(sc, "image_version")
 	}
-	if version == "" {
+	backendVersion := componentVersionValue(sc, form, "backend_image_version", shared)
+	frontendVersion := componentVersionValue(sc, form, "frontend_image_version", shared)
+	if backendVersion == "" && frontendVersion == "" {
 		return form, nil
 	}
 
-	// First try the semver catalog (vX.Y.Z tags with pinned image names).
-	resolved, ok := scripts.ResolveImageVersion(version)
-	if !ok {
-		// Not a semver catalog tag — treat as a raw Docker tag (dev, latest, branch name, sha).
-		// Build image names directly from the configured repos + the supplied tag.
-		backendRepo := scripts.BackendRepo()
-		frontendRepo := scripts.FrontendRepo()
-		if backendRepo == "" && frontendRepo == "" {
-			return nil, fmt.Errorf("image tag %q is not in the release catalog and DOCKERHUB_USERNAME / BACKEND_IMAGE / FRONTEND_IMAGE are not configured", version)
-		}
-		resolved = scripts.ImageVersion{
-			Tag:           version,
-			BackendImage:  backendRepo + ":" + version,
-			FrontendImage: frontendRepo + ":" + version,
-		}
+	backend, err := resolveComponent(backendVersion, "backend")
+	if err != nil {
+		return nil, err
+	}
+	frontend, err := resolveComponent(frontendVersion, "frontend")
+	if err != nil {
+		return nil, err
 	}
 
 	out := cloneValues(form)
-	if scriptHasField(sc, "backend_image") && strings.TrimSpace(out.Get("backend_image")) == "" {
-		out.Set("backend_image", resolved.BackendImage)
+	if scriptHasField(sc, "backend_image") && strings.TrimSpace(out.Get("backend_image")) == "" && backend.BackendImage != "" {
+		out.Set("backend_image", backend.BackendImage)
 	}
-	if scriptHasField(sc, "frontend_image") && strings.TrimSpace(out.Get("frontend_image")) == "" {
-		out.Set("frontend_image", resolved.FrontendImage)
+	if scriptHasField(sc, "frontend_image") && strings.TrimSpace(out.Get("frontend_image")) == "" && frontend.FrontendImage != "" {
+		out.Set("frontend_image", frontend.FrontendImage)
 	}
 	if scriptHasField(sc, "backend") && strings.TrimSpace(out.Get("backend")) == "" {
-		out.Set("backend", resolved.BackendImage)
+		out.Set("backend", backend.BackendImage)
 	}
 	if scriptHasField(sc, "frontend") && strings.TrimSpace(out.Get("frontend")) == "" {
-		out.Set("frontend", resolved.FrontendImage)
+		out.Set("frontend", frontend.FrontendImage)
 	}
 	if scriptHasField(sc, "_pos_image") && strings.TrimSpace(out.Get("_pos_image")) == "" {
-		image := resolved.BackendImage
+		image := backend.BackendImage
 		if strings.TrimSpace(out.Get("type")) == "frontend" {
-			image = resolved.FrontendImage
+			image = frontend.FrontendImage
 		}
 		out.Set("_pos_image", image)
 	}
 	if scriptHasField(sc, "to") && strings.TrimSpace(out.Get("to")) == "" {
-		image := resolved.BackendImage
+		image := backend.BackendImage
 		if strings.TrimSpace(out.Get("type")) == "frontend" {
-			image = resolved.FrontendImage
+			image = frontend.FrontendImage
 		}
 		out.Set("to", image)
 	}
 	return out, nil
+}
+
+func componentVersionValue(sc *scripts.Script, form url.Values, name, shared string) string {
+	_, present := form[name]
+	value := strings.TrimSpace(form.Get(name))
+	if value == "" {
+		value = defaultFieldValue(sc, name)
+	}
+	// A shared image_version is the legacy interface. If a form submits the
+	// new component defaults unchanged, honor the explicit shared selection.
+	if !present && shared != "" && (value == "" || value == "dev") && shared != "dev" {
+		return shared
+	}
+	return value
+}
+
+func resolveComponent(version, role string) (scripts.ImageVersion, error) {
+	if resolved, ok := scripts.ResolveImageVersion(version); ok {
+		return resolved, nil
+	}
+	repo := scripts.BackendRepo()
+	if role == "frontend" {
+		repo = scripts.FrontendRepo()
+	}
+	if repo == "" {
+		return scripts.ImageVersion{}, fmt.Errorf("image tag %q is not in the release catalog and the %s image repository is not configured", version, role)
+	}
+	resolved := scripts.ImageVersion{Tag: version}
+	if role == "frontend" {
+		resolved.FrontendImage = repo + ":" + version
+	} else {
+		resolved.BackendImage = repo + ":" + version
+	}
+	return resolved, nil
 }
 
 func defaultFieldValue(sc *scripts.Script, name string) string {
@@ -1239,6 +1280,7 @@ func (s *server) collectSnapshot(ctx context.Context) appSnapshot {
 		return s.dokku.AppSummaryFrom(ctx, name, containerIDs[name], domains[name])
 	}
 	out := collectAppDetails(ctx, names, snapshotWorkerLimit(len(names)), detail)
+	s.applyOperationStatus(out)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	snap := appSnapshot{
 		Apps:    out,
@@ -1253,6 +1295,38 @@ func (s *server) collectSnapshot(ctx context.Context) appSnapshot {
 		snap.Error = err.Error()
 	}
 	return snap
+}
+
+func (s *server) recordOperation(appName, operation string, err error) {
+	if strings.TrimSpace(appName) == "" {
+		return
+	}
+	status := operationStatus{Name: operation, At: time.Now().UTC()}
+	if err != nil {
+		status.Failure = err.Error()
+	}
+	s.operationMu.Lock()
+	if s.operations == nil {
+		s.operations = map[string]operationStatus{}
+	}
+	s.operations[appName] = status
+	s.operationMu.Unlock()
+}
+
+func (s *server) applyOperationStatus(apps []dokku.App) {
+	s.operationMu.RLock()
+	defer s.operationMu.RUnlock()
+	for i := range apps {
+		status, ok := s.operations[apps[i].Name]
+		if !ok {
+			continue
+		}
+		apps[i].LastOperation = status.Name
+		if !status.At.IsZero() {
+			apps[i].LastOperation += " @ " + status.At.Format(time.RFC3339)
+		}
+		apps[i].LastFailure = status.Failure
+	}
 }
 
 func collectAppDetails(ctx context.Context, names []string, workerLimit int, detail func(context.Context, string) dokku.App) []dokku.App {

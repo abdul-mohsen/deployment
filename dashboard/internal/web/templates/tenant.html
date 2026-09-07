@@ -22,7 +22,12 @@
       <span class="badge {{stateClr .State}}">{{.State}}</span>
     </div>
     <div class="rc-image" title="{{.Image}}">{{or .Image "—"}}</div>
-    <div class="rc-meta">HTTP {{.HTTPCode}} · port {{or .IntPort "—"}}</div>
+    <div class="rc-meta">channel {{or .Channel .Version "—"}} · version {{or .Version "—"}}</div>
+    <div class="rc-meta">ref {{or .ImageRef .Image "—"}}</div>
+    <div class="rc-meta">digest {{or .ResolvedDigest "—"}} · commit {{or .SourceCommit "—"}}</div>
+    <div class="rc-meta">deployed {{or .DeployedAt "—"}} · HTTP {{.HTTPCode}} · port {{or .IntPort "—"}}</div>
+    <div class="rc-meta">last operation {{or .LastOperation "—"}}</div>
+    {{if .LastFailure}}<div class="release-failure">failure: {{.LastFailure}}</div>{{end}}
   </div>
   {{end}}
   {{with .Frontend}}
@@ -32,7 +37,12 @@
       <span class="badge {{stateClr .State}}">{{.State}}</span>
     </div>
     <div class="rc-image" title="{{.Image}}">{{or .Image "—"}}</div>
-    <div class="rc-meta">{{join .Domains " · "}}</div>
+    <div class="rc-meta">channel {{or .Channel .Version "—"}} · version {{or .Version "—"}}</div>
+    <div class="rc-meta">ref {{or .ImageRef .Image "—"}}</div>
+    <div class="rc-meta">digest {{or .ResolvedDigest "—"}} · commit {{or .SourceCommit "—"}}</div>
+    <div class="rc-meta">deployed {{or .DeployedAt "—"}} · {{join .Domains " · "}}</div>
+    <div class="rc-meta">last operation {{or .LastOperation "—"}}</div>
+    {{if .LastFailure}}<div class="release-failure">failure: {{.LastFailure}}</div>{{end}}
   </div>
   {{end}}
 
@@ -51,6 +61,14 @@
       </p>
     </div>
   </div>
+
+  {{if or (not .Snapshot.Healthy) .Snapshot.Error}}
+  <div class="alert alert-warn" style="margin-bottom:16px">
+    <strong>Dashboard health/provenance warning:</strong>
+    {{if not .Snapshot.Healthy}} Dokku health is not confirmed.{{end}}
+    {{if .Snapshot.Error}} {{.Snapshot.Error}}{{end}}
+  </div>
+  {{end}}
 </div>
 
 <!-- Actions row -->
@@ -60,12 +78,22 @@
     <div class="panel-title">Sync Version</div>
     <form id="tenant-version-form" class="sync-form">
       <input type="hidden" name="_pos_name" value="{{.Tenant}}">
-      <div style="position:relative;flex:1;min-width:160px">
-        <input id="input-image_version" type="text" name="image_version"
-               value="{{.DefaultVersion}}" placeholder="e.g. v1.2.3 or feature-branch"
+      <input type="hidden" name="image_version" value="">
+      <div style="position:relative;flex:1;min-width:180px">
+        <label class="field-label">Backend channel/tag</label>
+        <input id="input-backend_image_version" type="text" name="backend_image_version"
+               value="{{.DefaultVersion}}" placeholder="dev or v1.2.3"
                class="form-input" style="width:100%" autocomplete="off"
                data-tag-search required>
-        <datalist id="dl-image_version"></datalist>
+        <datalist id="dl-backend_image_version"></datalist>
+      </div>
+      <div style="position:relative;flex:1;min-width:180px">
+        <label class="field-label">Frontend channel/tag</label>
+        <input id="input-frontend_image_version" type="text" name="frontend_image_version"
+               value="{{.DefaultVersion}}" placeholder="dev or v1.2.3"
+               class="form-input" style="width:100%" autocomplete="off"
+               data-tag-search required>
+        <datalist id="dl-frontend_image_version"></datalist>
       </div>
       <button class="btn btn-primary">Sync</button>
     </form>
@@ -236,6 +264,9 @@
   // ── Sync version form ──────────────────────────────────────
   form.addEventListener('submit', (ev) => {
     ev.preventDefault();
+    const backend = form.elements.backend_image_version?.value || 'dev';
+    const frontend = form.elements.frontend_image_version?.value || 'dev';
+    if (!confirm('Sync tenant ' + tenant + ' with backend ' + backend + ' and frontend ' + frontend + '?')) return;
     streamSSE('/scripts/update-tenant/run', 'POST', new FormData(form));
   });
 

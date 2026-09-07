@@ -114,8 +114,17 @@
         t.health = t.state;
       }
 
-      // Version from backend image tag
-      t.version = backend?.version || '';
+      // Keep both component identities visible when they differ. The API
+      // still exposes the original flat app fields for older consumers.
+      const backendVersion = backend?.version || '';
+      const frontendVersion = frontend?.version || '';
+      t.version = backendVersion && frontendVersion && backendVersion !== frontendVersion
+        ? backendVersion + ' / ' + frontendVersion
+        : (backendVersion || frontendVersion);
+      t.provenance = [backend, frontend].filter(Boolean).map(a =>
+        [a.channel || a.version, a.image_ref || a.image, a.resolved_digest, a.source_commit].filter(Boolean).join(' · ')
+      ).join(' | ');
+      t.failed = t.apps.find(a => a.last_failure)?.last_failure || '';
 
       // Domain from frontend
       const feDomains = frontend?.domains ? frontend.domains.split(',').filter(Boolean) : [];
@@ -211,7 +220,12 @@
     if (stateB) { stateB.textContent = t.state || '—'; stateB.className = 'badge ' + stateBadgeClass(t.state); }
 
     const verEl = row.querySelector('.js-version');
-    if (verEl) verEl.textContent = t.version || '—';
+    if (verEl) {
+      verEl.textContent = t.version || '—';
+      verEl.title = t.provenance || '';
+    }
+    const provenanceEl = row.querySelector('.js-provenance');
+    if (provenanceEl) provenanceEl.textContent = t.provenance || '';
 
     const appsEl = row.querySelector('.js-apps');
     if (appsEl) appsEl.textContent = t.apps.map(a => a.role || a.name).join(', ');

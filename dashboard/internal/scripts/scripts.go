@@ -41,20 +41,27 @@ type Field struct {
 // shared by both images so operators choose a version instead of pasting image
 // names into forms.
 type ImageVersion struct {
-	Tag              string   `json:"tag"`
-	BackendImage     string   `json:"backend_image"`
-	FrontendImage    string   `json:"frontend_image"`
-	BackendVersion   string   `json:"backend_version"`
-	FrontendVersion  string   `json:"frontend_version"`
-	BackendDigest    string   `json:"backend_digest,omitempty"`
-	FrontendDigest   string   `json:"frontend_digest,omitempty"`
-	Date             string   `json:"date,omitempty"`
-	Status           string   `json:"status"`
-	Broken           bool     `json:"broken"`
-	Ready            bool     `json:"ready"`
-	ValidationErrors []string `json:"validation_errors,omitempty"`
-	Title            string   `json:"title"`
-	Notes            []string `json:"notes,omitempty"`
+	Tag                  string   `json:"tag"`
+	Channel              string   `json:"channel,omitempty"`
+	BackendImage         string   `json:"backend_image"`
+	FrontendImage        string   `json:"frontend_image"`
+	BackendVersion       string   `json:"backend_version"`
+	FrontendVersion      string   `json:"frontend_version"`
+	BackendDigest        string   `json:"backend_digest,omitempty"`
+	FrontendDigest       string   `json:"frontend_digest,omitempty"`
+	BackendSourceCommit  string   `json:"backend_source_commit,omitempty"`
+	FrontendSourceCommit string   `json:"frontend_source_commit,omitempty"`
+	BackendRepository    string   `json:"backend_repository,omitempty"`
+	FrontendRepository   string   `json:"frontend_repository,omitempty"`
+	BackendWorkflowRun   string   `json:"backend_workflow_run,omitempty"`
+	FrontendWorkflowRun  string   `json:"frontend_workflow_run,omitempty"`
+	Date                 string   `json:"date,omitempty"`
+	Status               string   `json:"status"`
+	Broken               bool     `json:"broken"`
+	Ready                bool     `json:"ready"`
+	ValidationErrors     []string `json:"validation_errors,omitempty"`
+	Title                string   `json:"title"`
+	Notes                []string `json:"notes,omitempty"`
 }
 
 func ReleaseCatalog() []ImageVersion {
@@ -79,46 +86,134 @@ func VersionCatalog() []ImageVersion {
 		frontendImage := frontendRepo + ":" + tag
 		backendVersion, frontendVersion := tag, tag
 		backendDigest, frontendDigest := "", ""
+		backendSourceCommit, frontendSourceCommit := "", ""
+		backendRepository, frontendRepository := "", ""
+		backendWorkflowRun, frontendWorkflowRun := "", ""
 		ready := false
 		validationErrors := []string{"release manifest metadata is missing"}
 		if len(meta.Components) > 0 {
-			if component, ok := meta.Components["backend"]; ok {
-				backendImage = component.Image
-				backendVersion = component.Version
-				backendDigest = component.Digest
+			backend, backendOK := meta.Components["backend"]
+			frontend, frontendOK := meta.Components["frontend"]
+			if backendOK {
+				backendImage = backend.Image
+				backendVersion = backend.Version
+				backendDigest = backend.Digest
+				backendSourceCommit = backend.SourceCommit
+				backendRepository = backend.Repository
+				backendWorkflowRun = backend.WorkflowRun
 			}
-			if component, ok := meta.Components["frontend"]; ok {
-				frontendImage = component.Image
-				frontendVersion = component.Version
-				frontendDigest = component.Digest
+			if frontendOK {
+				frontendImage = frontend.Image
+				frontendVersion = frontend.Version
+				frontendDigest = frontend.Digest
+				frontendSourceCommit = frontend.SourceCommit
+				frontendRepository = frontend.Repository
+				frontendWorkflowRun = frontend.WorkflowRun
 			}
-			ready = meta.Validation.Ready && len(meta.Validation.Errors) == 0 && meta.Status == "ready"
+			ready = meta.Validation.Ready && len(meta.Validation.Errors) == 0 && meta.Status == "ready" &&
+				componentMetadataReady("backend", backend, backendOK, &validationErrors) &&
+				componentMetadataReady("frontend", frontend, frontendOK, &validationErrors)
 			validationErrors = append([]string(nil), meta.Validation.Errors...)
+			componentMetadataErrors(meta.Components, &validationErrors)
+			validationErrors = uniqueNonEmpty(validationErrors)
 			if len(validationErrors) == 0 && !ready {
 				validationErrors = []string{"release manifest has not passed validation"}
 			}
-			if !ready && meta.Status == "ready" {
-				meta.Status = "not-ready"
-			}
+		} else {
+			validationErrors = []string{"release manifest metadata is missing"}
+			componentMetadataErrors(nil, &validationErrors)
+		}
+		if !ready && meta.Status == "ready" {
+			meta.Status = "not-ready"
 		}
 		out = append(out, ImageVersion{
-			Tag:              tag,
-			BackendImage:     backendImage,
-			FrontendImage:    frontendImage,
-			BackendVersion:   backendVersion,
-			FrontendVersion:  frontendVersion,
-			BackendDigest:    backendDigest,
-			FrontendDigest:   frontendDigest,
-			Date:             meta.Date,
-			Status:           meta.Status,
-			Broken:           meta.Broken,
-			Ready:            ready,
-			ValidationErrors: validationErrors,
-			Title:            meta.Title,
-			Notes:            meta.Notes,
+			Tag:                  tag,
+			Channel:              meta.Channel,
+			BackendImage:         backendImage,
+			FrontendImage:        frontendImage,
+			BackendVersion:       backendVersion,
+			FrontendVersion:      frontendVersion,
+			BackendDigest:        backendDigest,
+			FrontendDigest:       frontendDigest,
+			BackendSourceCommit:  backendSourceCommit,
+			FrontendSourceCommit: frontendSourceCommit,
+			BackendRepository:    backendRepository,
+			FrontendRepository:   frontendRepository,
+			BackendWorkflowRun:   backendWorkflowRun,
+			FrontendWorkflowRun:  frontendWorkflowRun,
+			Date:                 meta.Date,
+			Status:               meta.Status,
+			Broken:               meta.Broken,
+			Ready:                ready,
+			ValidationErrors:     validationErrors,
+			Title:                meta.Title,
+			Notes:                meta.Notes,
 		})
 	}
 	return out
+}
+
+func componentMetadataReady(name string, component ReleaseComponent, present bool, errors *[]string) bool {
+	if !present {
+		return false
+	}
+	ok := true
+	if strings.TrimSpace(component.Image) == "" {
+		*errors = append(*errors, name+" image ref is missing")
+		ok = false
+	}
+	if strings.TrimSpace(component.Digest) == "" {
+		*errors = append(*errors, name+" image digest is missing")
+		ok = false
+	}
+	if strings.TrimSpace(component.Version) == "" {
+		*errors = append(*errors, name+" version is missing")
+		ok = false
+	}
+	if strings.TrimSpace(component.SourceCommit) == "" {
+		*errors = append(*errors, name+" source commit is missing")
+		ok = false
+	}
+	if !component.Validation.TagExists {
+		*errors = append(*errors, name+" image tag has not been validated")
+		ok = false
+	}
+	if !component.Validation.OCIIdentityValid {
+		*errors = append(*errors, name+" OCI identity metadata has not been validated")
+		ok = false
+	}
+	return ok
+}
+
+func componentMetadataErrors(components map[string]ReleaseComponent, errors *[]string) {
+	for _, name := range []string{"backend", "frontend"} {
+		component, ok := components[name]
+		if !ok {
+			*errors = append(*errors, "missing "+name+" component")
+			continue
+		}
+		// A manifest can carry a ready validation snapshot from an older
+		// generator. Keep the dashboard honest when the component identity
+		// fields are absent from that snapshot.
+		if strings.TrimSpace(component.Image) == "" {
+			*errors = append(*errors, name+" image ref is missing")
+		}
+		if strings.TrimSpace(component.Digest) == "" {
+			*errors = append(*errors, name+" image digest is missing")
+		}
+		if strings.TrimSpace(component.Version) == "" {
+			*errors = append(*errors, name+" version is missing")
+		}
+		if strings.TrimSpace(component.SourceCommit) == "" {
+			*errors = append(*errors, name+" source commit is missing")
+		}
+		if !component.Validation.TagExists {
+			*errors = append(*errors, name+" image tag has not been validated")
+		}
+		if !component.Validation.OCIIdentityValid {
+			*errors = append(*errors, name+" OCI identity metadata has not been validated")
+		}
+	}
 }
 
 func VersionOptions() []string {
@@ -133,14 +228,8 @@ func DefaultImageVersion() string {
 	if v := strings.TrimSpace(os.Getenv("APP_IMAGE_VERSION_DEFAULT")); v != "" {
 		return v
 	}
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("DASHBOARD_ENV")), "dev") {
-		return "dev"
-	}
-	versions := versionOptions()
-	if len(versions) > 0 {
-		return versions[0]
-	}
-	// No semver catalog configured — default to the rolling dev image.
+	// Component channels default to the rolling dev images. Production
+	// operators can still opt into a pinned release explicitly.
 	return "dev"
 }
 
@@ -166,8 +255,27 @@ func imageVersionField(required bool) Field {
 		Placeholder: "e.g. dev, v1.2.3, or feature-my-branch",
 		Suggest:     []string{}, // populated client-side from /api/image-tags via datalist
 		Default:     DefaultImageVersion(),
-		Help:        "Tag applied to both BACKEND_IMAGE and FRONTEND_IMAGE. Type to search available tags from Docker Hub.",
+		Help:        "Legacy shared tag. Leave the component selectors at dev or choose each image independently below.",
 	}
+}
+
+func componentImageVersionField(name, label string) Field {
+	return Field{
+		Name:        name,
+		Label:       label,
+		Type:        "text",
+		Required:    true,
+		Placeholder: "e.g. dev or v1.2.3",
+		Default:     "dev",
+		Help:        "Select this component's image channel or semantic release tag independently.",
+	}
+}
+
+func optionalComponentImageVersionField(name, label string) Field {
+	field := componentImageVersionField(name, label)
+	field.Required = false
+	field.Help = "Optional. Set this component's channel or semantic release tag when changing its image."
+	return field
 }
 
 func imageRepo(envKey, suffix, fallback string) string {
@@ -316,6 +424,8 @@ func Catalog() []Script {
 					Help:        "Optional. Minimum 8 characters. Sent as MANAGER_PASSWORD."},
 				{Name: "company_name", Label: "Company name", Flag: "--env", Type: "text", Required: true, Placeholder: "ACME Corp"},
 				imageVersionField(true),
+				componentImageVersionField("backend_image_version", "Backend image channel/tag"),
+				componentImageVersionField("frontend_image_version", "Frontend image channel/tag"),
 				{Name: "backend_image", Flag: "--backend-image", Type: "hidden"},
 				{Name: "frontend_image", Flag: "--frontend-image", Type: "hidden"},
 				// Ports are intentionally hidden — operators should not change container ports
@@ -338,6 +448,7 @@ func Catalog() []Script {
 			Fields: []Field{
 				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true, Placeholder: "acme"},
 				imageVersionField(true),
+				componentImageVersionField("backend_image_version", "Backend image channel/tag"),
 				{Name: "backend_image", Flag: "--backend-image", Type: "hidden"},
 				{Name: "admin_user", Label: "Admin username", Flag: "--env", Type: "text", Placeholder: "admin",
 					Default: "admin", Suggest: []string{"admin"}},
@@ -397,6 +508,8 @@ func Catalog() []Script {
 			Danger:  true,
 			Fields: []Field{
 				imageVersionField(true),
+				componentImageVersionField("backend_image_version", "Backend image channel/tag"),
+				componentImageVersionField("frontend_image_version", "Frontend image channel/tag"),
 				{Name: "_pos_image", Type: "hidden"},
 				{Name: "type", Label: "App type", Flag: "--type", Type: "select", Options: []string{"backend", "frontend"}},
 				{Name: "tenant", Label: "Single tenant", Flag: "--tenant", Type: "text"},
@@ -431,6 +544,8 @@ func Catalog() []Script {
 			Fields: []Field{
 				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true},
 				imageVersionField(false),
+				optionalComponentImageVersionField("backend_image_version", "Backend image channel/tag"),
+				optionalComponentImageVersionField("frontend_image_version", "Frontend image channel/tag"),
 				{Name: "backend_image", Flag: "--backend-image", Type: "hidden"},
 				{Name: "frontend_image", Flag: "--frontend-image", Type: "hidden"},
 				{Name: "scale", Label: "Backend scale", Flag: "--scale", Type: "text", Placeholder: "1"},

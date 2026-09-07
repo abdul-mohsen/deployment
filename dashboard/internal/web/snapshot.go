@@ -176,10 +176,11 @@ func writeAppsJSONArray(b *strings.Builder, apps []dokku.App) {
 			b.WriteByte(',')
 		}
 		fmt.Fprintf(b,
-			`{"name":%q,"role":%q,"tenant":%q,"state":%q,"image":%q,"version":%q,"http":%q,"http_reason":%q,"int_port":%q,"host_ports":%q,"procs":%q,"domains":%q,"image_ref":%q,"image_digest":%q,"commit":%q,"deployed_at":%q,"provenance_status":%q,"liveness":%s,"internal_health":%s,"external_probe":%s,"identity":%s}`,
-			a.Name, a.Role, a.Tenant, a.State, a.Image, a.Version, a.HTTPCode, a.Internal.Reason,
-			a.IntPort, a.HostPorts, strings.Join(a.Procs, ","), strings.Join(a.Domains, ","),
-			a.Identity.ImageRef, a.Identity.Digest, a.Identity.Commit, a.Identity.DeployedAt, a.Identity.Status,
+			`{"name":%q,"role":%q,"tenant":%q,"state":%q,"image":%q,"image_ref":%q,"image_digest":%q,"resolved_digest":%q,"version":%q,"channel":%q,"source_commit":%q,"deployed_at":%q,"last_operation":%q,"last_failure":%q,"http":%q,"http_reason":%q,"int_port":%q,"host_ports":%q,"procs":%q,"domains":%q,"provenance_status":%q,"liveness":%s,"internal_health":%s,"external_probe":%s,"identity":%s}`,
+			a.Name, a.Role, a.Tenant, a.State, a.Image, a.ImageRef, a.ImageDigest, a.ResolvedDigest,
+			a.Version, a.Channel, a.SourceCommit, a.DeployedAt, a.LastOperation, a.LastFailure,
+			a.HTTPCode, a.Internal.Reason, a.IntPort, a.HostPorts, strings.Join(a.Procs, ","), strings.Join(a.Domains, ","),
+			a.Identity.Status,
 			healthJSON(a.Liveness), healthJSON(a.Internal), healthJSON(a.External), identityJSON(a.Identity))
 	}
 	b.WriteByte(']')

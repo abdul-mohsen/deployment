@@ -33,34 +33,45 @@ func New(dockerBin, dokkuName string) *Client {
 
 // App is a single Dokku app with the data needed to render the list page.
 type App struct {
-	Name        string
-	Role        string // backend / frontend / app
-	Tenant      string
-	State       string // running / stopped / not-deployed / restarting / mixed / unknown
-	Image       string
-	Version     string
-	ImageRef    string
-	ImageDigest string
-	Identity    BuildIdentity
-	RestartCnt  string
-	Procs       []string
-	IntPort     string
-	HostPorts   string
-	Domains     []string
-	HTTPCode    string
-	ContainerID string
-	Liveness    HealthCheck
-	Internal    HealthCheck
-	External    HealthCheck
+	Name           string
+	Role           string // backend / frontend / app
+	Tenant         string
+	State          string // running / stopped / not-deployed / restarting / mixed / unknown
+	Image          string
+	Version        string
+	ImageRef       string
+	ImageDigest    string
+	ResolvedDigest string
+	Channel        string
+	SourceCommit   string
+	DeployedAt     string
+	LastOperation  string
+	LastFailure    string
+	Identity       BuildIdentity
+	RestartCnt     string
+	Procs          []string
+	IntPort        string
+	HostPorts      string
+	Domains        []string
+	HTTPCode       string
+	ContainerID    string
+	Liveness       HealthCheck
+	Internal       HealthCheck
+	External       HealthCheck
 }
 
 type containerSummary struct {
-	State       string
-	Image       string
-	ImageDigest string
-	Version     string
-	RestartCnt  string
-	Env         map[string]string
+	State          string
+	Image          string
+	ResolvedDigest string
+	ImageDigest    string
+	Version        string
+	ImageRef       string
+	Channel        string
+	SourceCommit   string
+	DeployedAt     string
+	RestartCnt     string
+	Env            map[string]string
 }
 
 // HealthCheck is intentionally additive to the historical HTTPCode field. A
@@ -140,13 +151,29 @@ func (c *Client) AppSummaryFrom(ctx context.Context, name, containerID string, d
 		app.State = container.State
 	}
 	app.Image = container.Image
+	app.ImageRef = container.ImageRef
+	app.ResolvedDigest = container.ResolvedDigest
+	if repoDigest := c.inspectField(ctx, app.ContainerID, `{{index .RepoDigests 0}}`); repoDigest != "" {
+		app.ResolvedDigest = digestFromRepoDigest(repoDigest)
+	}
 	app.Version = container.Version
+	app.Channel = container.Channel
+	app.SourceCommit = container.SourceCommit
+	app.DeployedAt = container.DeployedAt
 	if app.Version == "" {
 		app.Version = imageTag(app.Image)
 	}
-	app.ImageRef = container.Env["APP_IMAGE_REF"]
+	if app.ImageRef == "" {
+		app.ImageRef = container.Env["APP_IMAGE_REF"]
+	}
 	app.ImageDigest = container.ImageDigest
+	if app.ResolvedDigest == "" {
+		app.ResolvedDigest = app.ImageDigest
+	}
 	app.Identity = buildIdentity(container.Env, app.ImageRef, app.ImageDigest, app.Version)
+	if app.Channel == "" {
+		app.Channel = app.Version
+	}
 	app.RestartCnt = container.RestartCnt
 	app.Liveness = livenessForState(app.State)
 	path := "/"
@@ -167,8 +194,10 @@ func (c *Client) AppSummaryFrom(ctx context.Context, name, containerID string, d
 func (c *Client) containerSummary(ctx context.Context, cid string) containerSummary {
 	out, _ := c.exec(ctx, c.dockerBin, "inspect", "-f", `{{.State.Status}}
 {{.Config.Image}}
-{{.RestartCount}}
 {{.Image}}
+{{.Created}}
+{{.RestartCount}}
+{{range $k, $v := .Config.Labels}}{{printf "%s=%s\n" $k $v}}{{end}}
 {{range .Config.Env}}{{println .}}{{end}}`, cid)
 	lines := strings.Split(out, "\n")
 	summary := containerSummary{Env: map[string]string{}}
@@ -178,24 +207,44 @@ func (c *Client) containerSummary(ctx context.Context, cid string) containerSumm
 	if len(lines) > 1 {
 		summary.Image = strings.TrimSpace(lines[1])
 	}
-	if len(lines) > 2 {
-		summary.RestartCnt = strings.TrimSpace(lines[2])
-	}
 	imageID := ""
-	if len(lines) > 3 {
-		imageID = strings.TrimSpace(lines[3])
+	if len(lines) > 2 {
+		imageID = strings.TrimSpace(lines[2])
 	}
 	if imageID != "" {
 		summary.ImageDigest = c.inspectImageDigest(ctx, imageID)
+		summary.ResolvedDigest = summary.ImageDigest
 	}
-	for _, line := range lines[4:] {
+	if len(lines) > 3 {
+		summary.DeployedAt = strings.TrimSpace(lines[3])
+	}
+	if len(lines) > 4 {
+		summary.RestartCnt = strings.TrimSpace(lines[4])
+	}
+	for _, line := range lines[5:] {
 		line = strings.TrimSpace(line)
 		if i := strings.IndexByte(line, '='); i > 0 {
 			summary.Env[line[:i]] = line[i+1:]
 		}
 		if strings.HasPrefix(line, "APP_IMAGE_VERSION=") {
 			summary.Version = strings.TrimPrefix(line, "APP_IMAGE_VERSION=")
+		} else if strings.HasPrefix(line, "APP_IMAGE_REF=") {
+			summary.ImageRef = strings.TrimPrefix(line, "APP_IMAGE_REF=")
+		} else if strings.HasPrefix(line, "org.opencontainers.image.version=") && summary.Version == "" {
+			summary.Version = strings.TrimPrefix(line, "org.opencontainers.image.version=")
+		} else if strings.HasPrefix(line, "org.opencontainers.image.revision=") {
+			summary.SourceCommit = strings.TrimPrefix(line, "org.opencontainers.image.revision=")
+		} else if strings.HasPrefix(line, "org.opencontainers.image.created=") && summary.DeployedAt == "" {
+			summary.DeployedAt = strings.TrimPrefix(line, "org.opencontainers.image.created=")
+		} else if strings.HasPrefix(line, "org.opencontainers.image.channel=") {
+			summary.Channel = strings.TrimPrefix(line, "org.opencontainers.image.channel=")
 		}
+	}
+	if summary.ImageRef == "" {
+		summary.ImageRef = summary.Image
+	}
+	if summary.Channel == "" {
+		summary.Channel = summary.Version
 	}
 	return summary
 }
@@ -265,10 +314,20 @@ func (c *Client) AppDetails(ctx context.Context, name string) App {
 		if a.Version == "" {
 			a.Version = imageTag(a.Image)
 		}
-		a.ImageRef = container.Env["APP_IMAGE_REF"]
+		a.ImageRef = container.ImageRef
+		if a.ImageRef == "" {
+			a.ImageRef = container.Env["APP_IMAGE_REF"]
+		}
 		a.ImageDigest = container.ImageDigest
+		a.ResolvedDigest = container.ResolvedDigest
+		a.Channel = container.Channel
+		a.SourceCommit = container.SourceCommit
+		a.DeployedAt = container.DeployedAt
 		a.Identity = buildIdentity(container.Env, a.ImageRef, a.ImageDigest, a.Version)
 		a.RestartCnt = container.RestartCnt
+		if a.Channel == "" {
+			a.Channel = a.Version
+		}
 		a.HostPorts = c.hostPorts(ctx, a.ContainerID)
 	}
 	a.IntPort = c.intPort(ctx, name)
@@ -391,6 +450,14 @@ func imageTag(image string) string {
 		return image[lastColon+1:]
 	}
 	return ""
+}
+
+func digestFromRepoDigest(value string) string {
+	value = strings.TrimSpace(value)
+	if at := strings.LastIndex(value, "@"); at >= 0 && at+1 < len(value) {
+		return value[at+1:]
+	}
+	return value
 }
 
 func (c *Client) intPort(ctx context.Context, app string) string {

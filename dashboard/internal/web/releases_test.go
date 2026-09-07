@@ -1,6 +1,11 @@
 package web
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"html/template"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -66,5 +71,70 @@ func TestBuildReleaseViewsDoesNotClaimMissingProvenanceAsSuccessful(t *testing.T
 	}
 	if !strings.Contains(views[0].FailureSummary, "provenance") {
 		t.Fatalf("missing provenance reason not exposed: %+v", views[0])
+	}
+}
+
+func TestReleaseTemplateRendersProvenanceAndValidationReason(t *testing.T) {
+	funcs := template.FuncMap{
+		"join": strings.Join,
+		"now":  func() string { return "" },
+	}
+	page := template.Must(template.New("").Funcs(funcs).ParseFiles("templates/releases.html"))
+	view := releaseView{ImageVersion: scripts.ImageVersion{
+		Tag:                  "v0.0.4",
+		Channel:              "stable",
+		Status:               "not-ready",
+		BackendVersion:       "v0.0.4",
+		FrontendVersion:      "v0.0.3",
+		BackendImage:         "owner/api:v0.0.4",
+		FrontendImage:        "owner/web:v0.0.3",
+		BackendDigest:        "sha256:backend",
+		FrontendDigest:       "sha256:frontend",
+		BackendSourceCommit:  "backend-full-sha",
+		FrontendSourceCommit: "frontend-full-sha",
+		ValidationErrors:     []string{"frontend OCI identity metadata has not been validated"},
+	}}
+	var out bytes.Buffer
+	if err := page.ExecuteTemplate(&out, "content", map[string]any{
+		"Releases":       []releaseView{view},
+		"DefaultVersion": "dev",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body := out.String()
+	for _, want := range []string{"owner/api:v0.0.4", "sha256:backend", "backend-full-sha", "frontend OCI identity metadata has not been validated", "not-ready"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rendered release page missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestApplyOperationStatusSurfacesFailure(t *testing.T) {
+	s := &server{operations: map[string]operationStatus{}}
+	s.recordOperation("acme-backend", "update-tenant", fmt.Errorf("image pull failed"))
+	apps := []dokku.App{{Name: "acme-backend"}}
+	s.applyOperationStatus(apps)
+	if apps[0].LastOperation == "" || apps[0].LastFailure != "image pull failed" {
+		t.Fatalf("expected operation provenance, got %+v", apps[0])
+	}
+}
+
+func TestAPIReleasesExposesIndependentDevDefaults(t *testing.T) {
+	t.Setenv("BACKEND_IMAGE", "owner/api")
+	t.Setenv("FRONTEND_IMAGE", "owner/web")
+	t.Setenv("APP_IMAGE_VERSION_DEFAULT", "")
+	s := &server{}
+	rec := httptest.NewRecorder()
+	s.handleAPIReleases(rec, httptest.NewRequest("GET", "/api/releases", nil))
+	var payload struct {
+		Default           string            `json:"default"`
+		DefaultComponents map[string]string `json:"default_components"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Default != "dev" || payload.DefaultComponents["backend"] != "owner/api:dev" ||
+		payload.DefaultComponents["frontend"] != "owner/web:dev" {
+		t.Fatalf("unexpected release defaults: %+v", payload)
 	}
 }

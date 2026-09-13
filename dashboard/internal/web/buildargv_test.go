@@ -57,6 +57,48 @@ func TestBuildArgv_CreateTenant_FullFlow(t *testing.T) {
 	}
 }
 
+func TestBuildArgv_InitTenantDB_StatusOnly(t *testing.T) {
+	setVersionTestEnv(t)
+	sc := scripts.Find("init-tenant-db.sh")
+	if sc == nil {
+		t.Fatal("init-tenant-db.sh not in catalog")
+	}
+	form := url.Values{
+		"_pos_name":     {"acme"},
+		"image_version": {"v0.0.2"},
+		"status":        {"on"},
+	}
+	argv, err := buildArgv(sc, form)
+	if err != nil {
+		t.Fatalf("buildArgv: %v", err)
+	}
+	joined := strings.Join(argv, " ")
+	if !strings.Contains(joined, "--status") {
+		t.Fatalf("status flag missing: %s", joined)
+	}
+	if strings.Contains(joined, "--schema-only") || strings.Contains(joined, "--seed-only") {
+		t.Fatalf("status form unexpectedly applies schema or seeds data: %s", joined)
+	}
+}
+
+func TestBuildArgv_MigrationStatus(t *testing.T) {
+	sc := scripts.Find("migration-status.sh")
+	if sc == nil {
+		t.Fatal("migration-status.sh not in catalog")
+	}
+	argv, err := buildArgv(sc, url.Values{
+		"tenant": {"hockun"},
+		"json":   {"on"},
+	})
+	if err != nil {
+		t.Fatalf("buildArgv: %v", err)
+	}
+	joined := strings.Join(argv, " ")
+	if !strings.Contains(joined, "--tenant hockun") || !strings.Contains(joined, "--json") {
+		t.Fatalf("unexpected migration status argv: %s", joined)
+	}
+}
+
 func TestBuildArgv_CreateTenant_ManagerUserRequiresPassword(t *testing.T) {
 	setVersionTestEnv(t)
 	sc := scripts.Find("create-tenant.sh")

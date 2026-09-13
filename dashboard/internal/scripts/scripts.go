@@ -362,6 +362,8 @@ func (s Script) ControlCommand() string {
 		return "tenant create"
 	case "init-tenant-db":
 		return "tenant init-db"
+	case "migration-status":
+		return "tenant migration-status"
 	case "remove-tenant":
 		return "tenant remove"
 	case "cleanup-broken-tenant":
@@ -595,6 +597,8 @@ func Catalog() []Script {
 				imageVersionFieldForScope(true, "backend"),
 				componentImageVersionField("backend_image_version", "Backend image channel/tag"),
 				{Name: "backend_image", Flag: "--backend-image", Type: "hidden"},
+				{Name: "status", Label: "Status only", Flag: "--status", Type: "checkbox", Boolean: true,
+					Help: "Read-only check of the migration ledger for the selected tenant."},
 				{Name: "admin_user", Label: "Admin username", Flag: "--env", Type: "text", Placeholder: "admin",
 					Default: "admin", Suggest: []string{"admin"}},
 				{Name: "admin_password", Label: "Admin password", Flag: "--env", Type: "password", Secret: true,
@@ -607,6 +611,14 @@ func Catalog() []Script {
 				{Name: "schema_only", Label: "Schema only", Flag: "--schema-only", Type: "checkbox", Boolean: true},
 				{Name: "seed_only", Label: "Seed only", Flag: "--seed-only", Type: "checkbox", Boolean: true},
 				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
+			},
+		},
+		{
+			Name: "migration-status.sh", Title: "Migration status",
+			Summary: "Detect pending or failed backend migrations for one or every tenant.",
+			Fields: []Field{
+				{Name: "tenant", Label: "Tenant filter", Flag: "--tenant", Type: "text", Placeholder: "(all)"},
+				{Name: "json", Label: "JSON output", Flag: "--json", Type: "checkbox", Boolean: true},
 			},
 		},
 		{
@@ -890,6 +902,17 @@ func validateArgs(argv []string) error {
 // name). Sanitized output is streamed to w line-by-line as SSE `data:` frames.
 func (r *Runner) Run(ctx context.Context, w io.Writer, scriptName string, argv []string) error {
 	return r.RunWithCallback(ctx, w, scriptName, argv, nil)
+}
+
+// RunCapture executes a script and returns normalized output without SSE
+// framing. It is used by read-only status checks.
+func (r *Runner) RunCapture(ctx context.Context, scriptName string, argv []string) (string, error) {
+	var output strings.Builder
+	err := r.RunWithCallback(ctx, io.Discard, scriptName, argv, func(line string) {
+		output.WriteString(line)
+		output.WriteByte('\n')
+	})
+	return output.String(), err
 }
 
 // RunWithCallback executes a script like Run and invokes onLine for every

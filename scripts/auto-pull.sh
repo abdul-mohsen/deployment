@@ -161,7 +161,7 @@ check_and_deploy() {
     # If it cannot be produced, retry on the next poll instead.
     ensure_auto_backup || return 0
 
-    if bash "$SCRIPT_DIR/deploy-all.sh" "$full_image" \
+    if PREDEPLOY_BACKUP_VERIFIED=1 bash "$SCRIPT_DIR/deploy-all.sh" "$full_image" \
             --type "$app_type" \
             --tenant "$DEV_TENANT" \
             --skip-canary; then

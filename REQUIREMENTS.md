@@ -76,8 +76,13 @@ Copy from [config.env.example](config.env.example) and fill:
   pattern used in [scripts/remove-tenant.sh](scripts/remove-tenant.sh)
 - `DOCKERHUB_USERNAME`, optional `BACKEND_IMAGE` / `FRONTEND_IMAGE`,
   `PULL_TAG=dev` (the shared backend/frontend branch tag)
-- `MIGRATE_CMD` — Atlas:
-  `atlas migrate apply --dir file:///app/migrations --url "$DATABASE_URL"`
+- `BACKUP_BEFORE_MIGRATION=1` — require a verified tenant backup before
+  applying backend-image migrations.
+- `MIGRATION_STATUS_INTERVAL=5m` — dashboard interval for checking every
+  tenant's migration ledger; checks also run at dashboard startup.
+- `MIGRATE_CMD` — optional legacy custom migration command. Normal tenant
+  schema migrations are applied from the selected backend image by
+  `scripts/init-tenant-db.sh`.
 - Optional: `PUBLIC_PROTOCOL=https|http` (controls the canonical public link
   scheme and the frontend `API_URL`; production must use `https`),
   `NGINX_CLIENT_MAX_BODY_SIZE=50m`

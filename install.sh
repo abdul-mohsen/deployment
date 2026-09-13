@@ -91,7 +91,9 @@ fi
 : "${WEBHOOK_SECRET:=}"
 : "${STORAGE_ROOT:=/opt/tenant-data}"
 : "${BACKUP_DIR:=/opt/tenant-backups}"
-: "${MIGRATE_CMD:=atlas migrate apply --dir file:///app/migrations --url \"\$DATABASE_URL\"}"
+# Tenant schema migrations are applied from the selected backend image by
+# scripts/init-tenant-db.sh. Keep this legacy custom hook opt-in.
+: "${MIGRATE_CMD:=}"
 
 DEV_ONLY=true
 SKIP_DEV_TENANT=false

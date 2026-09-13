@@ -106,6 +106,26 @@
   {{end}}
 </div>
 
+<!-- Migration status -->
+<div class="panel" id="migration-panel">
+  <div class="panel-toolbar">
+    <span class="panel-title" style="border:none;padding:0;margin:0">Schema migrations</span>
+    <div style="display:flex;align-items:center;gap:8px">
+      <span id="migration-checked" style="font-size:11px;color:var(--text-muted)"></span>
+      <button id="migration-check-btn" class="btn btn-secondary" type="button">Check now</button>
+    </div>
+  </div>
+  <div style="padding:12px 16px">
+    <div style="display:flex;align-items:center;gap:8px">
+      <span id="migration-badge" class="badge badge-neutral">{{.Migration.SchemaStatus}}</span>
+      <code id="migration-image" class="row-mono">{{or .Migration.Image "backend image unavailable"}}</code>
+    </div>
+    <div id="migration-detail" style="margin-top:10px;font-size:12px;color:var(--text-muted)">
+      Checking migration ledger...
+    </div>
+  </div>
+</div>
+
 <!-- Actions row -->
 <div class="panels-row">
   <!-- Sync version -->
@@ -302,6 +322,60 @@
 (function () {
   'use strict';
   const tenant = '{{.Tenant}}';
+  const migrationBadge = document.getElementById('migration-badge');
+  const migrationImage = document.getElementById('migration-image');
+  const migrationDetail = document.getElementById('migration-detail');
+  const migrationChecked = document.getElementById('migration-checked');
+  const migrationCheckBtn = document.getElementById('migration-check-btn');
+  const initialMigration = {{json .Migration}};
+
+  function migrationClass(status) {
+    if (status === 'up_to_date') return 'badge badge-success';
+    if (status === 'pending' || status === 'failed') return 'badge badge-warn';
+    if (status === 'checking') return 'badge badge-neutral';
+    return 'badge badge-danger';
+  }
+
+  function renderMigration(status) {
+    const schemaStatus = status.schema_status || 'unknown';
+    migrationBadge.className = migrationClass(schemaStatus);
+    migrationBadge.textContent = schemaStatus;
+    migrationImage.textContent = status.image || 'backend image unavailable';
+    migrationChecked.textContent = status.checked_at && !status.checked_at.startsWith('0001-')
+      ? 'Checked ' + new Date(status.checked_at).toLocaleString()
+      : '';
+    const pending = status.pending_migrations || [];
+    const failed = status.failed_migrations || [];
+    const parts = [];
+    if (pending.length) parts.push('Pending: ' + pending.join(', '));
+    if (failed.length) parts.push('Failed: ' + failed.join(', '));
+    if (status.error) parts.push(status.error);
+    migrationDetail.textContent = parts.length
+      ? parts.join(' · ')
+      : (schemaStatus === 'up_to_date' ? 'All image migrations are applied.' : 'No migration details available.');
+  }
+
+  async function loadMigrationStatus(refresh) {
+    migrationCheckBtn.disabled = true;
+    try {
+      const suffix = refresh ? '?refresh=1' : '';
+      const res = await fetch('/tenants/' + encodeURIComponent(tenant) + '/migration-status' + suffix);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      renderMigration(await res.json());
+    } catch (err) {
+      renderMigration({
+        schema_status: 'unknown',
+        error: 'Migration check failed: ' + err.message
+      });
+    } finally {
+      migrationCheckBtn.disabled = false;
+    }
+  }
+
+  renderMigration(initialMigration);
+  loadMigrationStatus(false);
+  migrationCheckBtn.addEventListener('click', () => loadMigrationStatus(true));
+
   const out = document.getElementById('tenant-out');
   const activityPanel = document.getElementById('tenant-activity-panel');
   const activityStore = window.DashboardOperation.createStore('dashboard:tenant-activity:' + tenant);

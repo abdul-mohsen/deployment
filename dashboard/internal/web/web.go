@@ -49,6 +49,7 @@ type server struct {
 	pages       map[string]*template.Template
 	store       *sessions.CookieStore
 	snapshots   *snapshotCache
+	migrations  *migrationMonitor
 	tenantState *tenantstate.Store
 	imageTags   imageTagSetLookup
 	authMu      sync.RWMutex
@@ -91,6 +92,8 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 	s.tenantState = tenantstate.NewStore(cfg.TenantStateDir)
 	s.snapshots = newSnapshotCache(60*time.Second, s.collectSnapshot)
 	s.snapshots.Start(context.Background())
+	s.migrations = newMigrationMonitor(runner)
+	s.migrations.Start(context.Background())
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -117,6 +120,7 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		r.Use(s.requireAuth)
 		r.Get("/", s.handleIndex)
 		r.Get("/tenants/{name}", s.handleTenant)
+		r.Get("/tenants/{name}/migration-status", s.handleTenantMigrationStatus)
 		r.Post("/tenants/{name}/{verb}", s.handleTenantAction)
 		r.Post("/tenants/{name}/delete", s.handleTenantDelete)
 		r.Get("/apps/{name}", s.handleApp)
@@ -352,6 +356,13 @@ func (s *server) handleTenant(w http.ResponseWriter, r *http.Request) {
 	}
 	autoRedeploy := s.tenantState.IsAutoRedeployEnabled(name)
 	snapshot, _ := s.snapshots.Snapshot()
+	migration, ok := s.migrations.Status(name)
+	if !ok {
+		migration = MigrationStatus{
+			Tenant:       name,
+			SchemaStatus: "checking",
+		}
+	}
 	s.render(w, "tenant.html", map[string]any{
 		"Env":                 s.cfg.EnvName,
 		"Base":                s.cfg.BaseDomain,
@@ -363,10 +374,53 @@ func (s *server) handleTenant(w http.ResponseWriter, r *http.Request) {
 		"Versions":            scripts.VersionCatalog(),
 		"DefaultVersion":      tenantSyncVersion(backend, frontend, s.compatibleDefaultImageVersion(r.Context(), "both", "")),
 		"AutoRedeploy":        autoRedeploy,
+		"Migration":           migration,
 		"BackupRetentionDays": backupRetentionDays(s.cfg.BackupRetentionDays),
 		"MaxUserBackups":      50,
 		"Snapshot":            snapshot,
 	})
+}
+
+func (s *server) handleTenantMigrationStatus(w http.ResponseWriter, r *http.Request) {
+	tenant := chi.URLParam(r, "name")
+	if !validAppName(tenant) {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	apps := s.appsForTenant(r.Context(), tenant)
+	if len(apps) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+
+	var image string
+	for _, app := range apps {
+		if app.Role == "backend" {
+			image = app.Image
+			break
+		}
+	}
+	if r.URL.Query().Get("refresh") == "1" {
+		status := s.migrations.CheckTenant(r.Context(), tenant, image)
+		writeMigrationStatus(w, status)
+		return
+	}
+
+	status, ok := s.migrations.Status(tenant)
+	if !ok {
+		status = MigrationStatus{
+			Tenant:       tenant,
+			Image:        image,
+			SchemaStatus: "checking",
+		}
+		s.migrations.RefreshSoon()
+	}
+	writeMigrationStatus(w, status)
+}
+
+func writeMigrationStatus(w http.ResponseWriter, status MigrationStatus) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(status)
 }
 
 func backupRetentionDays(days int) int {

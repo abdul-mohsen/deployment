@@ -64,7 +64,7 @@ func TestScriptsTemplateGroupsCommandsByOperatorIntent(t *testing.T) {
 		{
 			id:    "read-only-status",
 			title: "Read-only / status",
-			slug:  []string{"status", "list-tenants", "tail-logs", "verify-mysql", "discover-dokku-nginx", "watch-dokku-traffic"},
+			slug:  []string{"status", "list-tenants", "migration-status", "tail-logs", "verify-mysql", "discover-dokku-nginx", "watch-dokku-traffic"},
 		},
 		{
 			id:    "deployment-lifecycle",

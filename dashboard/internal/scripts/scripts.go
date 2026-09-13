@@ -423,7 +423,7 @@ type CommandGroup struct {
 // GroupID returns the stable command-index group identifier for a script.
 func (s Script) GroupID() string {
 	switch s.Slug() {
-	case "status", "list-tenants", "tail-logs", "verify-mysql",
+	case "status", "list-tenants", "migration-status", "tail-logs", "verify-mysql",
 		"discover-dokku-nginx", "watch-dokku-traffic":
 		return commandGroupReadOnlyStatus
 	case "backup-tenant", "manage-backups", "restore-tenant":
@@ -450,7 +450,7 @@ func (s Script) Group() string {
 // impact before an operator opens the command.
 func (s Script) ImpactClass() string {
 	switch s.Slug() {
-	case "status", "list-tenants", "tail-logs", "verify-mysql",
+	case "status", "list-tenants", "migration-status", "tail-logs", "verify-mysql",
 		"discover-dokku-nginx", "watch-dokku-traffic":
 		return "read-only"
 	case "remove-tenant", "cleanup-broken-tenant", "cleanup-old-files", "restore-tenant":

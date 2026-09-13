@@ -118,7 +118,7 @@ check_and_deploy() {
         fi
     fi
 
-    if bash "$SCRIPT_DIR/deploy-all.sh" "$full_image" \
+    if PREDEPLOY_BACKUP_VERIFIED=1 bash "$SCRIPT_DIR/deploy-all.sh" "$full_image" \
             --type "$app_type" \
             --tenant "$DEV_TENANT" \
             --skip-canary; then

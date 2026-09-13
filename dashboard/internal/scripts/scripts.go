@@ -11,6 +11,7 @@ package scripts
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -189,6 +190,8 @@ func (s Script) ControlCommand() string {
 		return "tenant create"
 	case "init-tenant-db":
 		return "tenant init-db"
+	case "migration-status":
+		return "tenant migration-status"
 	case "remove-tenant":
 		return "tenant remove"
 	case "cleanup-broken-tenant":
@@ -298,6 +301,8 @@ func Catalog() []Script {
 				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true, Placeholder: "acme"},
 				imageVersionField(true),
 				{Name: "backend_image", Flag: "--backend-image", Type: "hidden"},
+				{Name: "status", Label: "Status only", Flag: "--status", Type: "checkbox", Boolean: true,
+					Help: "Read-only check of every migration recorded for the selected backend image."},
 				{Name: "admin_user", Label: "Admin username", Flag: "--env", Type: "text", Placeholder: "admin",
 					Default: "admin", Suggest: []string{"admin"}},
 				{Name: "admin_password", Label: "Admin password", Flag: "--env", Type: "password", Secret: true,
@@ -310,6 +315,14 @@ func Catalog() []Script {
 				{Name: "schema_only", Label: "Schema only", Flag: "--schema-only", Type: "checkbox", Boolean: true},
 				{Name: "seed_only", Label: "Seed only", Flag: "--seed-only", Type: "checkbox", Boolean: true},
 				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
+			},
+		},
+		{
+			Name: "migration-status.sh", Title: "Migration status",
+			Summary: "Detect pending or failed backend migrations for one or every tenant.",
+			Fields: []Field{
+				{Name: "tenant", Label: "Tenant filter", Flag: "--tenant", Type: "text", Placeholder: "(all)"},
+				{Name: "json", Label: "JSON output", Flag: "--json", Type: "checkbox", Boolean: true},
 			},
 		},
 		{
@@ -644,6 +657,33 @@ exec bash "scripts/deployctl.sh" "script" "$NAME" "$@"
 		}
 	}
 	return cmd.Wait()
+}
+
+// RunCapture executes a script and returns its output without the SSE framing
+// used by Run. Callers can inspect structured output even when the script
+// exits non-zero, which is needed for migration checks that report failed
+// schema state.
+func (r *Runner) RunCapture(ctx context.Context, scriptName string, argv []string) (string, error) {
+	var framed bytes.Buffer
+	err := r.Run(ctx, &framed, scriptName, argv)
+
+	var output strings.Builder
+	scanner := bufio.NewScanner(&framed)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			line = strings.TrimPrefix(line, "data: ")
+		}
+		if line == "" {
+			continue
+		}
+		output.WriteString(line)
+		output.WriteByte('\n')
+	}
+	if scanErr := scanner.Err(); scanErr != nil && err == nil {
+		err = scanErr
+	}
+	return output.String(), err
 }
 
 var ansi = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)

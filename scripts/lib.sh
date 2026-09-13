@@ -9,6 +9,8 @@
 #   source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # =============================================================================
 
+_DEPLOYMENT_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Detect whether this shell should use a local mysql client or a mysql helper
 # container. MYSQL_CLIENT_MODE=docker is used by the dashboard runner so MySQL
 # grants scoped to Docker bridge clients keep working even if the runner image
@@ -117,6 +119,42 @@ tenant_in_scope() {
     tenant="$(sanitize_tenant_name "$1")"
     prefix="$(tenant_name_prefix)"
     [ -z "$prefix" ] || [[ "$tenant" == "$prefix"* ]]
+}
+
+run_tenant_schema_migration() {
+    local tenant="$1"
+    local image="$2"
+    local config_file="$3"
+    local backup_script="${TENANT_BACKUP_SCRIPT:-$_DEPLOYMENT_SCRIPT_DIR/backup-tenant.sh}"
+    local migration_script="${TENANT_MIGRATION_SCRIPT:-$_DEPLOYMENT_SCRIPT_DIR/init-tenant-db.sh}"
+
+    if [ ! -f "$config_file" ]; then
+        echo "[✗] Migration requires deployment config: $config_file" >&2
+        return 1
+    fi
+
+    if [ "${PREDEPLOY_BACKUP_VERIFIED:-0}" = "1" ]; then
+        echo "[i] Reusing verified pre-deploy backup for $tenant."
+    elif [ "${BACKUP_BEFORE_MIGRATION:-1}" = "0" ]; then
+        echo "[!] Backup before migration disabled for $tenant." >&2
+    else
+        echo "[+] Creating verified pre-migration backup for $tenant."
+        bash "$backup_script" "$tenant" \
+            --origin auto \
+            --owner tenant-migration \
+            --require-verified \
+            --no-prune \
+            --config "$config_file" || {
+                echo "[✗] Pre-migration backup failed for $tenant; deployment stopped." >&2
+                return 1
+            }
+    fi
+
+    echo "[+] Applying backend schema migrations for $tenant from $image."
+    bash "$migration_script" "$tenant" \
+        --schema-only \
+        --backend-image "$image" \
+        --config "$config_file"
 }
 
 tenant_from_app_name() {

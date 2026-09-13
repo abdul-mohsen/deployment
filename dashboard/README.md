@@ -36,6 +36,7 @@ runtime besides the docker socket.
 | `DASHBOARD_SNAPSHOT_WORKERS` | no | `8`             |
 | `DASHBOARD_ENV_FILE`  | no       | —               |
 | `TENANT_NAME_PREFIX`  | no       | —               |
+| `MIGRATION_STATUS_INTERVAL` | no     | `5m`          |
 
 Version picker values are exact SemVer image tags such as `v0.0.1`, not channels such as
 `latest`, `stable`, or `dev`. The dashboard deploys the selected tag to both apps:

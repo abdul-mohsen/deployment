@@ -75,8 +75,13 @@ Copy from [config.env.example](config.env.example) and fill:
   pattern used in [scripts/remove-tenant.sh](scripts/remove-tenant.sh)
 - `DOCKERHUB_USERNAME`, optional `BACKEND_IMAGE` / `FRONTEND_IMAGE`,
   `PULL_TAG=latest`
-- `MIGRATE_CMD` — Atlas:
-  `atlas migrate apply --dir file:///app/migrations --url "$DATABASE_URL"`
+- `BACKUP_BEFORE_MIGRATION=1` — require a verified tenant backup before
+  applying backend-image migrations.
+- `MIGRATION_STATUS_INTERVAL=5m` — dashboard interval for checking every
+  tenant's migration ledger; checks also run at dashboard startup.
+- `MIGRATE_CMD` - optional legacy custom migration command. Normal tenant
+  schema migrations are applied from the selected backend image by
+  `scripts/init-tenant-db.sh`.
 - Optional: `PUBLIC_PROTOCOL=https|http` (controls only the `API_URL` string),
   `NGINX_CLIENT_MAX_BODY_SIZE=50m`
 
@@ -99,6 +104,10 @@ Rules learned the hard way:
 - Tenant schema and migrations are applied as the tenant DB user. Backend
   migrations must avoid trigger creation so MySQL 8 binary logging does not
   require global trigger-related privileges.
+- `scripts/init-tenant-db.sh <tenant> --status` reports each applied, pending,
+  or failed migration and exits non-zero unless the tenant schema is current.
+  The dashboard exposes the same read-only check through the **Status only**
+  option on **Initialize tenant DB**.
 - No `FLUSH PRIVILEGES` — needs `RELOAD` priv and isn't required in MySQL 8 for
   `CREATE USER` / `GRANT`.
 - `CREATE USER IF NOT EXISTS` does **not** update an existing password — always

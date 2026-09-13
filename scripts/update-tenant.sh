@@ -118,6 +118,10 @@ done
 if [ -n "$BACKEND_IMAGE" ]; then
     log "Deploying backend: $BACKEND_IMAGE"
     ensure_update_image_available "$BACKEND_IMAGE"
+    if ! run_tenant_schema_migration "$TENANT_NAME" "$BACKEND_IMAGE" "$CONFIG_FILE"; then
+        error "Backend schema migration failed; leaving ${BACKEND_APP} on its current image."
+        exit 1
+    fi
     dokku config:set --no-restart "$BACKEND_APP" \
         APP_IMAGE_VERSION="$(image_tag "$BACKEND_IMAGE")" \
         APP_IMAGE_REF="$BACKEND_IMAGE"

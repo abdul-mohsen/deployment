@@ -63,7 +63,6 @@ fi
 SUFFIX="-${APP_TYPE}"
 BASE_DOMAIN="${BASE_DOMAIN:-app.example.com}"
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
-MIGRATE_CMD="${MIGRATE_CMD:-}"
 IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"
 
 ensure_deploy_image_available() {
@@ -111,7 +110,7 @@ get_tenant_override() {
         | head -1 || echo ""
 }
 
-# Deploy one app, honoring per-tenant override and running migrations
+# Deploy one app, honoring per-tenant override and migrating backend schema
 deploy_one() {
     local app="$1"
     local tenant="${app%${SUFFIX}}"
@@ -125,6 +124,13 @@ deploy_one() {
         return 0
     fi
 
+    if [ "$APP_TYPE" = "backend" ]; then
+        if ! run_tenant_schema_migration "$tenant" "$image" "$CONFIG_FILE"; then
+            error "${tenant}: backend schema migration failed; image was not deployed."
+            return 1
+        fi
+    fi
+
     if ! dokku config:set --no-restart "$app" \
             APP_IMAGE_VERSION="$(image_tag "$image")" \
             APP_IMAGE_REF="$image"; then
@@ -133,12 +139,6 @@ deploy_one() {
 
     if ! dokku_git_from_image "$app" "$image"; then
         return 1
-    fi
-
-    # Run DB migration if configured (backend only)
-    if [ "$APP_TYPE" = "backend" ] && [ -n "$MIGRATE_CMD" ]; then
-        log "  Running migration on ${app}: ${MIGRATE_CMD}"
-        dokku run "$app" $MIGRATE_CMD || warn "  Migration failed on ${app}"
     fi
     return 0
 }

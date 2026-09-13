@@ -44,6 +44,7 @@ type server struct {
 	pages       map[string]*template.Template
 	store       *sessions.CookieStore
 	snapshots   *snapshotCache
+	migrations  *migrationMonitor
 	tenantState *tenantstate.Store
 	authMu      sync.RWMutex
 }
@@ -81,6 +82,8 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 	s.tenantState = tenantstate.NewStore(cfg.TenantStateDir)
 	s.snapshots = newSnapshotCache(60*time.Second, s.collectSnapshot)
 	s.snapshots.Start(context.Background())
+	s.migrations = newMigrationMonitor(runner)
+	s.migrations.Start(context.Background())
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -98,9 +101,10 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 	r.Group(func(r chi.Router) {
 		r.Use(s.requireAuth)
 		r.Get("/", s.handleIndex)
-	r.Get("/tenants/{name}", s.handleTenant)
-	r.Post("/tenants/{name}/{verb}", s.handleTenantAction)
-	r.Post("/tenants/{name}/delete", s.handleTenantDelete)
+		r.Get("/tenants/{name}", s.handleTenant)
+		r.Get("/tenants/{name}/migration-status", s.handleTenantMigrationStatus)
+		r.Post("/tenants/{name}/{verb}", s.handleTenantAction)
+		r.Post("/tenants/{name}/delete", s.handleTenantDelete)
 		r.Get("/apps/{name}", s.handleApp)
 		r.Post("/apps/{name}/{verb}", s.handleAction)
 		r.Get("/apps/{name}/logs", s.handleLogStream)
@@ -306,6 +310,13 @@ func (s *server) handleTenant(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	autoRedeploy := s.tenantState.IsAutoRedeployEnabled(name)
+	migration, ok := s.migrations.Status(name)
+	if !ok {
+		migration = MigrationStatus{
+			Tenant:       name,
+			SchemaStatus: "checking",
+		}
+	}
 	s.render(w, "tenant.html", map[string]any{
 		"Env":            s.cfg.EnvName,
 		"Base":           s.cfg.BaseDomain,
@@ -316,8 +327,51 @@ func (s *server) handleTenant(w http.ResponseWriter, r *http.Request) {
 		"Versions":       scripts.VersionCatalog(),
 		"DefaultVersion": scripts.DefaultImageVersion(),
 		"AutoRedeploy":   autoRedeploy,
+		"Migration":      migration,
 		"MaxUserBackups": 50,
 	})
+}
+
+func (s *server) handleTenantMigrationStatus(w http.ResponseWriter, r *http.Request) {
+	tenant := chi.URLParam(r, "name")
+	if !validAppName(tenant) {
+		http.Error(w, "invalid name", http.StatusBadRequest)
+		return
+	}
+	apps := s.appsForTenant(r.Context(), tenant)
+	if len(apps) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+
+	var image string
+	for _, app := range apps {
+		if app.Role == "backend" {
+			image = app.Image
+			break
+		}
+	}
+	if r.URL.Query().Get("refresh") == "1" {
+		status := s.migrations.CheckTenant(r.Context(), tenant, image)
+		writeMigrationStatus(w, status)
+		return
+	}
+
+	status, ok := s.migrations.Status(tenant)
+	if !ok {
+		status = MigrationStatus{
+			Tenant:       tenant,
+			Image:        image,
+			SchemaStatus: "checking",
+		}
+		s.migrations.RefreshSoon()
+	}
+	writeMigrationStatus(w, status)
+}
+
+func writeMigrationStatus(w http.ResponseWriter, status MigrationStatus) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(status)
 }
 
 func (s *server) handleTenantAction(w http.ResponseWriter, r *http.Request) {
@@ -485,13 +539,13 @@ func (s *server) handleImageTags(w http.ResponseWriter, r *http.Request) {
 
 // TagMeta holds per-tag metadata returned alongside the tag list.
 type TagMeta struct {
-	Tag           string `json:"tag"`
-	LastPushed    string `json:"last_pushed,omitempty"` // ISO8601
-	Digest        string `json:"digest,omitempty"`       // first 19 chars of "sha256:..."
-	IsBranch      bool   `json:"is_branch"`              // true when not a semver vX.Y.Z tag
-	InBoth        bool   `json:"in_both"`                // true when tag exists in both backend AND frontend repos
-	BackendOnly   bool   `json:"backend_only,omitempty"` // true when only in backend repo
-	FrontendOnly  bool   `json:"frontend_only,omitempty"` // true when only in frontend repo
+	Tag          string `json:"tag"`
+	LastPushed   string `json:"last_pushed,omitempty"`   // ISO8601
+	Digest       string `json:"digest,omitempty"`        // first 19 chars of "sha256:..."
+	IsBranch     bool   `json:"is_branch"`               // true when not a semver vX.Y.Z tag
+	InBoth       bool   `json:"in_both"`                 // true when tag exists in both backend AND frontend repos
+	BackendOnly  bool   `json:"backend_only,omitempty"`  // true when only in backend repo
+	FrontendOnly bool   `json:"frontend_only,omitempty"` // true when only in frontend repo
 }
 
 // fetchImageTagsWithMeta returns the filtered tag list + per-tag metadata including

@@ -33,6 +33,7 @@ Options:
                           MANAGER_USER, MANAGER_PASSWORD, COMPANY_NAME
   --schema-only           Apply schema/migrations only
   --seed-only             Seed users/company only
+  --status                Report migration status without applying changes
   --dry-run               Show planned work without executing
   --config <path>         Path to config.env file (default: ../config.env)
 
@@ -50,6 +51,7 @@ TENANT_NAME=""
 BACKEND_IMAGE="${BACKEND_IMAGE:-}"
 SCHEMA_ONLY=false
 SEED_ONLY=false
+STATUS_ONLY=false
 DRY_RUN=false
 declare -a ENV_VARS=()
 
@@ -59,6 +61,7 @@ while [[ $# -gt 0 ]]; do
         --env)           ENV_VARS+=("$2"); shift 2 ;;
         --schema-only)   SCHEMA_ONLY=true; shift ;;
         --seed-only)     SEED_ONLY=true; shift ;;
+        --status)        STATUS_ONLY=true; shift ;;
         --dry-run)       DRY_RUN=true; shift ;;
         --config)        CONFIG_FILE="$2"; shift 2 ;;
         --help|-h)       usage; exit 0 ;;
@@ -77,7 +80,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 if $SCHEMA_ONLY && $SEED_ONLY; then
-    error "Use only one of --schema-only or --seed-only."
+    error "Use only one of --schema-only, --seed-only, or --status."
+    exit 1
+fi
+if $STATUS_ONLY && $SCHEMA_ONLY; then
+    error "Use only one of --schema-only, --seed-only, or --status."
+    exit 1
+fi
+if $STATUS_ONLY && $SEED_ONLY; then
+    error "Use only one of --schema-only, --seed-only, or --status."
     exit 1
 fi
 
@@ -376,6 +387,157 @@ run_tenant_mysql() {
     fi
 }
 
+MIGRATION_LEDGER_TABLE="deployment_schema_migrations"
+
+ensure_migration_ledger() {
+    run_tenant_mysql "$TENANT_DB_NAME" <<SQL
+CREATE TABLE IF NOT EXISTS \`${MIGRATION_LEDGER_TABLE}\` (
+    migration_id VARCHAR(255) NOT NULL,
+    checksum CHAR(64) NOT NULL,
+    image_ref VARCHAR(512) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    started_at DATETIME(6) NOT NULL,
+    applied_at DATETIME(6) NULL,
+    error_message TEXT NULL,
+    PRIMARY KEY (migration_id)
+) ENGINE=InnoDB;
+SQL
+}
+
+migration_ledger_exists() {
+    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='${MIGRATION_LEDGER_TABLE}';" \
+        </dev/null
+}
+
+hash_stream() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    else
+        error "sha256sum or shasum is required to track migration checksums."
+        return 1
+    fi
+}
+
+migration_checksum() {
+    local image="$1" path="$2"
+    docker run --rm --entrypoint sh "$image" -c "cat $(shell_quote "$path")" | hash_stream
+}
+
+migration_ledger_row() {
+    local migration_id="$1"
+    local migration_id_sql
+    migration_id_sql="$(sql_escape "$migration_id")"
+    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT status, checksum FROM \`${MIGRATION_LEDGER_TABLE}\` WHERE migration_id='${migration_id_sql}' LIMIT 1;" \
+        </dev/null
+}
+
+record_migration_started() {
+    local migration_id="$1" checksum="$2" image="$3"
+    local migration_id_sql checksum_sql image_sql
+    migration_id_sql="$(sql_escape "$migration_id")"
+    checksum_sql="$(sql_escape "$checksum")"
+    image_sql="$(sql_escape "$image")"
+    run_tenant_mysql "$TENANT_DB_NAME" -e "
+INSERT INTO \`${MIGRATION_LEDGER_TABLE}\`
+    (migration_id, checksum, image_ref, status, started_at, applied_at, error_message)
+VALUES
+    ('${migration_id_sql}', '${checksum_sql}', '${image_sql}', 'running', NOW(6), NULL, NULL)
+ON DUPLICATE KEY UPDATE
+    checksum=VALUES(checksum),
+    image_ref=VALUES(image_ref),
+    status='running',
+    started_at=VALUES(started_at),
+    applied_at=NULL,
+    error_message=NULL;" </dev/null
+}
+
+record_migration_applied() {
+    local migration_id="$1" checksum="$2" image="$3"
+    local migration_id_sql checksum_sql image_sql
+    migration_id_sql="$(sql_escape "$migration_id")"
+    checksum_sql="$(sql_escape "$checksum")"
+    image_sql="$(sql_escape "$image")"
+    run_tenant_mysql "$TENANT_DB_NAME" -e "
+UPDATE \`${MIGRATION_LEDGER_TABLE}\`
+SET checksum='${checksum_sql}',
+    image_ref='${image_sql}',
+    status='applied',
+    applied_at=NOW(6),
+    error_message=NULL
+WHERE migration_id='${migration_id_sql}';" </dev/null
+}
+
+record_migration_failed() {
+    local migration_id="$1" checksum="$2" image="$3" exit_code="$4"
+    local migration_id_sql checksum_sql image_sql error_sql
+    migration_id_sql="$(sql_escape "$migration_id")"
+    checksum_sql="$(sql_escape "$checksum")"
+    image_sql="$(sql_escape "$image")"
+    error_sql="$(sql_escape "migration command exited with status ${exit_code}")"
+    run_tenant_mysql "$TENANT_DB_NAME" -e "
+UPDATE \`${MIGRATION_LEDGER_TABLE}\`
+SET checksum='${checksum_sql}',
+    image_ref='${image_sql}',
+    status='failed',
+    applied_at=NULL,
+    error_message='${error_sql}'
+WHERE migration_id='${migration_id_sql}';" </dev/null
+}
+
+apply_image_migration() {
+    local image="$1" path="$2"
+    local migration_id checksum row previous_status previous_checksum rc
+    migration_id="$(basename "$path")"
+
+    checksum="$(migration_checksum "$image" "$path")" || {
+        error "Could not checksum migration ${migration_id} from ${image}."
+        return 1
+    }
+
+    row="$(migration_ledger_row "$migration_id")" || {
+        error "Could not read migration ledger for ${migration_id}."
+        return 1
+    }
+    if [ -n "$row" ]; then
+        IFS=$'\t' read -r previous_status previous_checksum <<< "$row"
+        if [ "$previous_checksum" != "$checksum" ]; then
+            error "Migration ${migration_id} changed after it was recorded; refusing to continue."
+            return 1
+        fi
+        if [ "$previous_status" = "applied" ]; then
+            log "Migration already applied: ${migration_id}"
+            return 0
+        fi
+    fi
+
+    record_migration_started "$migration_id" "$checksum" "$image" || {
+        error "Could not record migration start: ${migration_id}."
+        return 1
+    }
+
+    if apply_image_sql_file "$image" "$path" "migration ${migration_id}"; then
+        record_migration_applied "$migration_id" "$checksum" "$image" || {
+            error "Migration applied but could not be recorded: ${migration_id}."
+            return 1
+        }
+        log "Migration applied: ${migration_id}"
+        return 0
+    else
+        rc=$?
+    fi
+
+    if ! record_migration_failed "$migration_id" "$checksum" "$image" "$rc"; then
+        error "Could not record failed migration: ${migration_id}; schema status is unknown."
+        return 1
+    fi
+    error "Migration failed: ${migration_id} (exit ${rc})."
+    return "$rc"
+}
+
 find_image_dir() {
     local image="$1" path
     shift
@@ -439,6 +601,8 @@ apply_schema() {
         apply_image_sql_file "$image" "$schema_path" "base schema"
     fi
 
+    ensure_migration_ledger
+
     migrations_dir="$(find_image_dir "$image" \
         "$TENANT_MIGRATIONS_IMAGE_DIR" \
         /app/pkg/db/migrations \
@@ -459,7 +623,7 @@ apply_schema() {
     while IFS= read -r migration; do
         [ -n "$migration" ] || continue
         migrations_found=true
-        apply_image_sql_file "$image" "$migration" "migration $(basename "$migration")"
+        apply_image_migration "$image" "$migration"
     done < <(list_image_migrations "$image" "$migrations_dir")
 
     if ! $migrations_found; then
@@ -467,6 +631,81 @@ apply_schema() {
     fi
 
     validate_tenant_schema
+}
+
+show_migration_status() {
+    local image migrations_dir migration_paths migration
+    local ledger_exists status pending_count failed_count row previous_status previous_checksum checksum
+    image="$(resolve_backend_image)"
+    ensure_backend_image_available "$image"
+
+    migrations_dir="$(find_image_dir "$image" \
+        "$TENANT_MIGRATIONS_IMAGE_DIR" \
+        /app/pkg/db/migrations \
+        /app/migrations)" || {
+        printf 'tenant=%s\nimage=%s\nschema_status=unknown\n' "$TENANT_NAME" "$image"
+        error "Backend image has no migration directory."
+        return 1
+    }
+
+    printf 'tenant=%s\nimage=%s\n' "$TENANT_NAME" "$image"
+    if ! ledger_exists="$(migration_ledger_exists)"; then
+        echo "schema_status=unknown"
+        error "Could not query migration ledger."
+        return 1
+    fi
+    if [ "$ledger_exists" != "1" ]; then
+        echo "schema_status=unknown"
+        echo "pending_migrations=unknown"
+        return 1
+    fi
+
+    if ! migration_paths="$(list_image_migrations "$image" "$migrations_dir")"; then
+        echo "schema_status=unknown"
+        error "Could not list migrations from ${image}:${migrations_dir}."
+        return 1
+    fi
+
+    status="up_to_date"
+    pending_count=0
+    failed_count=0
+    while IFS= read -r migration; do
+        [ -n "$migration" ] || continue
+        local migration_id
+        migration_id="$(basename "$migration")"
+        checksum="$(migration_checksum "$image" "$migration")" || {
+            echo "schema_status=unknown"
+            error "Could not checksum migration ${migration_id}."
+            return 1
+        }
+        row="$(migration_ledger_row "$migration_id")" || {
+            echo "schema_status=unknown"
+            error "Could not read migration ledger for ${migration_id}."
+            return 1
+        }
+        if [ -z "$row" ]; then
+            echo "pending_migration=${migration_id}"
+            status="pending"
+            pending_count=$((pending_count + 1))
+            continue
+        fi
+
+        IFS=$'\t' read -r previous_status previous_checksum <<< "$row"
+        if [ "$previous_status" = "applied" ] && [ "$previous_checksum" = "$checksum" ]; then
+            echo "applied_migration=${migration_id}"
+            continue
+        fi
+
+        echo "failed_migration=${migration_id} status=${previous_status}"
+        status="failed"
+        failed_count=$((failed_count + 1))
+    done <<< "$migration_paths"
+
+    if [ "$pending_count" -gt 0 ] && [ "$failed_count" -eq 0 ]; then
+        status="pending"
+    fi
+    echo "schema_status=${status}"
+    [ "$status" = "up_to_date" ]
 }
 
 seed_company_defaults() {
@@ -636,6 +875,11 @@ seed_users() {
     register_seed_user "$admin_user" "$admin_password" "admin" "${company_name} Admin"
     register_seed_user "$manager_user" "$manager_password" "manager" "${company_name} Manager"
 }
+
+if $STATUS_ONLY; then
+    show_migration_status
+    exit $?
+fi
 
 info "Tenant DB init target: $TENANT_NAME ($TENANT_DB_NAME)"
 if ! $SEED_ONLY; then

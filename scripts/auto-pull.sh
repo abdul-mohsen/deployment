@@ -40,18 +40,24 @@ done
 
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
 
-# Prevent concurrent runs
-LOCK_FILE="/tmp/auto-pull.lock"
-exec 9>"$LOCK_FILE"
-flock -n 9 || exit 0
-
 DOCKERHUB_USERNAME="${DOCKERHUB_USERNAME:-}"
 BACKEND_IMAGE="${BACKEND_IMAGE:-${DOCKERHUB_USERNAME:+${DOCKERHUB_USERNAME}/ifritah-api}}"
 FRONTEND_IMAGE="${FRONTEND_IMAGE:-${DOCKERHUB_USERNAME:+${DOCKERHUB_USERNAME}/ifritah-web}}"
-DEV_TAG="${DEV_TAG:-v0.0.1}"
+DEV_TAG="${DEV_TAG:-dev}"
 DEV_TENANT="$(tenant_full_name "${DEV_TENANT:-dev}")" || exit 1
-DIGEST_DIR="/var/lib/auto-pull"
-mkdir -p "$DIGEST_DIR"
+TENANT_STATE_DIR="${TENANT_STATE_DIR:-/opt/tenant-state}"
+export DEV_TAG
+DIGEST_DIR="$(auto_pull_state_dir)"
+if ! mkdir -p "$DIGEST_DIR"; then
+    warn "Cannot create reconciliation state directory: $DIGEST_DIR"
+    exit 1
+fi
+
+# Prevent concurrent runs. Keep the lock beside reconciliation state so
+# read-only or restricted /tmp mounts cannot disable the poller.
+LOCK_FILE="${AUTO_PULL_LOCK_FILE:-${DIGEST_DIR}/auto-pull.lock}"
+exec 9>"$LOCK_FILE"
+flock -n 9 || exit 0
 
 if [ -z "$BACKEND_IMAGE" ] && [ -z "$FRONTEND_IMAGE" ]; then
     warn "DOCKERHUB_USERNAME not set in $CONFIG_FILE — nothing to do."
@@ -67,19 +73,61 @@ fi
 # for specific tenants/environments without turning off the cron by listing
 # tenant names (comma/space separated) in AUTO_REDEPLOY_DISABLED in config.env.
 # The names are matched after prefix normalization so either "dev" or
-# "dev-dev" works. This is the allow-listed equivalent of the per-environment
-# "disable auto-redeploy" checkbox surfaced in the dashboard.
+# "dev-dev" works. The dashboard's persistent TENANT_STATE_DIR setting is
+# checked as well, so the per-tenant checkbox is enforced by this host-side
+# poller rather than only being cosmetic UI state.
 auto_redeploy_enabled() {
     local tenant="$1" raw item norm
     raw="${AUTO_REDEPLOY_DISABLED:-}"
-    [ -z "$raw" ] && return 0
-    for item in ${raw//,/ }; do
-        norm="$(tenant_full_name "$item" 2>/dev/null || echo "$item")"
-        if [ "$norm" = "$tenant" ] || [ "$item" = "$tenant" ]; then
+    if [ -n "$raw" ]; then
+        for item in ${raw//,/ }; do
+            norm="$(tenant_full_name "$item" 2>/dev/null || echo "$item")"
+            if [ "$norm" = "$tenant" ] || [ "$item" = "$tenant" ]; then
+                return 1
+            fi
+        done
+    fi
+
+    local state_file="$TENANT_STATE_DIR/${tenant}.json"
+    if [ -e "$state_file" ]; then
+        if [ ! -r "$state_file" ]; then
+            warn "Cannot read tenant auto-redeploy state: $state_file — skipping deploy"
             return 1
         fi
-    done
+        if grep -Eq '"auto_redeploy"[[:space:]]*:[[:space:]]*false' "$state_file"; then
+            info "Auto-redeploy disabled for $tenant (dashboard setting) — skipping."
+            return 1
+        fi
+        if grep -Eq '"auto_redeploy"[[:space:]]*:' "$state_file" &&
+            ! grep -Eq '"auto_redeploy"[[:space:]]*:[[:space:]]*true' "$state_file"; then
+            warn "Invalid tenant auto-redeploy state: $state_file — skipping deploy"
+            return 1
+        fi
+    fi
     return 0
+}
+
+# One polling cycle may discover new backend and frontend images together.
+# Take one verified safety backup before the first deployment, then reuse it
+# for the other paired image instead of creating two backups for one release.
+AUTO_BACKUP_ATTEMPTED=0
+AUTO_BACKUP_OK=0
+ensure_auto_backup() {
+    [ "${AUTO_BACKUP_BEFORE_REDEPLOY:-1}" = "0" ] && return 0
+    if [ "$AUTO_BACKUP_ATTEMPTED" -eq 1 ]; then
+        [ "$AUTO_BACKUP_OK" -eq 1 ]
+        return
+    fi
+    AUTO_BACKUP_ATTEMPTED=1
+    info "Creating verified pre-deploy backup for $DEV_TENANT ..."
+    if bash "$SCRIPT_DIR/backup-tenant.sh" "$DEV_TENANT" \
+            --origin auto --owner auto-redeploy --require-verified --no-prune \
+            --config "$CONFIG_FILE"; then
+        AUTO_BACKUP_OK=1
+        return 0
+    fi
+    warn "Pre-deploy backup failed verification — skipping this poll's deploys."
+    return 1
 }
 
 check_and_deploy() {
@@ -92,46 +140,49 @@ check_and_deploy() {
     fi
 
     local full_image="${image}:${DEV_TAG}"
-    local digest_file="${DIGEST_DIR}/${app_type}-${DEV_TAG}.digest"
     local current_digest=""
-    [ -f "$digest_file" ] && current_digest=$(cat "$digest_file")
+    current_digest="$(auto_pull_digest_read_for_tenant "$app_type" "$DEV_TAG" "$DEV_TENANT" "$DIGEST_DIR" || true)"
 
     local remote_digest
-    remote_digest=$(get_remote_digest "$image" "$DEV_TAG" 2>/dev/null || echo "")
-    [ -z "$remote_digest" ] && { warn "Cannot fetch digest for $full_image"; return 0; }
+    if ! remote_digest=$(get_remote_digest "$image" "$DEV_TAG"); then
+        warn "Cannot resolve Docker Hub digest for $full_image; deployment was not attempted."
+        return 1
+    fi
+    [ -n "$remote_digest" ] || {
+        warn "Docker Hub returned an empty digest for $full_image; deployment was not attempted."
+        return 1
+    }
     [ "$current_digest" = "$remote_digest" ] && return 0
 
     log "New ${app_type} image: $full_image"
     info "  ${current_digest:-<first run>} → $remote_digest"
 
-    # Safety gate: an automatic deploy must be preceded by a verified backup of
-    # the tenant's SQL + files. If the backup can't be produced/verified we skip
-    # the deploy and retry next cycle rather than risk an unrecoverable rollout.
-    # AUTO_BACKUP_BEFORE_REDEPLOY=0 opts out (not recommended).
-    if [ "${AUTO_BACKUP_BEFORE_REDEPLOY:-1}" != "0" ]; then
-        info "Creating verified pre-deploy backup for $DEV_TENANT ..."
-        if ! bash "$SCRIPT_DIR/backup-tenant.sh" "$DEV_TENANT" \
-                --origin auto --owner auto-redeploy --require-verified --no-prune \
-                --config "$CONFIG_FILE"; then
-            warn "Pre-deploy backup failed verification — skipping ${app_type} deploy this cycle."
-            return 0
-        fi
-    fi
+    # Safety gate: an automatic deploy must be preceded by a verified backup.
+    # If it cannot be produced, retry on the next poll instead.
+    ensure_auto_backup || return 0
 
     if PREDEPLOY_BACKUP_VERIFIED=1 bash "$SCRIPT_DIR/deploy-all.sh" "$full_image" \
             --type "$app_type" \
             --tenant "$DEV_TENANT" \
             --skip-canary; then
-        echo "$remote_digest" > "$digest_file"
+        if ! auto_pull_digest_write_for_tenant "$app_type" "$DEV_TAG" "$DEV_TENANT" \
+                "$remote_digest" "$image" "$DIGEST_DIR"; then
+            warn "Deploy succeeded but digest state could not be persisted for ${full_image}; it will retry."
+            return 1
+        fi
         log "Dev ${app_type} deployed ✓"
+        return 0
     else
         warn "Deploy failed for ${app_type} — will retry next poll"
+        return 1
     fi
 }
 
+RESULT=0
 if [ "$CHECK_TYPE" = "both" ] || [ "$CHECK_TYPE" = "backend" ]; then
-    check_and_deploy "$BACKEND_IMAGE" "backend"
+    check_and_deploy "$BACKEND_IMAGE" "backend" || RESULT=1
 fi
 if [ "$CHECK_TYPE" = "both" ] || [ "$CHECK_TYPE" = "frontend" ]; then
-    check_and_deploy "$FRONTEND_IMAGE" "frontend"
+    check_and_deploy "$FRONTEND_IMAGE" "frontend" || RESULT=1
 fi
+exit "$RESULT"

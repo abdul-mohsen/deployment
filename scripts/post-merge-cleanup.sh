@@ -12,8 +12,8 @@
 #   3. Removes the public domain/proxy from backend apps. Only frontend apps
 #      should own <tenant>.$BASE_DOMAIN; otherwise Dokku generates duplicate
 #      nginx server_name blocks.
-#   4. Sets BACKEND_URL / PORT / APP_DOMAIN on the frontend, BASEURL on the
-#      backend, then `ps:rebuild`s both apps so the new wiring is applied.
+#   4. Sets BACKEND_URL / PORT / APP_DOMAIN / API_URL on the frontend, BASEURL
+#      on the backend, then `ps:rebuild`s both apps so the new wiring is applied.
 #   5. Validates Dokku nginx config and rebuilds proxy config.
 #
 # Usage:
@@ -36,6 +36,7 @@ DRY_RUN="${DRY_RUN:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+source "$SCRIPT_DIR/lib.sh"
 
 # Try to source config.env for BASE_DOMAIN if not provided
 if [ -z "${BASE_DOMAIN:-}" ] && [ -f "$PROJECT_DIR/config.env" ]; then
@@ -174,6 +175,10 @@ for t in "${TENANTS[@]}"; do
     be="${t}-backend"; fe="${t}-frontend"
     net="$TENANT_NETWORK"
     domain="${t}.${BASE_DOMAIN}"
+    public_url="$(public_tenant_url "$t")" || {
+        error "  invalid public URL for tenant $t; skipping"
+        continue
+    }
 
     log "=== ${t} ==="
 
@@ -206,7 +211,8 @@ for t in "${TENANTS[@]}"; do
     dk_dokku config:set --no-restart "$fe" \
         BACKEND_URL="http://${be}.web:${BACKEND_PORT}" \
         PORT="$FRONTEND_PORT" \
-        APP_DOMAIN="$domain" >/dev/null
+        APP_DOMAIN="$domain" \
+        API_URL="${public_url}/api" >/dev/null
 
     info "  rebuild: $be, $fe"
     dk_dokku ps:rebuild "$be" || warn "  $be rebuild failed (deploy not yet done?)"
@@ -226,5 +232,9 @@ dk_dokku proxy:build-config --all >/dev/null || warn "proxy:build-config failed"
 
 log "Done. Verify next:"
 for t in "${TENANTS[@]}"; do
-    echo "  curl -I http://${t}.${BASE_DOMAIN}/"
+    if site_url="$(public_tenant_url "$t")"; then
+        echo "  curl -I ${site_url}/"
+    else
+        echo "  (invalid public URL for ${t})"
+    fi
 done

@@ -69,27 +69,34 @@ Copy from [config.env.example](config.env.example) and fill:
 - `DOKKU_PORT=8080` — host port the dokku container publishes.
 - `STORAGE_ROOT=/opt/tenant-data`
 - `MYSQL_HOST=host.docker.internal`, `MYSQL_PORT=3306`,
-  `MYSQL_ROOT_USER`, `MYSQL_ROOT_PASSWORD`
+  `MYSQL_ADMIN_USER`, `MYSQL_ADMIN_PASSWORD` — the least-privileged
+  deployment account; it does not need to be the MySQL root account.
 - `MYSQL_MASTER_DB=zatca_master` — registry table `tenant(name, db_name, enabled)`
 - `MYSQL_TENANT_HOST=172.%` — docker bridge subnet; **must match** the host
   pattern used in [scripts/remove-tenant.sh](scripts/remove-tenant.sh)
 - `DOCKERHUB_USERNAME`, optional `BACKEND_IMAGE` / `FRONTEND_IMAGE`,
-  `PULL_TAG=latest`
+  `PULL_TAG=dev` (the shared backend/frontend branch tag)
 - `BACKUP_BEFORE_MIGRATION=1` — require a verified tenant backup before
   applying backend-image migrations.
 - `MIGRATION_STATUS_INTERVAL=5m` — dashboard interval for checking every
   tenant's migration ledger; checks also run at dashboard startup.
-- `MIGRATE_CMD` - optional legacy custom migration command. Normal tenant
+- `MIGRATE_CMD` — optional legacy custom migration command. Normal tenant
   schema migrations are applied from the selected backend image by
   `scripts/init-tenant-db.sh`.
-- Optional: `PUBLIC_PROTOCOL=https|http` (controls only the `API_URL` string),
+- Optional: `PUBLIC_PROTOCOL=https|http` (controls the canonical public link
+  scheme and the frontend `API_URL`; production must use `https`),
   `NGINX_CLIENT_MAX_BODY_SIZE=50m`
+- Optional non-production verification controls:
+  `TENANT_PROVENANCE_OVERRIDE=1` together with `DEPLOY_ENV=dev|test|qa|sandbox|simulation`,
+  plus `TENANT_VERIFY_RETRIES` and `TENANT_VERIFY_DELAY`. The override is
+  refused for production deployments.
 
 ---
 
 ## 4. One-time MySQL admin grants
 
-Required for the dokku-side admin user to create per-tenant DBs/users:
+Required for the deployment-side admin user to create per-tenant DBs/users.
+The account is intentionally not required to be MySQL root:
 
 ```sql
 GRANT ALL PRIVILEGES ON `tenant_%`.* TO 'dokku_admin'@'172.%' WITH GRANT OPTION;
@@ -104,14 +111,20 @@ Rules learned the hard way:
 - Tenant schema and migrations are applied as the tenant DB user. Backend
   migrations must avoid trigger creation so MySQL 8 binary logging does not
   require global trigger-related privileges.
-- `scripts/init-tenant-db.sh <tenant> --status` reports each applied, pending,
-  or failed migration and exits non-zero unless the tenant schema is current.
-  The dashboard exposes the same read-only check through the **Status only**
-  option on **Initialize tenant DB**.
 - No `FLUSH PRIVILEGES` — needs `RELOAD` priv and isn't required in MySQL 8 for
   `CREATE USER` / `GRANT`.
 - `CREATE USER IF NOT EXISTS` does **not** update an existing password — always
   pair with `ALTER USER … IDENTIFIED BY` for idempotency.
+- Existing-tenant schema replay uses the tenant's `DB_USER`/`DB_PASSWORD`
+  account and does not require `MYSQL_ADMIN_PASSWORD`; the deployment account
+  is needed only when a tenant database or user must be provisioned.
+- Tenant image updates resolve tags to OCI digests, require the canonical
+  BuildIdentity labels, pass `APP_IMAGE_VERSION`/`APP_IMAGE_COMMIT`,
+  `APP_IMAGE_CHANNEL`, `APP_IMAGE_REF`, `APP_IMAGE_DIGEST`,
+  `APP_WORKFLOW_RUN_ID`, optional `APP_WORKFLOW_RUN_URL`, and `APP_BUILT_AT`
+  to Dokku, and verify the app `/version` response before persisting the new
+  identity. Legacy `APP_VERSION`/`APP_WORKFLOW_RUN` aliases are retained only
+  for migration.
 
 ---
 
@@ -132,7 +145,7 @@ Rules learned the hard way:
   `zatca_master.tenant`.
 - Storage mounts:
   `$STORAGE_ROOT/<tenant>/{uploads,data}` → `/app/{uploads,data}`.
-- CHECKS files seeded: backend `/api/health`, frontend `/`.
+- CHECKS files seeded: backend `/healthz`, frontend `/`.
 
 ---
 

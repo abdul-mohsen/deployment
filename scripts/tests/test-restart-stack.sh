@@ -83,8 +83,20 @@ grep -q 'proxy:disable "$BACKEND_APP"' scripts/create-tenant.sh \
     || FAIL "create-tenant must disable backend proxy"
 grep -q 'domains:clear "$be"' scripts/post-merge-cleanup.sh \
     && grep -q 'proxy:disable "$be"' scripts/post-merge-cleanup.sh \
-    && PASS "cleanup removes existing backend public proxy" \
+    && grep -q 'API_URL="\${public_url}/api"' scripts/post-merge-cleanup.sh \
+    && PASS "cleanup removes existing backend public proxy and refreshes frontend URL" \
     || FAIL "cleanup must remove existing backend public proxy"
+grep -q 'BASE_DOMAIN="\${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"' scripts/update-tenant.sh \
+    && grep -q 'reconcile_tenant_routing "\$TENANT_NAME"' scripts/update-tenant.sh \
+    && grep -q 'domains:clear "\$backend_app"' scripts/lib.sh \
+    && grep -q 'APP_DOMAIN="\$tenant_domain"' scripts/lib.sh \
+    && grep -q 'API_URL="\${public_url_value}/api"' scripts/lib.sh \
+    && PASS "tenant update reconciles persisted routing values" \
+    || FAIL "tenant update must reconcile persisted routing values"
+grep -q 'reconcile_tenant_routing "\$tenant"' scripts/deploy-all.sh \
+    && grep -q 'routing-only' dashboard/internal/web/web.go \
+    && PASS "fleet and lifecycle actions reconcile routing before deploy" \
+    || FAIL "fleet and lifecycle actions must reconcile routing before deploy"
 grep -q 'ensure_tenant_network "$TENANT_NETWORK"' scripts/create-tenant.sh \
     && grep -q 'docker network inspect \$network' scripts/create-tenant.sh \
     && grep -q 'docker network create \$network' scripts/create-tenant.sh \

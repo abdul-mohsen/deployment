@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -44,7 +45,7 @@ func newMigrationMonitor(runner *scripts.Runner) *migrationMonitor {
 }
 
 func migrationStatusInterval() time.Duration {
-	raw := strings.TrimSpace(getenv("MIGRATION_STATUS_INTERVAL"))
+	raw := strings.TrimSpace(os.Getenv("MIGRATION_STATUS_INTERVAL"))
 	if raw == "" {
 		return defaultMigrationStatusInterval
 	}

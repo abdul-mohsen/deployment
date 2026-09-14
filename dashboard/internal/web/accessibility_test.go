@@ -215,7 +215,8 @@ func TestImageTagDropdownUsesViewportPortal(t *testing.T) {
 		}
 	}
 	for _, token := range []string{
-		".tag-dropdown {\n  position: fixed;",
+		".tag-dropdown {",
+		"position: fixed;",
 		"max-height: min(320px, calc(100vh - 16px));",
 	} {
 		if !strings.Contains(string(css), token) {

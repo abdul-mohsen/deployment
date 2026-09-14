@@ -34,6 +34,8 @@ services:
       DOCKERHUB_USERNAME: ${DOCKERHUB_USERNAME:-}
       APP_IMAGE_REF: ${DASHBOARD_IMAGE_REF:-}
       APP_IMAGE_DIGEST: ${DASHBOARD_IMAGE_DIGEST:-}
+      APP_IMAGE_COMMIT: ${DASHBOARD_IMAGE_REVISION:-}
+      DEPLOYMENT_SCRIPTS_REVISION: ${DEPLOYMENT_SCRIPTS_REVISION:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./dashboard.env:/app/dashboard.env

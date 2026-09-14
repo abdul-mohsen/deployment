@@ -2,8 +2,8 @@
 # =============================================================================
 # update.sh — Update the deployment stack to the latest version.
 #
-# Pulls the latest code from Git, then pulls the latest pre-built dashboard
-# image from Docker Hub and restarts the container.  That's it.
+# Pulls the latest code from Git, then validates and pulls the matching
+# pre-built dashboard image before replacing the running container.
 #
 # Usage:
 #   sudo bash /opt/deployment/update.sh
@@ -20,12 +20,22 @@ echo "========================================"
 # 1. Pull latest code
 echo ""
 echo "[1/2] Pulling latest deployment scripts..."
-git -C "$SCRIPT_DIR" pull origin main
+branch="$(git -C "$SCRIPT_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+if [ "$branch" != "main" ]; then
+    echo "[x] Deployment checkout must be on main (found '${branch:-detached}')." >&2
+    exit 1
+fi
+git -C "$SCRIPT_DIR" fetch origin main
+git -C "$SCRIPT_DIR" merge --ff-only origin/main
+revision="$(git -C "$SCRIPT_DIR" rev-parse --verify HEAD)"
+echo "[+] Deployment revision: $revision"
 
-# 2. Update the dashboard (pull image + restart container)
+# 2. Update the dashboard. prod-up.sh validates the image/script revision
+# before stopping the current container, so a publication lag cannot cause an
+# avoidable dashboard outage.
 echo ""
 echo "[2/2] Updating dashboard..."
-bash "${SCRIPT_DIR}/scripts/restart-stack.sh" --env prod --dashboard-only
+bash "${SCRIPT_DIR}/dashboard/prod-up.sh"
 
 echo ""
 echo "========================================"

@@ -151,7 +151,15 @@ tenant_table_count() {
         echo 0
         return 0
     fi
-    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE();" | awk 'NF { print $1; exit }'
+    local count
+    count="$(run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE();")" || return 1
+    count="$(printf '%s\n' "$count" | awk 'NF { print $1; exit }')"
+    [[ "$count" =~ ^[0-9]+$ ]] || {
+        error "Could not read tenant table count from ${TENANT_DB_NAME}."
+        return 1
+    }
+    printf '%s\n' "$count"
 }
 
 tenant_required_table_count() {
@@ -159,12 +167,24 @@ tenant_required_table_count() {
         echo 0
         return 0
     fi
-    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name IN ('company','branches','store','user');" | awk 'NF { print $1; exit }'
+    local count
+    count="$(run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name IN ('company','branches','store','user');")" \
+        || return 1
+    count="$(printf '%s\n' "$count" | awk 'NF { print $1; exit }')"
+    [[ "$count" =~ ^[0-9]+$ ]] || {
+        error "Could not read required tenant table count from ${TENANT_DB_NAME}."
+        return 1
+    }
+    printf '%s\n' "$count"
 }
 
 tenant_missing_required_tables() {
-    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT required.name FROM (SELECT 'company' AS name UNION ALL SELECT 'branches' UNION ALL SELECT 'store' UNION ALL SELECT 'user') required LEFT JOIN information_schema.tables existing ON existing.table_schema=DATABASE() AND existing.table_name=required.name WHERE existing.table_name IS NULL;" \
-        | paste -sd ',' -
+    local missing
+    missing="$(run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT required.name FROM (SELECT 'company' AS name UNION ALL SELECT 'branches' UNION ALL SELECT 'store' UNION ALL SELECT 'user') required LEFT JOIN information_schema.tables existing ON existing.table_schema=DATABASE() AND existing.table_name=required.name WHERE existing.table_name IS NULL;")" \
+        || return 1
+    printf '%s\n' "$missing" | paste -sd ',' -
 }
 
 validate_tenant_schema() {
@@ -186,18 +206,17 @@ ensure_tenant_database() {
         return 0
     fi
 
-    # Existing tenants can replay schema with their scoped DB account. The
-    # control-plane account is only needed when the database itself is absent.
-    if tenant_db_credentials_configured &&
-        run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT 1" >/dev/null 2>&1; then
-        info "Tenant database is reachable with its application DB account: $TENANT_DB_NAME"
+    # Existing tenants can replay schema with a dedicated migration account,
+    # the deployment account, or the application account as a legacy fallback.
+    if run_migration_mysql "$TENANT_DB_NAME" -N -B -e "SELECT 1" >/dev/null 2>&1; then
+        info "Tenant database is reachable for schema migration: $TENANT_DB_NAME"
         return 0
     fi
 
     if ! mysql_admin_configured; then
-        error "Tenant database '$TENANT_DB_NAME' is not reachable with its application DB credentials."
-        error "For an existing tenant, configure DB_USER/DB_PASSWORD (or DBUSER/PASSWORD) and retry."
-        error "MYSQL_ADMIN_USER/MYSQL_ADMIN_PASSWORD are only needed to create a missing tenant database."
+        error "Tenant database '$TENANT_DB_NAME' is not reachable with migration or application DB credentials."
+        error "Configure MIGRATION_DB_USER/MIGRATION_DB_PASSWORD or DB_USER/DB_PASSWORD and retry."
+        error "MYSQL_ADMIN_USER/MYSQL_ADMIN_PASSWORD is required when the database itself is missing."
         exit 1
     fi
 
@@ -389,7 +408,7 @@ run_tenant_mysql() {
 
     if [ -z "$password" ]; then
         error "Tenant DB password is missing from ${BACKEND_APP} config; cannot import schema as tenant user."
-        exit 1
+        return 1
     fi
 
     if [ "$_MYSQL_VIA" = "host" ]; then
@@ -403,10 +422,34 @@ run_tenant_mysql() {
     fi
 }
 
+# Schema changes must use a control-plane or dedicated migration account.
+# Existing tenants may have application users created before DDL privileges
+# were required. Keep the application account as a compatibility fallback
+# when no migration account is configured.
+run_migration_mysql() {
+    if [ -n "${MIGRATION_DB_USER:-}" ] || [ -n "${MIGRATION_DB_PASSWORD:-}" ]; then
+        if [ -z "${MIGRATION_DB_USER:-}" ] || [ -z "${MIGRATION_DB_PASSWORD:-}" ]; then
+            error "MIGRATION_DB_USER and MIGRATION_DB_PASSWORD must be configured together."
+            return 1
+        fi
+        MYSQL_ADMIN_USER="$MIGRATION_DB_USER" \
+            MYSQL_ADMIN_PASSWORD="$MIGRATION_DB_PASSWORD" \
+            run_mysql "$@"
+        return
+    fi
+
+    if mysql_admin_configured; then
+        run_mysql "$@"
+        return
+    fi
+
+    run_tenant_mysql "$@"
+}
+
 MIGRATION_LEDGER_TABLE="deployment_schema_migrations"
 
 ensure_migration_ledger() {
-    run_tenant_mysql "$TENANT_DB_NAME" <<SQL
+    if ! run_migration_mysql "$TENANT_DB_NAME" <<SQL
 CREATE TABLE IF NOT EXISTS \`${MIGRATION_LEDGER_TABLE}\` (
     migration_id VARCHAR(255) NOT NULL,
     checksum CHAR(64) NOT NULL,
@@ -418,10 +461,26 @@ CREATE TABLE IF NOT EXISTS \`${MIGRATION_LEDGER_TABLE}\` (
     PRIMARY KEY (migration_id)
 ) ENGINE=InnoDB;
 SQL
+    then
+        error "Could not create migration ledger table '${MIGRATION_LEDGER_TABLE}' in ${TENANT_DB_NAME}."
+        error "Configure MIGRATION_DB_USER/MIGRATION_DB_PASSWORD with DDL access to the tenant database."
+        return 1
+    fi
+
+    local exists
+    if ! exists="$(migration_ledger_exists)"; then
+        error "Could not verify migration ledger table '${MIGRATION_LEDGER_TABLE}' in ${TENANT_DB_NAME}."
+        return 1
+    fi
+    if [ "$exists" != "1" ]; then
+        error "Migration ledger table '${MIGRATION_LEDGER_TABLE}' was not created in ${TENANT_DB_NAME}."
+        return 1
+    fi
+    info "Migration ledger ready: ${TENANT_DB_NAME}.${MIGRATION_LEDGER_TABLE}"
 }
 
 migration_ledger_exists() {
-    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e \
+    run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
         "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='${MIGRATION_LEDGER_TABLE}';" \
         </dev/null
 }
@@ -446,7 +505,7 @@ migration_ledger_row() {
     local migration_id="$1"
     local migration_id_sql
     migration_id_sql="$(sql_escape "$migration_id")"
-    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e \
+    run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
         "SELECT status, checksum FROM \`${MIGRATION_LEDGER_TABLE}\` WHERE migration_id='${migration_id_sql}' LIMIT 1;" \
         </dev/null
 }
@@ -457,7 +516,7 @@ record_migration_started() {
     migration_id_sql="$(sql_escape "$migration_id")"
     checksum_sql="$(sql_escape "$checksum")"
     image_sql="$(sql_escape "$image")"
-    run_tenant_mysql "$TENANT_DB_NAME" -e "
+    run_migration_mysql "$TENANT_DB_NAME" -e "
 INSERT INTO \`${MIGRATION_LEDGER_TABLE}\`
     (migration_id, checksum, image_ref, status, started_at, applied_at, error_message)
 VALUES
@@ -477,7 +536,7 @@ record_migration_applied() {
     migration_id_sql="$(sql_escape "$migration_id")"
     checksum_sql="$(sql_escape "$checksum")"
     image_sql="$(sql_escape "$image")"
-    run_tenant_mysql "$TENANT_DB_NAME" -e "
+    run_migration_mysql "$TENANT_DB_NAME" -e "
 UPDATE \`${MIGRATION_LEDGER_TABLE}\`
 SET checksum='${checksum_sql}',
     image_ref='${image_sql}',
@@ -494,7 +553,7 @@ record_migration_failed() {
     checksum_sql="$(sql_escape "$checksum")"
     image_sql="$(sql_escape "$image")"
     error_sql="$(sql_escape "migration command exited with status ${exit_code}")"
-    run_tenant_mysql "$TENANT_DB_NAME" -e "
+    run_migration_mysql "$TENANT_DB_NAME" -e "
 UPDATE \`${MIGRATION_LEDGER_TABLE}\`
 SET checksum='${checksum_sql}',
     image_ref='${image_sql}',
@@ -580,7 +639,7 @@ apply_image_sql_file() {
     # Import with the tenant DB user so schema setup uses the same scoped
     # permissions as the app runtime connection.
     docker run --rm --entrypoint sh "$image" -c "cat $(shell_quote "$path")" \
-        | run_tenant_mysql "$TENANT_DB_NAME"
+    | run_migration_mysql "$TENANT_DB_NAME"
 }
 
 list_image_migrations() {
@@ -619,30 +678,32 @@ apply_schema() {
 
     ensure_migration_ledger
 
-    migrations_dir="$(find_image_dir "$image" \
+    if ! migrations_dir="$(find_image_dir "$image" \
         "$TENANT_MIGRATIONS_IMAGE_DIR" \
         /app/pkg/db/migrations \
-        /app/migrations)" || true
-    if [ -z "$migrations_dir" ]; then
-        warn "Backend image has no migrations directory; skipping migrations."
-        validate_tenant_schema
-        return 0
+        /app/migrations)"; then
+        error "Backend image has no readable migrations directory; refusing to skip migration replay."
+        error "Expected ${TENANT_MIGRATIONS_IMAGE_DIR}, /app/pkg/db/migrations, or /app/migrations."
+        return 1
     fi
 
-    migrations_found=false
     if $DRY_RUN; then
         log "Applying migrations from ${image}:${migrations_dir}"
         info "Would apply all *.sql files in sorted order"
         return 0
     fi
 
-    while IFS= read -r migration; do
-        [ -n "$migration" ] || continue
-        migrations_found=true
-        apply_image_migration "$image" "$migration"
-    done < <(list_image_migrations "$image" "$migrations_dir")
-
-    if ! $migrations_found; then
+    local migration_paths
+    if ! migration_paths="$(list_image_migrations "$image" "$migrations_dir")"; then
+        error "Could not list migrations from ${image}:${migrations_dir}."
+        return 1
+    fi
+    if [ -n "$migration_paths" ]; then
+        while IFS= read -r migration; do
+            [ -n "$migration" ] || continue
+            apply_image_migration "$image" "$migration"
+        done <<< "$migration_paths"
+    else
         warn "No *.sql migrations found in ${image}:${migrations_dir}."
     fi
 
@@ -666,13 +727,14 @@ show_migration_status() {
 
     printf 'tenant=%s\nimage=%s\n' "$TENANT_NAME" "$image"
     if ! ledger_exists="$(migration_ledger_exists)"; then
-        echo "schema_status=unknown"
-        error "Could not query migration ledger."
+        echo "schema_status=ledger_unreachable"
+        error "Could not query migration ledger with the configured migration account."
         return 1
     fi
     if [ "$ledger_exists" != "1" ]; then
-        echo "schema_status=unknown"
+        echo "schema_status=ledger_missing"
         echo "pending_migrations=unknown"
+        error "Migration ledger table '${MIGRATION_LEDGER_TABLE}' is missing from ${TENANT_DB_NAME}."
         return 1
     fi
 

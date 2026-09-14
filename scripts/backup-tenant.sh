@@ -126,7 +126,7 @@ backup_tenant() {
             db_dest="$BACKUP_DIR/${tenant}_mysql_${TIMESTAMP}.sql.gz"
             log "Backing up MySQL: $tenant_db → $db_dest"
             if run_mysqldump \
-                --single-transaction --routines --triggers "$tenant_db" | gzip > "$db_dest"; then
+                --single-transaction --routines --triggers --no-tablespaces "$tenant_db" | gzip > "$db_dest"; then
                 echo "  Size: $(du -h "$db_dest" | cut -f1)"
                 if verify_gzip_artifact "$db_dest"; then
                     log "  Verified MySQL dump OK"

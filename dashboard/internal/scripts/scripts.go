@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/abdul-mohsen/deployment/dashboard/internal/ansi"
+	"github.com/abdul-mohsen/deployment/dashboard/internal/buildinfo"
 )
 
 // Field describes one input on a script's form.
@@ -873,11 +874,37 @@ func (r *Runner) dockerArgs(dockerSocket string) []string {
 		"-e", "TENANT_NAME_PREFIX=" + os.Getenv("TENANT_NAME_PREFIX"),
 		"-e", "TENANT_NAME_PREFIX_OVERRIDE=" + os.Getenv("TENANT_NAME_PREFIX"),
 		"-e", "DASHBOARD_ENV=" + os.Getenv("DASHBOARD_ENV"),
+		"-e", "DEPLOYMENT_SCRIPTS_REVISION=" + os.Getenv("DEPLOYMENT_SCRIPTS_REVISION"),
 		"-v", dockerSocket,
 		"-v", r.scriptsHostPath + ":/opt/deployment:ro",
 		"--network", "host",
 	}
 	return append(full, r.volumeArgs()...)
+}
+
+func validateRuntimeRevision() error {
+	env := strings.ToLower(strings.TrimSpace(os.Getenv("DASHBOARD_ENV")))
+	if env != "prod" && env != "production" {
+		return nil
+	}
+
+	scriptsRevision := strings.TrimSpace(os.Getenv("DEPLOYMENT_SCRIPTS_REVISION"))
+	if scriptsRevision == "" {
+		return errors.New("DEPLOYMENT_SCRIPTS_REVISION is not configured; refusing production script execution")
+	}
+
+	imageRevision := strings.TrimSpace(buildinfo.Current().Commit)
+	if imageRevision == "" || imageRevision == "unknown" {
+		return errors.New("dashboard image commit is unknown; refusing production script execution")
+	}
+	if imageRevision != scriptsRevision {
+		return fmt.Errorf(
+			"dashboard image/scripts revision mismatch: image=%s scripts=%s",
+			imageRevision,
+			scriptsRevision,
+		)
+	}
+	return nil
 }
 
 // safeArg only allows characters that cannot escape an argv slot. We split on
@@ -919,6 +946,9 @@ func (r *Runner) RunCapture(ctx context.Context, scriptName string, argv []strin
 // normalized output line before it is streamed to the caller. The callback is
 // useful for durable operation history and must not write to w.
 func (r *Runner) RunWithCallback(ctx context.Context, w io.Writer, scriptName string, argv []string, onLine func(string)) error {
+	if err := validateRuntimeRevision(); err != nil {
+		return err
+	}
 	sc := Find(scriptName)
 	if sc == nil {
 		return fmt.Errorf("script %q is not in the catalog", scriptName)

@@ -35,6 +35,17 @@ schema_status=failed
 	}
 }
 
+func TestParseMigrationTextPreservesLedgerFailureStates(t *testing.T) {
+	for _, want := range []string{"ledger_missing", "ledger_unreachable"} {
+		t.Run(want, func(t *testing.T) {
+			status := parseMigrationText("tenant=acme\nschema_status=" + want)
+			if status.SchemaStatus != want {
+				t.Fatalf("schema status=%q, want %q", status.SchemaStatus, want)
+			}
+		})
+	}
+}
+
 func TestMigrationStatusIntervalMinimum(t *testing.T) {
 	t.Setenv("MIGRATION_STATUS_INTERVAL", "1s")
 	if got := migrationStatusInterval(); got != defaultMigrationStatusInterval {

@@ -81,11 +81,12 @@ fi
 
 echo ""
 echo "=== existing-tenant schema replay does not require admin credentials ==="
-if grep -qF 'tenant_db_credentials_configured' scripts/init-tenant-db.sh &&
-    grep -qF 'MYSQL_ADMIN_PASSWORD are only needed to create a missing tenant database' scripts/init-tenant-db.sh; then
-    pass "existing-tenant replay uses tenant DB credentials before admin credentials"
+if grep -qF 'run_migration_mysql' scripts/init-tenant-db.sh &&
+    grep -qF 'MIGRATION_DB_USER and MIGRATION_DB_PASSWORD must be configured together.' scripts/init-tenant-db.sh &&
+    grep -qF 'run_tenant_mysql "$@"' scripts/init-tenant-db.sh; then
+    pass "existing-tenant replay supports dedicated, deployment, and legacy tenant credentials"
 else
-    fail "existing-tenant replay still requires admin credentials unconditionally"
+    fail "existing-tenant replay credential precedence is missing"
 fi
 
 if echo "$output" | grep -qF "Would POST /api/register "; then

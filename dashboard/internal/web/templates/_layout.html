@@ -52,7 +52,7 @@
     <span id="toast-status" class="sr-only"></span>
   </div>
   <footer class="build-meta" aria-label="Dashboard build identity">
-    build <code>{{.Build.Version}}</code> · commit <code>{{.Build.Commit}}</code>
+    build <code>{{.Build.Version}}</code> · commit <code>{{.Build.Commit}}</code>{{if .Build.ScriptsRevision}} · scripts <code>{{.Build.ScriptsRevision}}</code>{{end}}
   </footer>
   <script src="/static/htmx.min.js?v={{.Build.AssetDigest}}" defer></script>
   <script src="/static/app.js?v={{.Build.AssetDigest}}" defer></script>

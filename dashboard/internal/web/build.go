@@ -349,6 +349,7 @@ type buildResponse struct {
 	WorkflowRunURL  string            `json:"workflow_run_url,omitempty"`
 	Source          string            `json:"source,omitempty"`
 	BuiltAt         string            `json:"built_at,omitempty"`
+	ScriptsRevision string            `json:"scripts_revision,omitempty"`
 	Build           string            `json:"build"`
 	AssetDigest     string            `json:"asset_digest"`
 	Assets          map[string]string `json:"assets"`
@@ -376,6 +377,7 @@ func currentBuildResponse() buildResponse {
 			WorkflowRunURL:  info.WorkflowRunURL,
 			Source:          info.Source,
 			BuiltAt:         info.BuiltAt,
+			ScriptsRevision: info.ScriptsRevision,
 		}
 	}
 	return buildResponse{
@@ -394,6 +396,7 @@ func currentBuildResponse() buildResponse {
 		WorkflowRunURL:  info.WorkflowRunURL,
 		Source:          info.Source,
 		BuiltAt:         info.BuiltAt,
+		ScriptsRevision: info.ScriptsRevision,
 		Build:           info.String(),
 		AssetDigest:     manifest.Digest,
 		Assets:          manifest.Files,
@@ -405,6 +408,9 @@ func setBuildHeaders(w http.ResponseWriter) {
 	info := buildinfo.Current()
 	w.Header().Set("X-Dashboard-Version", info.Version)
 	w.Header().Set("X-Dashboard-Commit", info.Commit)
+	if info.ScriptsRevision != "" {
+		w.Header().Set("X-Deployment-Scripts-Revision", info.ScriptsRevision)
+	}
 	if manifest, err := embeddedAssetManifest(); err == nil {
 		w.Header().Set("X-Dashboard-Asset-Digest", manifest.Digest)
 	}

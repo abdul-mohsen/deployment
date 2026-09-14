@@ -260,6 +260,11 @@ load_stack_env
 
 if ! $DOKKU_ONLY; then
     while IFS= read -r env_name; do
+        # prod-up.sh validates the pulled image against the mounted checkout
+        # before it stops the old container. Do not preempt that stop-safe path.
+        if [ "$env_name" = "prod" ] && [ -x "${REPO_DIR}/dashboard/prod-up.sh" ]; then
+            continue
+        fi
         stop_dashboard_env "$env_name"
     done < <(dashboard_envs)
 fi

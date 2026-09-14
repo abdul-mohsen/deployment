@@ -66,6 +66,7 @@ func TestBuildInfoEndpointIsPublicAndStable(t *testing.T) {
 		"APP_IMAGE_VERSION", "APP_IMAGE_COMMIT", "APP_IMAGE_CHANNEL",
 		"APP_IMAGE_TAG", "APP_IMAGE_REF", "APP_IMAGE_DIGEST",
 		"APP_WORKFLOW_RUN_ID", "APP_WORKFLOW_RUN_URL", "APP_BUILT_AT",
+		"DEPLOYMENT_SCRIPTS_REVISION",
 	} {
 		t.Setenv(name, "")
 	}
@@ -89,6 +90,9 @@ func TestBuildInfoEndpointIsPublicAndStable(t *testing.T) {
 	}
 	if got.Channel != "dev" || got.CommitShort != "0123456" {
 		t.Fatalf("GET /version omitted canonical build identity: %+v", got)
+	}
+	if got.ScriptsRevision != "" {
+		t.Fatalf("GET /version unexpectedly reported scripts revision: %q", got.ScriptsRevision)
 	}
 	if got.AssetDigest == "" || got.Assets["app.js"] == "" || got.Templates["app.html"] == "" {
 		t.Fatalf("GET /version omitted asset identity: %+v", got)

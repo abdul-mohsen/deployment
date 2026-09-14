@@ -9,7 +9,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 
 contains() {
     local file="$1" text="$2" description="$3"
-    grep -Fq "$text" "$file" || fail "$description"
+    grep -Fq -- "$text" "$file" || fail "$description"
     pass "$description"
 }
 
@@ -19,8 +19,8 @@ not_contains_any() {
     local path
     for path in "$@"; do
         if [ -d "$path" ]; then
-            grep -R -Fq '/api/health' "$path" && fail "$description"
-        elif grep -Fq '/api/health' "$path"; then
+            grep -R -Fq -- '/api/health' "$path" && fail "$description"
+        elif grep -Fq -- '/api/health' "$path"; then
             fail "$description"
         fi
     done
@@ -118,8 +118,34 @@ contains .github/workflows/dashboard-image.yml 'PUBLISHED_DIGEST: ${{ steps.publ
     "dashboard workflow verifies the build action digest without truncating inspect output"
 contains dashboard/prod-up.sh 'DASHBOARD_IMAGE_DIGEST' \
     "dashboard startup resolves the pulled image digest"
+contains dashboard/prod-up.sh 'DEPLOYMENT_SCRIPTS_REVISION' \
+    "dashboard startup resolves the mounted script revision"
+contains dashboard/prod-up.sh 'Dashboard image/scripts revision mismatch' \
+    "dashboard startup rejects image/script revision drift"
 contains dashboard/docker-compose.prod.yml 'APP_IMAGE_DIGEST' \
     "dashboard compose passes the resolved image digest"
+contains dashboard/docker-compose.prod.yml 'DEPLOYMENT_SCRIPTS_REVISION' \
+    "dashboard compose passes the mounted script revision"
+contains dashboard/docker-compose.prod.yml 'APP_IMAGE_COMMIT' \
+    "dashboard compose passes the verified image revision"
+contains dashboard/docker-compose.dev.yml 'DEPLOYMENT_SCRIPTS_REVISION' \
+    "dev compose passes the mounted script revision"
+contains update.sh 'git -C "$SCRIPT_DIR" merge --ff-only origin/main' \
+    "deployment update fast-forwards only from main"
+contains update.sh 'bash "${SCRIPT_DIR}/dashboard/prod-up.sh"' \
+    "deployment update validates dashboard before stopping the old container"
+contains scripts/restart-stack.sh 'Do not preempt that stop-safe path' \
+    "stack restart preserves production dashboard preflight"
+contains .github/workflows/dashboard-image.yml "'scripts/**'" \
+    "dashboard image rebuilds when deployment scripts change"
+contains scripts/backup-tenant.sh '--no-tablespaces' \
+    "database backups avoid requiring PROCESS for tablespaces"
+contains scripts/init-tenant-db.sh 'Migration ledger table' \
+    "migration ledger bootstrap verifies its postcondition"
+contains scripts/init-tenant-db.sh 'MIGRATION_DB_USER' \
+    "migration replay supports dedicated DDL credentials"
+contains scripts/init-tenant-db.sh 'refusing to skip migration replay' \
+    "migration replay fails closed when the image has no readable migration directory"
 
 contains scripts/tenant-provenance.sh 'BUILD_WORKFLOW_RUN_ID' \
     "tenant provenance reads workflow run identity"

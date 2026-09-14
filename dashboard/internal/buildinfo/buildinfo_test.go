@@ -11,7 +11,7 @@ func TestCurrentUsesEmbeddedIdentity(t *testing.T) {
 		"APP_IMAGE_VERSION", "APP_VERSION", "APP_IMAGE_COMMIT", "APP_COMMIT",
 		"APP_IMAGE_CHANNEL", "APP_BUILD_CHANNEL", "APP_IMAGE_TAG",
 		"APP_IMAGE_REF", "APP_IMAGE_DIGEST", "APP_WORKFLOW_RUN_ID",
-		"APP_WORKFLOW_RUN_URL", "APP_BUILT_AT",
+		"APP_WORKFLOW_RUN_URL", "APP_BUILT_AT", "DEPLOYMENT_SCRIPTS_REVISION",
 	} {
 		t.Setenv(name, "")
 	}
@@ -39,6 +39,7 @@ func TestCurrentLoadsRuntimeImageIdentity(t *testing.T) {
 	t.Setenv("APP_WORKFLOW_RUN_ID", "12345")
 	t.Setenv("APP_WORKFLOW_RUN_URL", "https://github.com/example/repo/actions/runs/12345")
 	t.Setenv("APP_BUILT_AT", "2026-01-01T00:00:00Z")
+	t.Setenv("DEPLOYMENT_SCRIPTS_REVISION", "fedcba9876543210")
 
 	got := Current()
 	if got.Version != "v1.2.3" || got.SemanticVersion != "v1.2.3" ||
@@ -47,7 +48,8 @@ func TestCurrentLoadsRuntimeImageIdentity(t *testing.T) {
 		got.Tag != "prod" || got.Ref != "ssdawweq/dokku-dashboard:prod" ||
 		got.ImageRef != got.Ref || got.Digest != "sha256:abcdef" ||
 		got.WorkflowRunID != "12345" || got.WorkflowRunURL == "" ||
-		got.BuiltAt != "2026-01-01T00:00:00Z" {
+		got.BuiltAt != "2026-01-01T00:00:00Z" ||
+		got.ScriptsRevision != "fedcba9876543210" {
 		t.Fatalf("Current() = %+v", got)
 	}
 }

@@ -38,6 +38,7 @@ services:
       MYSQL_PORT: ${MYSQL_PORT:-3306}
       MYSQL_ADMIN_USER: ${MYSQL_ADMIN_USER:-}
       MYSQL_ADMIN_PASSWORD: ${MYSQL_ADMIN_PASSWORD:-}
+      DEPLOYMENT_SCRIPTS_REVISION: ${DEPLOYMENT_SCRIPTS_REVISION:-}
       # Path to /opt/deployment on the *host* docker daemon. The dashboard spawns
       # a sidecar container with this directory mounted to execute scripts.
       # On Windows Docker Desktop, the host path is the absolute Windows path.

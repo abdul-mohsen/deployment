@@ -31,6 +31,7 @@ type Info struct {
 	WorkflowRunURL  string `json:"workflow_run_url,omitempty"`
 	Source          string `json:"source,omitempty"`
 	BuiltAt         string `json:"built_at,omitempty"`
+	ScriptsRevision string `json:"scripts_revision,omitempty"`
 }
 
 // Current returns a sanitized copy of the embedded build identity. Build
@@ -63,6 +64,7 @@ func Current() Info {
 		WorkflowRunURL:  metadataValue(firstEnv("APP_WORKFLOW_RUN_URL"), ""),
 		Source:          metadataValue(firstEnv("APP_SOURCE", "APP_IMAGE_SOURCE"), ""),
 		BuiltAt:         metadataValue(firstEnv("APP_BUILT_AT", "APP_BUILD_AT", "APP_CREATED"), ""),
+		ScriptsRevision: publicValue(firstEnv("DEPLOYMENT_SCRIPTS_REVISION"), ""),
 	}
 }
 

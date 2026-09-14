@@ -21,6 +21,11 @@ IMAGE="ssdawweq/dokku-dashboard:dev"
 if [[ -z "${SCRIPTS_HOST_PATH:-}" ]]; then
     export SCRIPTS_HOST_PATH="$(cd "${SCRIPT_DIR}/.." && pwd)"
 fi
+if [[ -z "${BUILD_COMMIT:-}" || "${BUILD_COMMIT}" == "local" ]]; then
+    BUILD_COMMIT="$(git -C "${SCRIPT_DIR}/.." rev-parse --verify HEAD 2>/dev/null || printf 'local')"
+fi
+export DEPLOYMENT_SCRIPTS_REVISION="$BUILD_COMMIT"
+export BUILD_COMMIT="$DEPLOYMENT_SCRIPTS_REVISION"
 
 echo "[+] Removing old local image to bust layer cache..."
 docker image rm "$IMAGE" 2>/dev/null || true

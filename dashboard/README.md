@@ -62,6 +62,8 @@ runtime besides the docker socket.
 | `MYSQL_PORT`          | no       | `3306`        |
 | `MYSQL_ADMIN_USER`     | no       | `dokku_admin`  |
 | `MYSQL_ADMIN_PASSWORD` | no       | —             |
+| `MIGRATION_DB_USER`     | no       | falls back to `MYSQL_ADMIN_USER` |
+| `MIGRATION_DB_PASSWORD` | no       | falls back to `MYSQL_ADMIN_PASSWORD` |
 | `BACKUP_BEFORE_MIGRATION` | no    | `1`            |
 | `MIGRATION_STATUS_INTERVAL` | no | `5m`           |
 
@@ -70,10 +72,18 @@ deployment account used for direct MySQL operations. They do not need to be
 the MySQL root credentials. `MYSQL_ROOT_USER` and `MYSQL_ROOT_PASSWORD` remain
 accepted as legacy fallbacks for existing installations.
 
+`MIGRATION_DB_USER` and `MIGRATION_DB_PASSWORD` are optional dedicated schema
+credentials. They must have DDL access scoped to tenant databases. If omitted,
+schema replay uses the deployment account, then the tenant application account
+for legacy compatibility. The migration ledger is verified immediately after
+creation; missing tables or insufficient privileges are reported explicitly.
+
 Backend image migrations run before backend image swaps and require a verified
 backup by default. The tenant page reports the migration ledger status and
 supports an immediate per-tenant check. Set `MIGRATION_STATUS_INTERVAL` to
 control the background check interval; values below 30 seconds use the default.
+An image without a readable migrations directory is rejected instead of being
+treated as migration-free.
 
 Version picker values are Docker image tags. Full tenant flows (create, update, and
 tenant sync) default to `dev`, because that tag is published for both apps in the
@@ -294,7 +304,9 @@ Published dashboard images carry separate channel, Docker tag, semantic
 version, image reference, commit, workflow, and build-time fields. The image
 workflow publishes `latest`, `prod`, and immutable short/full commit tags,
 then verifies the published manifest and OCI labels before it succeeds.
-Operators can inspect the identity at `/version` or `/api/build-info`.
+Operators can inspect the image identity and mounted deployment-script revision
+at `/version` or `/api/build-info`. Production script execution is refused when
+the two revisions differ or either revision is unknown.
 `/healthz` keeps its plain `ok` response and adds the version and commit in
 headers. The deployment startup script resolves the pulled manifest digest
 and passes it to the running container, so the dashboard can be traced from

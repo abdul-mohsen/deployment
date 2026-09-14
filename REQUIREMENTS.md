@@ -71,6 +71,10 @@ Copy from [config.env.example](config.env.example) and fill:
 - `MYSQL_HOST=host.docker.internal`, `MYSQL_PORT=3306`,
   `MYSQL_ADMIN_USER`, `MYSQL_ADMIN_PASSWORD` — the least-privileged
   deployment account; it does not need to be the MySQL root account.
+- Optional `MIGRATION_DB_USER`, `MIGRATION_DB_PASSWORD` — dedicated account
+  with DDL access scoped to tenant databases. Backend schema and migration
+  replay prefer this account, then the deployment account, then the legacy
+  tenant application account.
 - `MYSQL_MASTER_DB=zatca_master` — registry table `tenant(name, db_name, enabled)`
 - `MYSQL_TENANT_HOST=172.%` — docker bridge subnet; **must match** the host
   pattern used in [scripts/remove-tenant.sh](scripts/remove-tenant.sh)
@@ -80,9 +84,14 @@ Copy from [config.env.example](config.env.example) and fill:
   applying backend-image migrations.
 - `MIGRATION_STATUS_INTERVAL=5m` — dashboard interval for checking every
   tenant's migration ledger; checks also run at dashboard startup.
+- Production dashboard updates require the deployment checkout on `main` to
+  match the published dashboard image commit. `update.sh` fast-forwards the
+  checkout, and `dashboard/prod-up.sh` refuses a revision mismatch before
+  replacing the running dashboard.
 - `MIGRATE_CMD` — optional legacy custom migration command. Normal tenant
   schema migrations are applied from the selected backend image by
-  `scripts/init-tenant-db.sh`.
+  `scripts/init-tenant-db.sh`; images without a readable migrations directory
+  are rejected so migration replay cannot be silently skipped.
 - Optional: `PUBLIC_PROTOCOL=https|http` (controls the canonical public link
   scheme and the frontend `API_URL`; production must use `https`),
   `NGINX_CLIENT_MAX_BODY_SIZE=50m`

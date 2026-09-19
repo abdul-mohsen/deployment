@@ -9,6 +9,169 @@
 #   source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # =============================================================================
 
+# Structured deployment logging is opt-in so tests and helper-only callers can
+# source lib.sh without installing a process-wide ERR trap.
+deployment_init_logging() {
+    local current_script inherited_tenant
+    if [ -n "${DEPLOY_SCRIPT_NAME_OVERRIDE:-}" ]; then
+        current_script="$DEPLOY_SCRIPT_NAME_OVERRIDE"
+    elif [ "${DEPLOY_LOGGING_INITIALIZED:-0}" != "1" ] && [ -n "${DEPLOY_SCRIPT_NAME:-}" ]; then
+        current_script="$DEPLOY_SCRIPT_NAME"
+    else
+        current_script="${0##*/}"
+    fi
+    if [ "${DEPLOY_LOGGING_INITIALIZED:-0}" = "1" ] &&
+        [ "${DEPLOY_ACTIVE_SCRIPT:-}" = "$current_script" ]; then
+        return 0
+    fi
+
+    DEPLOY_SCRIPT_NAME="$current_script"
+    DEPLOY_ACTIVE_SCRIPT="$current_script"
+    DEPLOY_OPERATION_ID="${DEPLOY_OPERATION_ID:-op-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+    inherited_tenant="${DEPLOY_TENANT:-}"
+    DEPLOY_TENANT=""
+    if [ -n "$inherited_tenant" ]; then
+        deployment_set_tenant "$inherited_tenant"
+    fi
+    DEPLOY_LOGGING_INITIALIZED=1
+    export DEPLOY_SCRIPT_NAME DEPLOY_ACTIVE_SCRIPT DEPLOY_OPERATION_ID DEPLOY_TENANT DEPLOY_LOGGING_INITIALIZED
+
+    # ERR is inherited by functions and subshells so failures remain
+    # correlated to the same operation. The trap deliberately excludes the
+    # failed command text because commands can contain credentials.
+    set -E
+    trap deployment_error_trap ERR
+    deployment_log INFO "operation started"
+}
+
+deployment_set_tenant() {
+    local tenant="${1:-}"
+    if declare -F sanitize_tenant_name >/dev/null 2>&1; then
+        tenant="$(sanitize_tenant_name "$tenant")"
+    else
+        tenant="$(printf '%s' "$tenant" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
+        tenant="${tenant#-}"
+        tenant="${tenant%-}"
+    fi
+    DEPLOY_TENANT="$tenant"
+    export DEPLOY_TENANT
+}
+
+deployment_log() {
+    local severity="${1:-INFO}"
+    shift || true
+    local timestamp script operation tenant message line
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    script="${DEPLOY_SCRIPT_NAME:-${0##*/}}"
+    operation="${DEPLOY_OPERATION_ID:-untracked}"
+    tenant="${DEPLOY_TENANT:-none}"
+    [ -n "$tenant" ] || tenant="none"
+    message="$*"
+    message="${message//$'\r'/ }"
+    message="${message//$'\n'/ }"
+    message="${message//$'\t'/ }"
+    if [ "${#message}" -gt 4096 ]; then
+        message="${message:0:4096}...[truncated]"
+    fi
+    line="timestamp=${timestamp} severity=${severity^^} script=$(printf '%q' "$script") operation_id=$(printf '%q' "$operation") tenant=$(printf '%q' "$tenant") message=$(printf '%q' "$message")"
+
+    if [ "${DEPLOY_LOG_STDERR:-1}" != "0" ]; then
+        printf '%s\n' "$line" >&2
+    fi
+    if [ -n "${DEPLOY_LOG_FILE:-}" ] &&
+        [ "${DEPLOY_LOG_FILE_DISABLED:-0}" != "1" ]; then
+        deployment_log_file_append "$line"
+    fi
+}
+
+deployment_log_max_bytes() {
+    local max="${DEPLOY_LOG_MAX_BYTES:-10485760}"
+    if ! [[ "$max" =~ ^[0-9]+$ ]] || [ "$max" -lt 1024 ]; then
+        max=10485760
+    fi
+    [ "$max" -gt 104857600 ] && max=104857600
+    printf '%s' "$max"
+}
+
+deployment_log_file_failure() {
+    [ "${DEPLOY_LOG_FILE_DISABLED:-0}" = "1" ] && return 0
+    DEPLOY_LOG_FILE_DISABLED=1
+    export DEPLOY_LOG_FILE_DISABLED
+    DEPLOY_LOG_STDERR=1 deployment_log WARN \
+        "deployment log file sink disabled after bounded write failure"
+}
+
+deployment_log_file_append() {
+    local line="$1" file="${DEPLOY_LOG_FILE:-}" rotated size max
+    [ -n "$file" ] || return 0
+    max="$(deployment_log_max_bytes)"
+    rotated="${file}.1"
+
+    if [ -e "$file" ]; then
+        [ -f "$file" ] || {
+            deployment_log_file_failure
+            return 0
+        }
+        size="$(wc -c < "$file" 2>/dev/null | tr -d '[:space:]')" || {
+            deployment_log_file_failure
+            return 0
+        }
+        if ! [[ "$size" =~ ^[0-9]+$ ]]; then
+            deployment_log_file_failure
+            return 0
+        fi
+        if [ "$size" -ge "$max" ]; then
+            if [ -e "$rotated" ] && ! rm -f "$rotated"; then
+                deployment_log_file_failure
+                return 0
+            fi
+            if ! mv "$file" "$rotated"; then
+                deployment_log_file_failure
+                return 0
+            fi
+        fi
+    fi
+
+    if ! printf '%s\n' "$line" >> "$file"; then
+        deployment_log_file_failure
+    fi
+}
+
+deployment_run_boundary() {
+    local operation="${1:-operation}"
+    shift || true
+    local errexit_was_set=0 exit_code
+    case "$-" in
+        *e*) errexit_was_set=1 ;;
+    esac
+
+    set +e
+    "$@"
+    exit_code=$?
+    if [ "$errexit_was_set" -eq 1 ]; then
+        set -e
+    fi
+
+    if [ "$exit_code" -eq 0 ]; then
+        deployment_log INFO \
+            "operation_boundary operation=${operation} status=success exit_code=0"
+    else
+        deployment_log ERROR \
+            "operation_boundary operation=${operation} status=failed exit_code=${exit_code}"
+    fi
+    return "$exit_code"
+}
+
+deployment_error_trap() {
+    local exit_code=$?
+    local line_number="${BASH_LINENO[0]:-0}"
+    deployment_log ERROR "operation failed exit_code=${exit_code} line=${line_number}" || true
+    if declare -F deployment_failure_report >/dev/null 2>&1; then
+        deployment_failure_report "$exit_code" "$line_number" || true
+    fi
+    return "$exit_code"
+}
+
 # Detect whether this shell should use a local mysql client or a mysql helper
 # container. MYSQL_CLIENT_MODE=docker is used by the dashboard runner so MySQL
 # grants scoped to Docker bridge clients keep working even if the runner image
@@ -230,6 +393,434 @@ public_tenant_url() {
     public_url "${tenant}.${base_domain}"
 }
 
+# OpenObserve application telemetry is deliberately opt-in. The collector
+# network name is fixed by dashboard/docker-compose.openobserve.yml; accepting
+# another name would make it possible to point tenant apps at an unreviewed or
+# public network.
+OPENOBSERVE_DEFAULT_NETWORK_NAME="ifritah-observability-openobserve"
+OPENOBSERVE_OTLP_ENDPOINT="http://alloy-openobserve:4318"
+readonly OPENOBSERVE_DEFAULT_NETWORK_NAME OPENOBSERVE_OTLP_ENDPOINT
+
+openobserve_warn() {
+    if declare -F deployment_log >/dev/null 2>&1; then
+        deployment_log WARN "$*"
+    fi
+    printf '[!] OpenObserve telemetry: %s\n' "$*" >&2
+}
+
+openobserve_info() {
+    if declare -F deployment_log >/dev/null 2>&1; then
+        deployment_log INFO "$*"
+    fi
+    printf '[i] OpenObserve telemetry: %s\n' "$*"
+}
+
+openobserve_telemetry_mode() {
+    local value="${OPENOBSERVE_TENANT_TELEMETRY_ENABLED:-false}"
+    value="${value,,}"
+    case "$value" in
+        true|1|yes|on)  printf 'enabled' ;;
+        false|0|no|off|'') printf 'disabled' ;;
+        *)
+            openobserve_warn \
+                "OPENOBSERVE_TENANT_TELEMETRY_ENABLED must be true or false; ignoring invalid value."
+            printf 'invalid'
+            ;;
+    esac
+}
+
+openobserve_validate_network_name() {
+    local network="${1:-}"
+    if [[ ! "$network" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]] ||
+        [ "$network" != "$OPENOBSERVE_DEFAULT_NETWORK_NAME" ]; then
+        openobserve_warn \
+            "refusing unapproved Docker network '$network'; expected '$OPENOBSERVE_DEFAULT_NETWORK_NAME'."
+        return 1
+    fi
+}
+
+openobserve_network_name() {
+    local network="${OPENOBSERVE_NETWORK_NAME:-$OPENOBSERVE_DEFAULT_NETWORK_NAME}"
+    openobserve_validate_network_name "$network" || return 1
+    printf '%s' "$network"
+}
+
+openobserve_ensure_network() {
+    local network="${1:-}" internal
+    openobserve_validate_network_name "$network" || return 1
+
+    if ! command -v docker >/dev/null 2>&1; then
+        openobserve_warn "docker is unavailable; leaving tenant deployment unchanged."
+        return 1
+    fi
+
+    if docker network inspect "$network" >/dev/null 2>&1; then
+        internal="$(docker network inspect "$network" --format '{{.Internal}}' 2>/dev/null || true)"
+        if [ "$internal" != "true" ]; then
+            openobserve_warn \
+                "Docker network '$network' exists but is not internal; refusing telemetry wiring."
+            return 1
+        fi
+        return 0
+    fi
+
+    openobserve_info "creating private internal Docker network '$network'."
+    if ! docker network create \
+        --driver bridge \
+        --internal \
+        --label com.docker.compose.network=openobserve \
+        "$network" >/dev/null 2>&1; then
+        openobserve_warn \
+            "could not create internal Docker network '$network'; tenant deployment will continue without telemetry wiring."
+        return 1
+    fi
+
+    internal="$(docker network inspect "$network" --format '{{.Internal}}' 2>/dev/null || true)"
+    if [ "$internal" != "true" ]; then
+        openobserve_warn \
+            "new Docker network '$network' did not report internal=true; refusing telemetry wiring."
+        return 1
+    fi
+    return 0
+}
+
+openobserve_collector_running() {
+    [ -n "$(docker ps -q --filter name=alloy-openobserve 2>/dev/null || true)" ]
+}
+
+openobserve_bound_int() {
+    local value="${1:-}" fallback="$2" minimum="$3" maximum="$4"
+    if ! [[ "$value" =~ ^[0-9]+$ ]] ||
+        [ "$value" -lt "$minimum" ] ||
+        [ "$value" -gt "$maximum" ]; then
+        printf '%s' "$fallback"
+    else
+        printf '%s' "$value"
+    fi
+}
+
+openobserve_sampler_arg() {
+    local value="${OPENOBSERVE_OTEL_TRACES_SAMPLER_ARG:-0.10}"
+    if [[ "$value" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]]; then
+        printf '%s' "$value"
+    else
+        printf '0.10'
+    fi
+}
+
+openobserve_environment_name() {
+    local value="${DEPLOY_ENV:-${DASHBOARD_ENV:-production}}"
+    value="${value,,}"
+    case "$value" in
+        prod|production) printf 'production' ;;
+        dev|development) printf 'development' ;;
+        qa|test|staging|sandbox) printf '%s' "$value" ;;
+        *) printf 'production' ;;
+    esac
+}
+
+openobserve_running_app_containers() {
+    local app="$1" ids
+    ids="$(docker ps -q --filter "label=com.dokku.app-name=${app}" 2>/dev/null || true)"
+    if [ -z "$ids" ]; then
+        ids="$(docker ps -q --filter "name=${app}" 2>/dev/null || true)"
+    fi
+    printf '%s\n' "$ids"
+}
+
+openobserve_network_contains_container() {
+    local network="$1" container_id="$2"
+    docker network inspect "$network" \
+        --format '{{range $id, $container := .Containers}}{{println $id}}{{end}}' \
+        2>/dev/null | grep -Fxq "$container_id"
+}
+
+openobserve_connect_running_app() {
+    local app="$1" network="$2" container_id
+    while IFS= read -r container_id; do
+        [ -n "$container_id" ] || continue
+        if openobserve_network_contains_container "$network" "$container_id"; then
+            continue
+        fi
+        if ! docker network connect "$network" "$container_id" >/dev/null 2>&1; then
+            openobserve_warn \
+                "could not connect running $app container to '$network'; future deploys remain protected by the persistent hook."
+        fi
+    done < <(openobserve_running_app_containers "$app")
+}
+
+openobserve_persist_app_network() {
+    local app="$1" network="$2" current existing found=0
+    local -a networks=()
+
+    if ! openobserve_capture_app_network "$app" "$network"; then
+        return 1
+    fi
+    current="$(openobserve_app_network_value "$app" --network-computed-attach-post-deploy)" || \
+        return 1
+    if [ -n "$current" ]; then
+        read -r -a networks <<< "$current"
+    fi
+    for existing in "${networks[@]}"; do
+        if [ "$existing" = "$network" ]; then
+            found=1
+            break
+        fi
+    done
+    [ "$found" -eq 1 ] && return 0
+    networks+=("$network")
+    if ! openobserve_set_app_networks "$app" "${networks[@]}"; then
+        openobserve_warn \
+            "could not persist '$network' on $app with Dokku attach-post-deploy; telemetry may need reapplying after redeploy."
+        return 1
+    fi
+    return 0
+}
+
+openobserve_restart_running_app() {
+    local app="$1"
+    if [ -z "$(openobserve_running_app_containers "$app")" ]; then
+        return 0
+    fi
+    if ! dokku ps:restart "$app" >/dev/null 2>&1; then
+        openobserve_warn "could not restart $app after changing telemetry configuration."
+    fi
+}
+
+openobserve_app_configure() {
+    local app="$1" component="$2" environment
+    local queue_size batch_default batch_size schedule_delay export_timeout sampler sampler_arg
+    local resource_attributes pair key expected current changed=0
+    local -a args=()
+
+    environment="$(openobserve_environment_name)"
+    queue_size="$(openobserve_bound_int \
+        "${OPENOBSERVE_OTEL_BSP_MAX_QUEUE_SIZE:-2048}" 2048 256 16384)"
+    batch_default=512
+    [ "$queue_size" -lt "$batch_default" ] && batch_default="$queue_size"
+    batch_size="$(openobserve_bound_int \
+        "${OPENOBSERVE_OTEL_BSP_MAX_EXPORT_BATCH_SIZE:-$batch_default}" \
+        "$batch_default" 64 "$queue_size")"
+    schedule_delay="$(openobserve_bound_int \
+        "${OPENOBSERVE_OTEL_BSP_SCHEDULE_DELAY:-5000}" 5000 100 60000)"
+    export_timeout="$(openobserve_bound_int \
+        "${OPENOBSERVE_OTEL_BSP_EXPORT_TIMEOUT:-30000}" 30000 1000 60000)"
+    sampler="${OPENOBSERVE_OTEL_TRACES_SAMPLER:-parentbased_traceidratio}"
+    case "$sampler" in
+        parentbased_traceidratio|parentbased_always_on|always_off|traceidratio) ;;
+        *) sampler="parentbased_traceidratio" ;;
+    esac
+    sampler_arg="$(openobserve_sampler_arg)"
+    resource_attributes="service.namespace=ifritah,deployment.environment=${environment}"
+
+    args=(
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OPENOBSERVE_OTLP_ENDPOINT}"
+        "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf"
+        "OTEL_TRACES_EXPORTER=otlp"
+        "OTEL_EXPORTER_OTLP_TRACES_INSECURE=true"
+        "OTEL_SERVICE_NAME=ifritah-${component}"
+        "OTEL_RESOURCE_ATTRIBUTES=${resource_attributes}"
+        "OTEL_PROPAGATORS=tracecontext,baggage"
+        "OTEL_TRACES_SAMPLER=${sampler}"
+        "OTEL_TRACES_SAMPLER_ARG=${sampler_arg}"
+        "OTEL_BSP_MAX_QUEUE_SIZE=${queue_size}"
+        "OTEL_BSP_MAX_EXPORT_BATCH_SIZE=${batch_size}"
+        "OTEL_BSP_SCHEDULE_DELAY=${schedule_delay}"
+        "OTEL_BSP_EXPORT_TIMEOUT=${export_timeout}"
+        "IFRITAH_OPENOBSERVE_WIRING=1"
+    )
+
+    for pair in "${args[@]}"; do
+        key="${pair%%=*}"
+        expected="${pair#*=}"
+        current="$(dokku config:get "$app" "$key" 2>/dev/null || true)"
+        if [ "$current" != "$expected" ]; then
+            changed=1
+            break
+        fi
+    done
+
+    if [ "$changed" -eq 1 ]; then
+        if ! dokku config:set --no-restart "$app" "${args[@]}" >/dev/null 2>&1; then
+            openobserve_warn "could not configure OTLP tracing environment on $app."
+            return 1
+        fi
+        openobserve_restart_running_app "$app"
+    fi
+    return 0
+}
+
+openobserve_app_network_value() {
+    local app="$1" report_flag="$2" value
+    value="$(dokku network:report "$app" "$report_flag" 2>/dev/null)" || {
+        openobserve_warn \
+            "could not read $report_flag for $app; refusing to overwrite Dokku network settings."
+        return 1
+    }
+    value="${value//$'\r'/ }"
+    value="${value//$'\n'/ }"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
+openobserve_set_app_networks() {
+    local app="$1"
+    shift
+    if [ "$#" -eq 0 ]; then
+        dokku network:set "$app" attach-post-deploy "" >/dev/null 2>&1
+    else
+        dokku network:set "$app" attach-post-deploy "$@" >/dev/null 2>&1
+    fi
+}
+
+openobserve_capture_app_network() {
+    local app="$1" network="${2:-}" captured wiring previous existing
+    local -a networks=() remaining=()
+    captured="$(dokku config:get "$app" IFRITAH_OPENOBSERVE_NETWORK_CAPTURED 2>/dev/null || true)"
+    [ "$captured" = "1" ] && return 0
+    previous="$(openobserve_app_network_value "$app" --network-attach-post-deploy)" || return 1
+    wiring="$(dokku config:get "$app" IFRITAH_OPENOBSERVE_WIRING 2>/dev/null || true)"
+    if [ "$wiring" = "1" ] && [ -n "$network" ] && [ -n "$previous" ]; then
+        read -r -a networks <<< "$previous"
+        for existing in "${networks[@]}"; do
+            [ "$existing" = "$network" ] || remaining+=("$existing")
+        done
+        previous="${remaining[*]}"
+    fi
+    if ! dokku config:set --no-restart "$app" \
+        IFRITAH_OPENOBSERVE_NETWORK_CAPTURED=1 \
+        "IFRITAH_OPENOBSERVE_PREVIOUS_ATTACH_POST_DEPLOY=$previous" \
+        >/dev/null 2>&1; then
+        openobserve_warn "could not save the existing Dokku network settings for $app."
+        return 1
+    fi
+    return 0
+}
+
+openobserve_remove_app_network() {
+    local app="$1" network="$2" current existing found=0
+    local -a networks=() remaining=()
+    current="$(openobserve_app_network_value "$app" --network-attach-post-deploy)" || return 1
+    if [ -n "$current" ]; then
+        read -r -a networks <<< "$current"
+    fi
+    for existing in "${networks[@]}"; do
+        if [ "$existing" = "$network" ]; then
+            found=1
+        else
+            remaining+=("$existing")
+        fi
+    done
+    [ "$found" -eq 1 ] || return 0
+    openobserve_set_app_networks "$app" "${remaining[@]}"
+}
+
+openobserve_restore_app_network() {
+    local app="$1" network="$2" captured previous existing found=0
+    local -a networks=() remaining=()
+    captured="$(dokku config:get "$app" IFRITAH_OPENOBSERVE_NETWORK_CAPTURED 2>/dev/null || true)"
+    if [ "$captured" = "1" ]; then
+        previous="$(dokku config:get \
+            "$app" IFRITAH_OPENOBSERVE_PREVIOUS_ATTACH_POST_DEPLOY 2>/dev/null || true)"
+        if [ -n "$previous" ]; then
+            read -r -a networks <<< "$previous"
+        fi
+        openobserve_set_app_networks "$app" "${networks[@]}"
+        return 0
+    fi
+    openobserve_remove_app_network "$app" "$network"
+}
+
+openobserve_disconnect_running_app() {
+    local app="$1" network="$2" container_id
+    while IFS= read -r container_id; do
+        [ -n "$container_id" ] || continue
+        if openobserve_network_contains_container "$network" "$container_id"; then
+            docker network disconnect "$network" "$container_id" >/dev/null 2>&1 || \
+                openobserve_warn "could not disconnect $app from '$network'."
+        fi
+    done < <(openobserve_running_app_containers "$app")
+}
+
+openobserve_disable_app() {
+    local app="$1" network="$2" marker captured
+    marker="$(dokku config:get "$app" IFRITAH_OPENOBSERVE_WIRING 2>/dev/null || true)"
+    captured="$(dokku config:get "$app" IFRITAH_OPENOBSERVE_NETWORK_CAPTURED 2>/dev/null || true)"
+    [ "$marker" = "1" ] || [ "$captured" = "1" ] || return 0
+
+    openobserve_restore_app_network "$app" "$network" || \
+        openobserve_warn "could not restore the previous Dokku network settings for $app."
+    dokku config:unset --no-restart "$app" \
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT \
+        OTEL_EXPORTER_OTLP_TRACES_PROTOCOL \
+        OTEL_TRACES_EXPORTER \
+        OTEL_EXPORTER_OTLP_TRACES_INSECURE \
+        OTEL_SERVICE_NAME \
+        OTEL_RESOURCE_ATTRIBUTES \
+        OTEL_PROPAGATORS \
+        OTEL_TRACES_SAMPLER \
+        OTEL_TRACES_SAMPLER_ARG \
+        OTEL_BSP_MAX_QUEUE_SIZE \
+        OTEL_BSP_MAX_EXPORT_BATCH_SIZE \
+        OTEL_BSP_SCHEDULE_DELAY \
+        OTEL_BSP_EXPORT_TIMEOUT \
+        IFRITAH_OPENOBSERVE_NETWORK_CAPTURED \
+        IFRITAH_OPENOBSERVE_PREVIOUS_ATTACH_POST_DEPLOY \
+        IFRITAH_OPENOBSERVE_WIRING >/dev/null 2>&1 || \
+        openobserve_warn "could not remove OpenObserve environment from $app."
+    openobserve_disconnect_running_app "$app" "$network"
+    openobserve_restart_running_app "$app"
+}
+
+openobserve_reconcile_tenant_apps() {
+    local tenant="${1:-}"
+    local backend_app="${2:-${tenant}-backend}"
+    local frontend_app="${3:-${tenant}-frontend}"
+    local mode network app component
+
+    [ -n "$tenant" ] || return 0
+    mode="$(openobserve_telemetry_mode)"
+    case "$mode" in
+        disabled)
+            network="$OPENOBSERVE_DEFAULT_NETWORK_NAME"
+            for app in "$backend_app" "$frontend_app"; do
+                if dokku apps:exists "$app" >/dev/null 2>&1; then
+                    openobserve_disable_app "$app" "$network"
+                fi
+            done
+            ;;
+        invalid)
+            return 0
+            ;;
+        enabled)
+            network="$(openobserve_network_name)" || return 0
+            if ! openobserve_ensure_network "$network"; then
+                openobserve_warn \
+                    "collector network is unavailable; preserving normal tenant deployment without telemetry wiring."
+                return 0
+            fi
+            if ! openobserve_collector_running; then
+                openobserve_warn \
+                    "alloy-openobserve is not running; preserving normal tenant deployment and allowing asynchronous trace retries."
+            fi
+            for component in backend frontend; do
+                app="${tenant}-${component}"
+                [ "$component" = backend ] && app="$backend_app"
+                [ "$component" = frontend ] && app="$frontend_app"
+                if ! dokku apps:exists "$app" >/dev/null 2>&1; then
+                    openobserve_warn "app $app does not exist yet; telemetry will be retried on the next lifecycle operation."
+                    continue
+                fi
+                openobserve_persist_app_network "$app" "$network" || true
+                openobserve_app_configure "$app" "$component" || true
+                openobserve_connect_running_app "$app" "$network"
+            done
+            ;;
+    esac
+    return 0
+}
+
 # Reconcile Dokku's persisted public routing for one tenant.
 #
 # Dokku stores domains and config independently from BASE_DOMAIN. Callers that
@@ -287,6 +878,10 @@ reconcile_tenant_routing() {
         dokku ps:restart "$frontend_app"
         ROUTING_RESTARTED=true
     fi
+
+    # OpenObserve application wiring is opt-in and fail-open. A collector or
+    # private-network problem must never prevent routing repair or deployment.
+    openobserve_reconcile_tenant_apps "$tenant" "$backend_app" "$frontend_app" || true
 }
 
 # Resolve the control-plane MySQL account at call time. Helpers are sourced

@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "streams": [
+    {
+      "name": "ifritah_logs_v1",
+      "type": "logs",
+      "retention_days": 14,
+      "create": {
+        "fields": [],
+        "settings": {
+          "data_retention": 14,
+          "max_query_range": 168,
+          "store_original_data": false,
+          "index_fields": [
+            "event_type",
+            "service_name",
+            "deployment_environment",
+            "request_id",
+            "trace_id",
+            "operation_id",
+            "tenant_id",
+            "error_code",
+            "error_type",
+            "outcome",
+            "status_class",
+            "route",
+            "deployment_stage",
+            "script"
+          ],
+          "full_text_search_keys": [
+            "event_type",
+            "operation",
+            "error_code",
+            "error_type"
+          ]
+        }
+      },
+      "settings": {
+        "data_retention": 14
+      },
+      "search_fields": [
+        "request_id",
+        "trace_id",
+        "tenant_id",
+        "operation_id",
+        "service_name",
+        "event_type",
+        "error_code"
+      ]
+    },
+    {
+      "name": "ifritah_traces_v1",
+      "type": "traces",
+      "retention_days": 7,
+      "create": {
+        "fields": [],
+        "settings": {
+          "data_retention": 7,
+          "max_query_range": 168,
+          "store_original_data": false,
+          "index_fields": [
+            "trace_id",
+            "span_id",
+            "parent_span_id",
+            "service_name",
+            "deployment_environment",
+            "operation",
+            "route",
+            "status_code",
+            "duration_ms",
+            "error_type"
+          ],
+          "full_text_search_keys": [
+            "service_name",
+            "operation",
+            "error_type"
+          ]
+        }
+      },
+      "settings": {
+        "data_retention": 7
+      },
+      "search_fields": [
+        "trace_id",
+        "span_id",
+        "service_name",
+        "operation",
+        "route",
+        "duration_ms"
+      ]
+    },
+    {
+      "name": "ifritah_metrics_v1",
+      "type": "metrics",
+      "retention_days": 15,
+      "create": {
+        "fields": [],
+        "settings": {
+          "data_retention": 15,
+          "max_query_range": 24,
+          "store_original_data": false,
+          "index_fields": [
+            "metric_name",
+            "service_name",
+            "deployment_environment",
+            "component",
+            "container_role",
+            "host_role",
+            "outcome"
+          ],
+          "full_text_search_keys": [
+            "metric_name",
+            "service_name",
+            "component"
+          ]
+        }
+      },
+      "settings": {
+        "data_retention": 15
+      },
+      "search_fields": [
+        "metric_name",
+        "service_name",
+        "deployment_environment",
+        "component",
+        "container_role"
+      ]
+    },
+    {
+      "name": "ifritah_telemetry_health_v1",
+      "type": "logs",
+      "retention_days": 14,
+      "create": {
+        "fields": [],
+        "settings": {
+          "data_retention": 14,
+          "max_query_range": 168,
+          "store_original_data": false,
+          "index_fields": [
+            "event_type",
+            "component",
+            "service_name",
+            "deployment_environment",
+            "operation",
+            "outcome",
+            "error_code",
+            "lag_ms",
+            "queue_depth",
+            "dropped_records",
+            "parse_failures",
+            "disk_usage_ratio"
+          ],
+          "full_text_search_keys": [
+            "event_type",
+            "component",
+            "operation",
+            "error_code"
+          ]
+        }
+      },
+      "settings": {
+        "data_retention": 14
+      },
+      "search_fields": [
+        "component",
+        "event_type",
+        "outcome",
+        "error_code",
+        "lag_ms",
+        "queue_depth",
+        "dropped_records"
+      ]
+    }
+  ]
+}

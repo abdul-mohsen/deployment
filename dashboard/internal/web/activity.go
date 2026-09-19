@@ -2,12 +2,13 @@ package web
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/abdul-mohsen/deployment/dashboard/internal/logbuf"
+	"github.com/abdul-mohsen/deployment/dashboard/internal/logging"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/scripts"
 	"github.com/go-chi/chi/v5"
 )
@@ -17,12 +18,16 @@ func activityKey(kind, name string) string {
 }
 
 func (s *server) recordLog(key, line string) {
+	logger := s.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	if s.logs == nil {
-		log.Printf("dashboard: log store is unavailable for %q", key)
+		logger.Warn("activity log store unavailable", "activity_key", key)
 		return
 	}
 	if err := s.logs.Append(key, line); err != nil {
-		log.Printf("dashboard: persist log %q: %v", key, err)
+		logger.Error("activity log persist failed", "activity_key", key, logging.ErrorAttr(err))
 	}
 }
 

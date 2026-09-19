@@ -1,0 +1,336 @@
+{
+  "schema_version": 1,
+  "destination_placeholder": "${OPENOBSERVE_ALERT_DESTINATION_NAME}",
+  "alerts": [
+    {
+      "name": "Ifritah - Elevated 5xx responses",
+      "stream_type": "logs",
+      "stream_name": "ifritah_logs_v1",
+      "description": "Notify when five or more 5xx request completions occur in ten minutes.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND event_type = 'http.request.completed' AND status_class = '5xx'"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": ">=",
+        "threshold": 5,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "Ifritah - Panic or exception recovered",
+      "stream_type": "logs",
+      "stream_name": "ifritah_logs_v1",
+      "description": "Notify when a recovered panic or bounded exception event is emitted.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND (event_type = 'http.panic_recovered' OR panic_type IS NOT NULL OR exception_type IS NOT NULL)"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": ">=",
+        "threshold": 1,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "Ifritah - Authentication rejection burst",
+      "stream_type": "logs",
+      "stream_name": "ifritah_logs_v1",
+      "description": "Notify when rejected auth decisions exceed the pilot threshold.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND event_type = 'auth.decision' AND outcome = 'rejected'"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": ">=",
+        "threshold": 10,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "Ifritah - Migration or deployment failure",
+      "stream_type": "logs",
+      "stream_name": "ifritah_logs_v1",
+      "description": "Notify on a failed deployment operation, including migration stage failures.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND event_type = 'deployment.operation' AND outcome = 'failure' AND deployment_stage IN ('migration', 'backup', 'image_swap', 'verify', 'rollback')"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": ">=",
+        "threshold": 1,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "Ifritah - Request latency budget",
+      "stream_type": "logs",
+      "stream_name": "ifritah_logs_v1",
+      "description": "Notify when the average request duration exceeds the pilot budget.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT AVG(duration_ms) AS alert_value FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND event_type = 'http.request.completed'"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": ">=",
+        "threshold": 1000,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "Ifritah - Collector drops or lag",
+      "stream_type": "logs",
+      "stream_name": "ifritah_telemetry_health_v1",
+      "description": "Notify when collector drops, queue pressure, parse failures, or lag are observed.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_telemetry_health_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND (dropped_records > 0 OR parse_failures > 0 OR lag_ms > 60000 OR queue_depth > 1000)"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": ">=",
+        "threshold": 1,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "Ifritah - OpenObserve health degraded",
+      "stream_type": "logs",
+      "stream_name": "ifritah_telemetry_health_v1",
+      "description": "Notify when collector or OpenObserve health is degraded or failing.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_telemetry_health_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND (component IN ('collector', 'openobserve') OR service_name = 'openobserve') AND outcome IN ('degraded', 'failure', 'dropped')"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": ">=",
+        "threshold": 1,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "Ifritah - Resource pressure",
+      "stream_type": "metrics",
+      "stream_name": "ifritah_metrics_v1",
+      "description": "Notify when a resource metric reports a bounded pressure value.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT MAX(value) * 100 AS alert_value FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND metric_name = 'ifritah_container_cpu_usage_ratio'"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": ">=",
+        "threshold": 90,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "Ifritah - Container memory pressure",
+      "stream_type": "metrics",
+      "stream_name": "ifritah_metrics_v1",
+      "description": "Notify when an approved container role's aggregate working set exceeds the 1 GiB pilot threshold.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT MAX(value) AS alert_value FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND metric_name = 'ifritah_container_memory_working_set_bytes' AND host_role = 'deployment'"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": ">=",
+        "threshold": 1073741824,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "Ifritah - Filesystem or disk pressure",
+      "stream_type": "metrics",
+      "stream_name": "ifritah_metrics_v1",
+      "description": "Notify when an allow-listed filesystem reports less than 10 GiB of available/free space.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND host_role = 'deployment' AND metric_name IN ('node_filesystem_avail_bytes', 'node_filesystem_free_bytes') AND value < 10737418240"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": ">=",
+        "threshold": 1,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "Ifritah - Container restart loop",
+      "stream_type": "metrics",
+      "stream_name": "ifritah_metrics_v1",
+      "description": "Notify when the bounded container-role restart counter increases by three or more within ten minutes.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT MAX(value) - MIN(value) AS alert_value FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND metric_name = 'ifritah_container_restarts_total' AND host_role = 'deployment'"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": ">=",
+        "threshold": 3,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "Ifritah - Host memory pressure",
+      "stream_type": "metrics",
+      "stream_name": "ifritah_metrics_v1",
+      "description": "Notify when host available memory falls below the 512 MiB pilot threshold.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND host_role = 'deployment' AND metric_name = 'node_memory_MemAvailable_bytes' AND value < 536870912"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": ">=",
+        "threshold": 1,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "Ifritah - Host resource metrics health",
+      "stream_type": "metrics",
+      "stream_name": "ifritah_metrics_v1",
+      "description": "Notify when the node-exporter host resource baseline provides fewer than four CPU samples during the evaluation window.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND host_role = 'deployment' AND metric_name = 'node_cpu_seconds_total'"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": "<",
+        "threshold": 4,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "Ifritah - Resource exporter health",
+      "stream_type": "metrics",
+      "stream_name": "ifritah_metrics_v1",
+      "description": "Notify when the resource exporter is down or reports a Docker collection failure.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND ((metric_name = 'ifritah_resource_exporter_up' AND value < 1) OR (metric_name = 'ifritah_resource_exporter_scrape_errors_total' AND value > 0))"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": ">=",
+        "threshold": 1,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    },
+    {
+      "name": "Ifritah - Telemetry gateway health",
+      "stream_type": "metrics",
+      "stream_name": "ifritah_metrics_v1",
+      "description": "Notify when the bounded telemetry gateway reports forwarding, drop, authentication, payload, or queue-write failures.",
+      "query_condition": {
+        "type": "sql",
+        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND metric_name IN ('ifritah_gateway_forward_failures_total', 'ifritah_gateway_dropped_records_total', 'ifritah_gateway_auth_blocked', 'ifritah_gateway_oversized_payloads_total', 'ifritah_gateway_queue_write_errors_total') AND value > 0"
+      },
+      "trigger_condition": {
+        "period": 10,
+        "operator": ">=",
+        "threshold": 1,
+        "frequency": 5,
+        "frequency_type": "minutes",
+        "silence": 30
+      },
+      "destinations": [
+        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
+      ],
+      "enabled": false
+    }
+  ]
+}

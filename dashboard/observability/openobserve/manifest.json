@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "provisioning_version": "2026-09-19",
+  "product": "openobserve",
+  "tested_image": "public.ecr.aws/zinclabs/openobserve:v1.0.3",
+  "access": {
+    "audience": "operators",
+    "dashboard_proxying": false,
+    "credentials_source": "operator-managed OpenObserve credentials",
+    "notification_credentials_source": "external OpenObserve destination or notification relay"
+  },
+  "endpoint": {
+    "placeholder": "${OPENOBSERVE_ENDPOINT}",
+    "api_prefix": "/api",
+    "organization_placeholder": "${OPENOBSERVE_ORG}"
+  },
+  "retention": {
+    "mode": "per_stream",
+    "requires_operator_setting": "OBS_OPENOBSERVE_IGNORE_STREAM_RETENTION=false",
+    "note": "Per-stream retention stays enabled by default; set the variable to true only for an approved global-retention override."
+  },
+  "streams_file": "streams.json",
+  "dashboard_file": "dashboards/ifritah-operator.json",
+  "saved_views_file": "saved-views.json",
+  "alerts_file": "alerts.json",
+  "notification_example_file": "notifications.example.json",
+  "apply_script": "apply-openobserve.sh",
+  "streams": [
+    {
+      "name": "ifritah_logs_v1",
+      "type": "logs",
+      "retention_days": 14
+    },
+    {
+      "name": "ifritah_traces_v1",
+      "type": "traces",
+      "retention_days": 7
+    },
+    {
+      "name": "ifritah_metrics_v1",
+      "type": "metrics",
+      "retention_days": 15
+    },
+    {
+      "name": "ifritah_telemetry_health_v1",
+      "type": "logs",
+      "retention_days": 14
+    }
+  ],
+  "operator_workflows": [
+    "request and trace correlation",
+    "5xx, panic, exception, and authentication investigation",
+    "migration and deployment failure investigation",
+    "service error and latency review",
+    "host and container CPU, memory, disk, and restart review",
+    "collector drops, lag, queue, and parse health",
+    "OpenObserve health and ingestion review",
+    "bounded saved searches and alert templates"
+  ],
+  "notification_destination_env": "OPENOBSERVE_ALERT_DESTINATION_NAME"
+}

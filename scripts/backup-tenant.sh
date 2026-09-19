@@ -31,6 +31,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/lib.sh"
+deployment_init_logging
 
 # Parse flags early (before sourcing config for --config).
 CONFIG_FILE="$PROJECT_DIR/config.env"
@@ -81,9 +82,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
-log()  { echo -e "${GREEN}[+]${NC} $*"; }
-warn() { echo -e "${YELLOW}[!]${NC} $*"; }
-err()  { echo -e "${RED}[✗]${NC} $*" >&2; }
+log()  { deployment_log INFO "$*"; echo -e "${GREEN}[+]${NC} $*"; }
+warn() { deployment_log WARN "$*"; echo -e "${YELLOW}[!]${NC} $*"; }
+err()  { deployment_log ERROR "$*"; echo -e "${RED}[✗]${NC} $*" >&2; }
 
 if [ "${#LABEL}" -gt 120 ] || [[ "$LABEL" =~ [[:cntrl:]] ]]; then
     err "Backup label must be at most 120 characters and contain no control characters."
@@ -97,6 +98,7 @@ LAST_VERIFIED="true"
 
 backup_tenant() {
     local tenant="$1"
+    deployment_set_tenant "$tenant"
     local source="$STORAGE_ROOT/$tenant"
     local files_dest="" db_dest=""
     LAST_VERIFIED="true"

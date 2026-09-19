@@ -3,6 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+deployment_init_logging
 
 PROGRAM="${0##*/}"
 CONFIG_FILE="${CONFIG_FILE:-}"
@@ -56,6 +58,7 @@ USAGE
 }
 
 die() {
+    deployment_log ERROR "$PROGRAM: $*"
     echo "$PROGRAM: $*" >&2
     exit 1
 }

@@ -35,9 +35,9 @@ type signalConfig struct {
 
 var signals = []signalConfig{
 	{name: "logs", path: "/v1/logs", stream: "ifritah_logs_v1"},
-	{name: "metrics", path: "/v1/metrics", stream: "ifritah_metrics_v1"},
+	{name: "metrics", path: "/v1/metrics"},
 	{name: "traces", path: "/v1/traces", stream: "ifritah_traces_v1"},
-	{name: "health", path: "/v1/health", stream: "ifritah_telemetry_health_v1"},
+	{name: "health", path: "/v1/health"},
 }
 
 func signalByPath(path string) (signalConfig, bool) {
@@ -409,7 +409,9 @@ func (g *gateway) forward(ctx context.Context, signal signalConfig, payload []by
 	}
 	request.Header.Set("Content-Type", "application/x-protobuf")
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("stream-name", signal.stream)
+	if signal.stream != "" {
+		request.Header.Set("stream-name", signal.stream)
+	}
 	request.Header.Set("organization", "default")
 	if g.username != "" {
 		request.SetBasicAuth(g.username, g.password)
@@ -440,8 +442,8 @@ func (g *gateway) runWorker(ctx context.Context, signal signalConfig) {
 			case <-ctx.Done():
 				return
 			case <-time.After(500 * time.Millisecond):
-				continue
 			}
+			continue
 		}
 
 		payload, err := queue.read(file, g.maxBody)

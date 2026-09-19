@@ -114,6 +114,25 @@ discovery.relabel "frontend_allowlist" {
 	}
 }
 
+// Backend metrics are scraped from the private tenant-ingest network. The
+// target is rewritten from the allow-listed Dokku app name so no arbitrary
+// host/port can be supplied through container labels.
+discovery.relabel "backend_metrics" {
+	targets = discovery.relabel.backend_allowlist.output
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "^/?([a-z0-9][a-z0-9-]{0,61}-backend)(?:\\.[A-Za-z0-9_.-]+)?$"
+		target_label  = "__address__"
+		replacement   = "$1:8090"
+	}
+
+	rule {
+		target_label = "__metrics_path__"
+		replacement  = "/metrics"
+	}
+}
+
 loki.source.docker "dashboard" {
 	host       = "http://docker-api-filter-openobserve:2375"
 	targets    = discovery.relabel.dashboard_allowlist.output
@@ -133,6 +152,23 @@ loki.source.docker "frontend" {
 	targets    = discovery.relabel.frontend_allowlist.output
 	labels     = {"source" = "docker"}
 	forward_to = [loki.process.frontend.receiver]
+}
+
+prometheus.scrape "backend_http" {
+	job_name        = "ifritah-backend-http"
+	scrape_interval = "15s"
+	scrape_timeout  = "5s"
+	body_size_limit = "2MiB"
+	sample_limit    = 2048
+	label_limit     = 16
+	targets         = discovery.relabel.backend_metrics.output
+
+	authorization {
+		type        = "Bearer"
+		credentials = sys.env("OPENOBSERVE_TENANT_OTLP_TOKEN")
+	}
+
+	forward_to = [otelcol.receiver.prometheus.application.receiver]
 }
 
 // The three pipelines intentionally repeat the small normalization stage so
@@ -176,7 +212,9 @@ loki.process "backend" {
 		source      = "output"
 		expressions = {
 			event_time_input             = "event_time",
+			timestamp_input              = "time",
 			event_type_input             = "event_type",
+			message_input                = "msg",
 			severity_input               = "severity",
 			level_input                  = "level",
 			service_version_input        = "service_version",
@@ -204,8 +242,10 @@ loki.process "backend" {
 			user_id_input                = "user_id",
 			route_input                  = "route",
 			method_input                 = "method",
+			status_input                 = "status",
 			status_code_input            = "status_code",
 			status_class_input           = "status_class",
+			legacy_error_type_input      = "error.type",
 			duration_ms_input            = "duration_ms",
 			dependency_input             = "dependency",
 			attempt_input                = "attempt",
@@ -236,7 +276,7 @@ loki.process "backend" {
 
 	stage.template {
 		source   = "event_time_candidate"
-		template = `{{ .event_time_input | default .timestamp }}`
+		template = `{{ .event_time_input | default .timestamp_input | default .timestamp }}`
 	}
 
 	stage.regex {
@@ -278,7 +318,7 @@ loki.process "backend" {
 
 	stage.template {
 		source   = "event_type_candidate"
-		template = `{{ .event_type_input | default "runtime.lifecycle" }}`
+		template = `{{ .event_type_input | default .message_input | default "runtime.lifecycle" }}`
 	}
 
 	stage.regex {
@@ -298,7 +338,7 @@ loki.process "backend" {
 
 	stage.template {
 		source   = "operation_candidate"
-		template = `{{ .operation_input | default .event_type_input | default "unknown" }}`
+		template = `{{ .operation_input | default .event_type_input | default .message_input | default "unknown" }}`
 	}
 
 	stage.regex {
@@ -306,29 +346,33 @@ loki.process "backend" {
 		expression = `^(?P<operation_valid>[a-z0-9][a-z0-9_.:-]{0,95})$`
 	}
 
-	stage.template {
-		source   = "outcome"
-		template = `{{ $v := ToLower (.outcome_input | default "success") }}{{ if or (eq $v "success") (eq $v "rejected") (eq $v "conflict") (eq $v "timeout") (eq $v "failure") (eq $v "degraded") (eq $v "dropped") }}{{ $v }}{{ else }}degraded{{ end }}`
-	}
-
 	stage.regex {
 		source     = "error_code_input"
 		expression = `^(?P<error_code_valid>[a-z0-9][a-z0-9_.:-]{0,95})$`
 	}
 
+	stage.template {
+		source   = "error_type_candidate"
+		template = `{{ .error_type_input | default .legacy_error_type_input }}`
+	}
+
 	stage.regex {
-		source     = "error_type_input"
+		source     = "error_type_candidate"
 		expression = `^(?P<error_type_valid>[a-z0-9][a-z0-9_.:-]{0,127})$`
 	}
 
 	stage.template {
 		source   = "tenant_candidate"
-		template = `{{ .tenant_id }}`
+		template = `{{ .tenant_id | default .tenant_input }}`
 	}
 
 	stage.regex {
 		source     = "tenant_candidate"
 		expression = `^(?P<tenant_valid>[a-z0-9][a-z0-9-]{0,62})$`
+	}
+
+	stage.label_drop {
+		values = ["tenant_id"]
 	}
 
 	stage.regex {
@@ -396,14 +440,39 @@ loki.process "backend" {
 		expression = `^(?P<method_valid>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|CONNECT|TRACE)$`
 	}
 
+	stage.template {
+		source   = "status_code_candidate"
+		template = `{{ .status_code_input | default .status_input }}`
+	}
+
 	stage.regex {
-		source     = "status_code_input"
+		source     = "status_code_candidate"
 		expression = `^(?P<status_valid>[1-5][0-9]{2})$`
 	}
 
 	stage.regex {
-		source     = "status_class_input"
+		source     = "status_code_candidate"
+		expression = `^(?P<status_class_from_code>[1-5])[0-9]{2}$`
+	}
+
+	stage.template {
+		source   = "status_class_candidate"
+		template = `{{ if .status_class_input }}{{ .status_class_input }}{{ else if .status_class_from_code }}{{ .status_class_from_code }}xx{{ else }}other{{ end }}`
+	}
+
+	stage.regex {
+		source     = "status_class_candidate"
 		expression = `^(?P<status_class_valid>[1-5]xx|other)$`
+	}
+
+	stage.template {
+		source   = "outcome_candidate"
+		template = `{{ if .outcome_input }}{{ .outcome_input }}{{ else if eq .status_class_candidate "4xx" }}rejected{{ else if eq .status_class_candidate "5xx" }}failure{{ else }}success{{ end }}`
+	}
+
+	stage.template {
+		source   = "outcome"
+		template = `{{ $v := ToLower (.outcome_candidate | default "success") }}{{ if or (eq $v "success") (eq $v "rejected") (eq $v "conflict") (eq $v "timeout") (eq $v "failure") (eq $v "degraded") (eq $v "dropped") }}{{ $v }}{{ else }}degraded{{ end }}`
 	}
 
 	stage.regex {
@@ -541,7 +610,9 @@ loki.process "frontend" {
 		source      = "output"
 		expressions = {
 			event_time_input             = "event_time",
+			timestamp_input              = "time",
 			event_type_input             = "event_type",
+			message_input                = "msg",
 			severity_input               = "severity",
 			level_input                  = "level",
 			service_version_input        = "service_version",
@@ -569,8 +640,10 @@ loki.process "frontend" {
 			user_id_input                = "user_id",
 			route_input                  = "route",
 			method_input                 = "method",
+			status_input                 = "status",
 			status_code_input            = "status_code",
 			status_class_input           = "status_class",
+			legacy_error_type_input      = "error.type",
 			duration_ms_input            = "duration_ms",
 			dependency_input             = "dependency",
 			attempt_input                = "attempt",
@@ -601,7 +674,7 @@ loki.process "frontend" {
 
 	stage.template {
 		source   = "event_time_candidate"
-		template = `{{ .event_time_input | default .timestamp }}`
+		template = `{{ .event_time_input | default .timestamp_input | default .timestamp }}`
 	}
 
 	stage.regex {
@@ -643,7 +716,7 @@ loki.process "frontend" {
 
 	stage.template {
 		source   = "event_type_candidate"
-		template = `{{ .event_type_input | default "runtime.lifecycle" }}`
+		template = `{{ .event_type_input | default .message_input | default "runtime.lifecycle" }}`
 	}
 
 	stage.regex {
@@ -663,7 +736,7 @@ loki.process "frontend" {
 
 	stage.template {
 		source   = "operation_candidate"
-		template = `{{ .operation_input | default .event_type_input | default "unknown" }}`
+		template = `{{ .operation_input | default .event_type_input | default .message_input | default "unknown" }}`
 	}
 
 	stage.regex {
@@ -671,29 +744,33 @@ loki.process "frontend" {
 		expression = `^(?P<operation_valid>[a-z0-9][a-z0-9_.:-]{0,95})$`
 	}
 
-	stage.template {
-		source   = "outcome"
-		template = `{{ $v := ToLower (.outcome_input | default "success") }}{{ if or (eq $v "success") (eq $v "rejected") (eq $v "conflict") (eq $v "timeout") (eq $v "failure") (eq $v "degraded") (eq $v "dropped") }}{{ $v }}{{ else }}degraded{{ end }}`
-	}
-
 	stage.regex {
 		source     = "error_code_input"
 		expression = `^(?P<error_code_valid>[a-z0-9][a-z0-9_.:-]{0,95})$`
 	}
 
+	stage.template {
+		source   = "error_type_candidate"
+		template = `{{ .error_type_input | default .legacy_error_type_input }}`
+	}
+
 	stage.regex {
-		source     = "error_type_input"
+		source     = "error_type_candidate"
 		expression = `^(?P<error_type_valid>[a-z0-9][a-z0-9_.:-]{0,127})$`
 	}
 
 	stage.template {
 		source   = "tenant_candidate"
-		template = `{{ .tenant_id }}`
+		template = `{{ .tenant_id | default .tenant_input }}`
 	}
 
 	stage.regex {
 		source     = "tenant_candidate"
 		expression = `^(?P<tenant_valid>[a-z0-9][a-z0-9-]{0,62})$`
+	}
+
+	stage.label_drop {
+		values = ["tenant_id"]
 	}
 
 	stage.regex {
@@ -761,14 +838,39 @@ loki.process "frontend" {
 		expression = `^(?P<method_valid>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|CONNECT|TRACE)$`
 	}
 
+	stage.template {
+		source   = "status_code_candidate"
+		template = `{{ .status_code_input | default .status_input }}`
+	}
+
 	stage.regex {
-		source     = "status_code_input"
+		source     = "status_code_candidate"
 		expression = `^(?P<status_valid>[1-5][0-9]{2})$`
 	}
 
 	stage.regex {
-		source     = "status_class_input"
+		source     = "status_code_candidate"
+		expression = `^(?P<status_class_from_code>[1-5])[0-9]{2}$`
+	}
+
+	stage.template {
+		source   = "status_class_candidate"
+		template = `{{ if .status_class_input }}{{ .status_class_input }}{{ else if .status_class_from_code }}{{ .status_class_from_code }}xx{{ else }}other{{ end }}`
+	}
+
+	stage.regex {
+		source     = "status_class_candidate"
 		expression = `^(?P<status_class_valid>[1-5]xx|other)$`
+	}
+
+	stage.template {
+		source   = "outcome_candidate"
+		template = `{{ if .outcome_input }}{{ .outcome_input }}{{ else if eq .status_class_candidate "4xx" }}rejected{{ else if eq .status_class_candidate "5xx" }}failure{{ else }}success{{ end }}`
+	}
+
+	stage.template {
+		source   = "outcome"
+		template = `{{ $v := ToLower (.outcome_candidate | default "success") }}{{ if or (eq $v "success") (eq $v "rejected") (eq $v "conflict") (eq $v "timeout") (eq $v "failure") (eq $v "degraded") (eq $v "dropped") }}{{ $v }}{{ else }}degraded{{ end }}`
 	}
 
 	stage.regex {
@@ -906,7 +1008,9 @@ loki.process "dashboard" {
 		source      = "output"
 		expressions = {
 			event_time_input             = "event_time",
+			timestamp_input              = "time",
 			event_type_input             = "event_type",
+			message_input                = "msg",
 			severity_input               = "severity",
 			level_input                  = "level",
 			service_version_input        = "service_version",
@@ -934,8 +1038,10 @@ loki.process "dashboard" {
 			user_id_input                = "user_id",
 			route_input                  = "route",
 			method_input                 = "method",
+			status_input                 = "status",
 			status_code_input            = "status_code",
 			status_class_input           = "status_class",
+			legacy_error_type_input      = "error.type",
 			duration_ms_input            = "duration_ms",
 			dependency_input             = "dependency",
 			attempt_input                = "attempt",
@@ -966,7 +1072,7 @@ loki.process "dashboard" {
 
 	stage.template {
 		source   = "event_time_candidate"
-		template = `{{ .event_time_input | default .timestamp }}`
+		template = `{{ .event_time_input | default .timestamp_input | default .timestamp }}`
 	}
 
 	stage.regex {
@@ -1008,7 +1114,7 @@ loki.process "dashboard" {
 
 	stage.template {
 		source   = "event_type_candidate"
-		template = `{{ if .script_input }}deployment.operation{{ else }}{{ .event_type_input | default "runtime.lifecycle" }}{{ end }}`
+		template = `{{ if .script_input }}deployment.operation{{ else }}{{ .event_type_input | default .message_input | default "runtime.lifecycle" }}{{ end }}`
 	}
 
 	stage.regex {
@@ -1028,7 +1134,7 @@ loki.process "dashboard" {
 
 	stage.template {
 		source   = "operation_candidate"
-		template = `{{ .operation_input | default "deployment.operation" }}`
+		template = `{{ .operation_input | default .event_type_input | default .message_input | default "deployment.operation" }}`
 	}
 
 	stage.regex {
@@ -1038,7 +1144,7 @@ loki.process "dashboard" {
 
 	stage.template {
 		source   = "outcome"
-		template = `{{ $v := ToLower (.outcome_input | default "success") }}{{ if or (eq $v "success") (eq $v "rejected") (eq $v "conflict") (eq $v "timeout") (eq $v "failure") (eq $v "degraded") (eq $v "dropped") }}{{ $v }}{{ else }}degraded{{ end }}`
+		template = `{{ $v := ToLower (.outcome_candidate | default "success") }}{{ if or (eq $v "success") (eq $v "rejected") (eq $v "conflict") (eq $v "timeout") (eq $v "failure") (eq $v "degraded") (eq $v "dropped") }}{{ $v }}{{ else }}degraded{{ end }}`
 	}
 
 	stage.regex {
@@ -1046,8 +1152,13 @@ loki.process "dashboard" {
 		expression = `^(?P<error_code_valid>[a-z0-9][a-z0-9_.:-]{0,95})$`
 	}
 
+	stage.template {
+		source   = "error_type_candidate"
+		template = `{{ .error_type_input | default .legacy_error_type_input }}`
+	}
+
 	stage.regex {
-		source     = "error_type_input"
+		source     = "error_type_candidate"
 		expression = `^(?P<error_type_valid>[a-z0-9][a-z0-9_.:-]{0,127})$`
 	}
 
@@ -1126,14 +1237,39 @@ loki.process "dashboard" {
 		expression = `^(?P<method_valid>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|CONNECT|TRACE)$`
 	}
 
+	stage.template {
+		source   = "status_code_candidate"
+		template = `{{ .status_code_input | default .status_input }}`
+	}
+
 	stage.regex {
-		source     = "status_code_input"
+		source     = "status_code_candidate"
 		expression = `^(?P<status_valid>[1-5][0-9]{2})$`
 	}
 
 	stage.regex {
-		source     = "status_class_input"
+		source     = "status_code_candidate"
+		expression = `^(?P<status_class_from_code>[1-5])[0-9]{2}$`
+	}
+
+	stage.template {
+		source   = "status_class_candidate"
+		template = `{{ if .status_class_input }}{{ .status_class_input }}{{ else if .status_class_from_code }}{{ .status_class_from_code }}xx{{ else }}other{{ end }}`
+	}
+
+	stage.regex {
+		source     = "status_class_candidate"
 		expression = `^(?P<status_class_valid>[1-5]xx|other)$`
+	}
+
+	stage.template {
+		source   = "outcome_candidate"
+		template = `{{ if .outcome_input }}{{ .outcome_input }}{{ else if eq .status_class_candidate "4xx" }}rejected{{ else if eq .status_class_candidate "5xx" }}failure{{ else }}success{{ end }}`
+	}
+
+	stage.template {
+		source   = "outcome"
+		template = `{{ $v := ToLower (.outcome_candidate | default "success") }}{{ if or (eq $v "success") (eq $v "rejected") (eq $v "conflict") (eq $v "timeout") (eq $v "failure") (eq $v "degraded") (eq $v "dropped") }}{{ $v }}{{ else }}degraded{{ end }}`
 	}
 
 	stage.regex {
@@ -1310,7 +1446,7 @@ otelcol.processor.transform "sanitize" {
 		context    = "resource"
 		statements = [
 			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
-			`set(attributes["service.name"], "ifritah-tenant")`,
+			`set(attributes["service.name"], "ifritah-tenant") where not IsMatch(attributes["service.name"], "^ifritah-(backend|frontend)$")`,
 			`keep_keys(attributes, ["service.name", "service.version", "deployment.environment.name", "component", "cluster", "host.role", "container.role", "image.channel"])`,
 			`truncate_all(attributes, 128)`,
 		]
@@ -1320,11 +1456,19 @@ otelcol.processor.transform "sanitize" {
 		context    = "span"
 		statements = [
 			`set(attributes["request_id"], attributes["request.id"]) where attributes["request.id"] != nil`,
+			`set(attributes["method"], attributes["http.request.method"]) where attributes["http.request.method"] != nil`,
+			`set(attributes["route"], attributes["http.route"]) where attributes["http.route"] != nil`,
+			`set(attributes["status_code"], attributes["http.response.status_code"]) where attributes["http.response.status_code"] != nil`,
+			`set(attributes["error_type"], attributes["error.type"]) where attributes["error.type"] != nil`,
+			`set(attributes["error_type"], attributes["exception.type"]) where attributes["error_type"] == nil and attributes["exception.type"] != nil`,
+			`set(attributes["operation"], attributes["ifritah.operation"]) where attributes["ifritah.operation"] != nil`,
+			`set(attributes["operation"], attributes["db.operation.name"]) where attributes["operation"] == nil and attributes["db.operation.name"] != nil`,
+			`set(attributes["operation"], attributes["messaging.operation.type"]) where attributes["operation"] == nil and attributes["messaging.operation.type"] != nil`,
+			`set(attributes["duration_ms"], (end_time_unix_nano - start_time_unix_nano) / 1000000)`,
 			`delete_key(attributes, "service_name")`,
-			`delete_key(attributes, "tenant_id")`,
 			`set(attributes["service_name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil`,
 			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw|stacktrace).*")`,
-			`keep_keys(attributes, ["service_name", "request_id", "company_id", "actor_id", "operation_id", "job_id", "http.request.method", "http.route", "http.response.status_code", "db.system", "messaging.system", "error.type", "resource_type", "resource_id"])`,
+			`keep_keys(attributes, ["service_name", "request_id", "company_id", "actor_id", "operation_id", "job_id", "method", "route", "status_code", "duration_ms", "operation", "error_type", "db.system", "messaging.system", "resource_type", "resource_id"])`,
 			`truncate_all(attributes, 256)`,
 		]
 	}
@@ -1333,7 +1477,7 @@ otelcol.processor.transform "sanitize" {
 		context    = "resource"
 		statements = [
 			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
-			`set(attributes["service.name"], "ifritah-tenant")`,
+			`set(attributes["service.name"], "ifritah-tenant") where attributes["service.name"] == nil`,
 			`keep_keys(attributes, ["service.name", "service.version", "deployment.environment.name", "component", "cluster", "host.role", "container.role", "image.channel"])`,
 			`truncate_all(attributes, 64)`,
 		]
@@ -1343,7 +1487,7 @@ otelcol.processor.transform "sanitize" {
 		context    = "datapoint"
 		statements = [
 			`delete_matching_keys(attributes, "(?i).*(tenant|request|trace|span|actor|user|resource|digest|authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
-			`set(attributes["service_name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil`,
+			`set(attributes["service_name"], resource.attributes["service.name"]) where attributes["service_name"] == nil and resource.attributes["service.name"] != nil`,
 			`keep_keys(attributes, ["service_name", "deployment_environment", "dependency", "operation", "outcome", "method", "route", "status_class", "container_role", "host_role", "device", "interface", "mountpoint", "mode", "cpu"])`,
 			`truncate_all(attributes, 64)`,
 		]
@@ -1365,6 +1509,9 @@ otelcol.processor.transform "sanitize" {
 			`replace_pattern(body, "(?s)^(.{0,1000}).*$", "$1[TRUNCATED]") where IsString(body) and Len(body) > 1000`,
 			`merge_maps(attributes, ParseJSON(body), "upsert") where IsString(body) and IsMatch(body, "^\\s*\\{")`,
 			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`delete_key(attributes, "tenant_id")`,
+			`delete_key(attributes, "tenant_scope")`,
+			`delete_key(attributes, "tenant")`,
 			`set(attributes["service_name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil`,
 			`keep_keys(attributes, ["schema_version", "event_time", "signal", "event_type", "severity", "service_name", "service_version", "deployment_environment", "component", "operation", "outcome", "error_code", "error_type", "request_id", "trace_id", "span_id", "parent_span_id", "origin_request_id", "origin_trace_id", "operation_id", "job_id", "tenant_scope", "tenant_id", "company_id", "actor_id", "route", "method", "status_code", "status_class", "duration_ms", "dependency", "attempt", "retryable", "build_version", "build_commit", "image_digest", "image_channel", "scripts_revision", "deployment_stage", "script", "resource_type", "resource_id", "resource_id_hashed", "redaction_applied", "redaction_rules", "container_role"])`,
 			`truncate_all(attributes, 256)`,
@@ -1398,25 +1545,12 @@ prometheus.scrape "host_resources" {
 	body_size_limit = "2MiB"
 	sample_limit    = 2048
 	label_limit     = 32
-	targets         = [{"__address__" = "node-exporter-openobserve:9100"}]
-	forward_to      = [prometheus.relabel.host_resources.receiver]
-}
-
-prometheus.relabel "host_resources" {
-	max_cache_size = 256
-	forward_to     = [otelcol.receiver.prometheus.resources.receiver]
-
-	rule {
-		action        = "keep"
-		source_labels = ["__name__"]
-		regex         = "node_cpu_seconds_total|node_memory_(MemTotal|MemAvailable|MemFree|Buffers|Cached)_bytes|node_filesystem_(avail|free|size)_bytes|node_network_(receive|transmit)_bytes_total|node_network_up"
-	}
-
-	rule {
-		action       = "replace"
-		target_label = "host_role"
-		replacement  = "deployment"
-	}
+	targets         = [{
+		"__address__"  = "node-exporter-openobserve:9100",
+		"service_name" = "ifritah-node-exporter",
+		"host_role"    = "deployment",
+	}]
+	forward_to = [otelcol.receiver.prometheus.direct.receiver]
 }
 
 prometheus.scrape "container_resources" {
@@ -1426,33 +1560,21 @@ prometheus.scrape "container_resources" {
 	body_size_limit = "2MiB"
 	sample_limit    = 1024
 	label_limit     = 16
-	targets         = [{"__address__" = "resource-exporter-openobserve:8080"}]
-	forward_to      = [prometheus.relabel.container_resources.receiver]
+	targets         = [{
+		"__address__"  = "resource-exporter-openobserve:8080",
+		"service_name" = "ifritah-resource-exporter",
+		"host_role"    = "deployment",
+	}]
+	forward_to = [otelcol.receiver.prometheus.direct.receiver]
 }
 
-prometheus.relabel "container_resources" {
-	max_cache_size = 256
-	forward_to     = [otelcol.receiver.prometheus.resources.receiver]
-
-	rule {
-		action        = "keep"
-		source_labels = ["__name__"]
-		regex         = "ifritah_container_.*|ifritah_resource_exporter_.*"
-	}
-
-	rule {
-		action = "labeldrop"
-		regex  = "(instance|job|container_id|container_name|tenant_id|request_id|trace_id|span_id|resource_id)"
-	}
-
-	rule {
-		action       = "replace"
-		target_label = "host_role"
-		replacement  = "deployment"
+otelcol.receiver.prometheus "direct" {
+	output {
+		metrics = [otelcol.processor.memory_limiter.main.input]
 	}
 }
 
-otelcol.receiver.prometheus "resources" {
+otelcol.receiver.prometheus "application" {
 	output {
 		metrics = [otelcol.processor.memory_limiter.main.input]
 	}
@@ -1469,76 +1591,23 @@ prometheus.scrape "collector_health" {
 	sample_limit    = 2048
 	label_limit     = 16
 	targets         = [
-		{"__address__" = "127.0.0.1:12345"},
-		{"__address__" = "openobserve-gateway:8080"},
+		{
+			"__address__"  = "127.0.0.1:12345",
+			"service_name" = "ifritah-alloy",
+			"component"    = "collector",
+		},
+		{
+			"__address__"  = "openobserve-gateway:8080",
+			"service_name" = "ifritah-openobserve-gateway",
+			"component"    = "gateway",
+		},
 	]
-	forward_to = [prometheus.relabel.collector_health.receiver]
+	forward_to = [otelcol.receiver.prometheus.health_direct.receiver]
 }
 
-prometheus.relabel "collector_health" {
-	max_cache_size = 256
-	forward_to     = [otelcol.receiver.prometheus.health.receiver]
-
-	rule {
-		action        = "keep"
-		source_labels = ["__name__"]
-		regex         = "(alloy|otelcol|loki_process|prometheus|ifritah_gateway|ifritah_resource_exporter)_.*"
-	}
-
-	rule {
-		action = "labeldrop"
-		regex  = "(instance|job|endpoint|url|container_id|container_name|tenant_id|request_id|trace_id|span_id|resource_id)"
-	}
-}
-
-otelcol.receiver.prometheus "health" {
+otelcol.receiver.prometheus "health_direct" {
 	output {
-		metrics = [otelcol.processor.memory_limiter.health.input]
-	}
-}
-
-otelcol.processor.memory_limiter "health" {
-	check_interval = "1s"
-	limit          = "32MiB"
-	spike_limit    = "8MiB"
-
-	output {
-		metrics = [otelcol.processor.transform.health.input]
-	}
-}
-
-otelcol.processor.transform "health" {
-	error_mode = "ignore"
-
-	metric_statements {
-		context    = "resource"
-		statements = [
-			`keep_keys(attributes, ["service.name", "service.version", "deployment.environment.name", "host.role", "container.role"])`,
-			`truncate_all(attributes, 64)`,
-		]
-	}
-
-	metric_statements {
-		context    = "datapoint"
-		statements = [
-			`delete_matching_keys(attributes, "(?i).*(tenant|request|trace|span|actor|user|resource|digest).*")`,
-			`keep_keys(attributes, ["signal", "status_class", "reason", "container_role", "host_role"])`,
-			`truncate_all(attributes, 64)`,
-		]
-	}
-
-	output {
-		metrics = [otelcol.processor.batch.health.input]
-	}
-}
-
-otelcol.processor.batch "health" {
-	timeout             = "10s"
-	send_batch_size     = 64
-	send_batch_max_size = 64
-
-	output {
-		metrics = [otelcol.exporter.otlphttp.health.input]
+		metrics = [otelcol.processor.memory_limiter.main.input]
 	}
 }
 

@@ -48,10 +48,11 @@ The defaults are intentionally conservative:
 | `OBS_OPENOBSERVE_MAX_BODY_BYTES` | `4194304` | Maximum OTLP request body |
 | `OBS_OPENOBSERVE_RESOURCE_POLL_INTERVAL` | `15s` | Resource exporter poll interval |
 
-Do not bind the service to `0.0.0.0` unless an operator-approved firewall and
-authenticated TLS reverse-proxy path are in place. The Compose network remains
-internal-only; the gRPC/OTLP port is exposed only to future services on that
-network and is not published to the host.
+Do not bind the UI edge to `0.0.0.0` unless an operator-approved firewall and
+authenticated TLS reverse-proxy path are in place. OpenObserve and telemetry
+services remain on internal-only networks; a dedicated Nginx UI edge owns the
+single configurable host port. The gRPC/OTLP port is exposed only to services
+on the internal network and is not published to the host.
 
 The ignored env example sets
 `OBS_OPENOBSERVE_IGNORE_STREAM_RETENTION=false`, so the stream-specific
@@ -74,8 +75,8 @@ the profile:
 3. Keep `OPENOBSERVE_TENANT_TELEMETRY_ENABLED=false` until the private profile
    is healthy. Tenant trace wiring is a second, explicit opt-in and must use
    only the fixed internal network.
-4. Confirm the loopback bind, `Internal=true` network, and absence of
-   host-published OTLP/collector ports before connecting any tenant. Never
+4. Confirm the loopback UI edge bind, `Internal=true` core/ingest networks, and
+   absence of host-published OTLP/collector ports before connecting any tenant. Never
    paste rendered Compose configuration into a ticket because it can contain
    environment-file values.
    The required absence of host-published OTLP/collector ports is a release
@@ -125,9 +126,13 @@ ssh -N -L 5080:127.0.0.1:5080 operator@server
 
 The profile builds the two small deployment-only Go images locally from pinned
 builder bases. No image registry or production rollout is part of this
-workstream. The collector exposes no host ports: Docker API, OTLP, exporter,
-gateway health, and node-exporter endpoints are reachable only on the
-internal `ifritah-observability-openobserve` network.
+workstream. The collector exposes no host ports. OpenObserve, gateway, Docker
+API, exporters, and health endpoints stay on the internal
+`ifritah-observability-openobserve-core` network. The dedicated Nginx UI edge is
+the only host-published service and is attached to core plus its isolated
+publish network. Tenant applications join only
+`ifritah-observability-openobserve-ingest`; Alloy is the sole bridge between
+core and ingest.
 
 ## Opt in tenant applications
 
@@ -136,7 +141,7 @@ first, then edit the deployment checkout's protected `config.env`:
 
 ```sh
 OPENOBSERVE_TENANT_TELEMETRY_ENABLED=true
-OPENOBSERVE_NETWORK_NAME=ifritah-observability-openobserve
+OPENOBSERVE_NETWORK_NAME=ifritah-observability-openobserve-ingest
 ```
 
 The lifecycle scripts accept only that exact, approved Docker network name.
@@ -186,7 +191,9 @@ payload.
 Verify the private boundary and backend values:
 
 ```sh
-docker network inspect ifritah-observability-openobserve \
+docker network inspect ifritah-observability-openobserve-ingest \
+  --format '{{.Internal}}'                  # must print true
+docker network inspect ifritah-observability-openobserve-core \
   --format '{{.Internal}}'                  # must print true
 dokku config:get acme-backend OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
 dokku config:get acme-backend OTEL_TRACES_EXPORTER
@@ -268,8 +275,8 @@ network. Its `ifritah_gateway_queue_bytes{signal=...}` and
 without exposing payloads. Logs, metrics, and traces have separate queue
 directories and each is capped at `OBS_OPENOBSERVE_QUEUE_MAX_BYTES` (64 MiB by
 default). Retry backoff is capped at 30 seconds. Health metrics are accepted
-on the gateway's private `/v1/health` intake and forwarded to the OpenObserve
-metrics endpoint with the `ifritah_telemetry_health_v1` stream name.
+on the gateway's private `/v1/health` intake and forwarded to native
+per-metric OpenObserve streams.
 
 If OpenObserve is unavailable, Alloy and the gateway retry within their
 bounds, then drop records after the configured caps. A `401`/`403` pauses
@@ -286,10 +293,10 @@ The provisioning bundle is deterministic and versioned in
 
 | Artifact | Purpose |
 |---|---|
-| `streams.json` | Four contract streams and pilot stream-retention settings |
+| `streams.json` | Three contract streams plus native metric-stream retention policy |
 | `dashboards/ifritah-operator.json` | Operator dashboard import |
 | `saved-views.json` | Request/trace, error, deployment, resource, and pipeline searches |
-| `alerts.json` | Disabled SQL alert templates with an external destination placeholder |
+| `alerts.json` | Disabled SQL and PromQL alert templates with an external destination placeholder |
 | `notifications.example.json` | Placeholder-only notification wiring example |
 | `apply-openobserve.sh` | Authenticated stream/dashboard/saved-view/alert apply |
 
@@ -323,12 +330,18 @@ OPENOBSERVE_PASSWORD="$ZO_ROOT_USER_PASSWORD" \
   observability/openobserve/apply-openobserve.sh
 ```
 
+When credentials come from a file-mounted secret, set
+`OPENOBSERVE_PASSWORD_FILE` instead of placing the password in a shell
+environment variable. The file must contain only the OpenObserve password and
+must be readable by the operator process.
+
 Use OpenObserve organization roles or the operator's reverse-proxy policy to
 keep the UI, saved views, dashboards, streams, and alerts operator-only. The
 deployment dashboard must not proxy these resources to tenant users.
 
-The default apply creates or updates the four streams, the
-`Ifritah OpenObserve Operations` dashboard, and saved views. Alert templates
+The default apply creates or updates the three contract streams, applies
+retention to discovered native metric streams, and updates the
+`Ifritah OpenObserve Operations` dashboard and saved views. Alert templates
 are skipped until an operator configures a destination outside this repository.
 When alert application is explicitly enabled, existing saved views and alerts
 are updated by their API IDs rather than silently skipped. Existing alert
@@ -398,10 +411,15 @@ The dashboard and searches use record fields, not metric labels or stream
 partitions.
 
 The artifact retention defaults are 14 days for logs, 7 days for traces,
-15 days for metrics, and 14 days for telemetry health. Verify the effective
-values in the OpenObserve stream settings after applying them. The Compose
-profile's global retention value remains unchanged by this workstream; the
-protected env setting above is what allows the per-stream values to apply.
+15 days for native metric streams, and 14 days for telemetry health. Native
+metrics create one OpenObserve stream per metric family, so dashboards and
+alerts use PromQL instead of querying a synthetic aggregate stream. The
+provisioning script applies 15-day retention to existing allow-listed metric
+streams (`ifritah_`, `node_`, `alloy_`, `otelcol_`, and `prometheus_`); rerun it
+after a new metric family first appears. Verify effective values in stream
+settings after applying them. The Compose profile's global retention value
+remains unchanged by this workstream; the protected env setting above is what
+allows per-stream values to apply.
 If the pinned OpenObserve build still treats the global value as a shorter cap,
 record the approved retention decision and update the deployment profile in a
 separate reviewed change rather than silently claiming the per-stream value is
@@ -491,19 +509,22 @@ operator UI or API:
 1. Delete `Ifritah OpenObserve Operations`.
 2. Delete the saved views whose names start with `Ifritah -`.
 3. Stop or reroute the collector before deleting any contract stream.
-4. Delete `ifritah_logs_v1`, `ifritah_traces_v1`,
-   `ifritah_metrics_v1`, and `ifritah_telemetry_health_v1` only when the
-   resulting telemetry loss is approved.
+4. Delete `ifritah_logs_v1`, `ifritah_traces_v1`, and
+   `ifritah_telemetry_health_v1` only when the resulting telemetry loss is
+   approved. Remove native metric streams matching the documented allow-list
+   only when metric history loss is approved.
 
 Do not delete the named `/data` volume for a UI rollback. Preserve the image
 digest, artifact version, and resource IDs in the change record. A service
 restart or `docker compose ... down` without `--volumes` leaves the data
 available for a later re-apply. For full profile removal, first stop the
-collector, run `docker network inspect ifritah-observability-openobserve`, and
-remove the network only when its container list is empty:
+collector, inspect both `ifritah-observability-openobserve-ingest` and
+`ifritah-observability-openobserve-core`, and remove them only when their
+container lists are empty:
 
 ```sh
-docker network rm ifritah-observability-openobserve
+docker network rm ifritah-observability-openobserve-ingest
+docker network rm ifritah-observability-openobserve-core
 ```
 
 Never remove the named data, gateway, or Alloy volumes as part of a routine

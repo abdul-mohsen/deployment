@@ -66,6 +66,13 @@ normative.
    a separate audit/security policy is preserved. A security event MAY be
    correlated with telemetry, but OpenObserve retention and operator logs MUST
    NOT be treated as an immutable audit archive.
+9. **Network roles are separated.** Tenant applications MUST join only
+   `ifritah-observability-openobserve-ingest`. OpenObserve, the gateway, the
+   filtered Docker API, exporters, and collector storage MUST join only
+   `ifritah-observability-openobserve-core`. Alloy MAY join both networks and
+   is the only bridge. Its admin listener MUST bind loopback inside the
+   container; tenant applications MUST NOT reach gateway, Docker API,
+   exporter, health, or OpenObserve ports.
 
 ## 2. Signals and stream names
 
@@ -76,8 +83,14 @@ contract version and is not a tenant name:
 |---|---|---|---:|
 | `ifritah_logs_v1` | Logs | JSON application, dashboard, and deployment events | 14 days |
 | `ifritah_traces_v1` | Traces | OTLP spans and span events | 7 days |
-| `ifritah_metrics_v1` | Metrics | OTLP/application, host, and container metrics | 15 days |
 | `ifritah_telemetry_health_v1` | Pipeline health | Collector/export/drop/parse health | 14 days |
+
+Native OpenObserve OTLP metrics are stored in one metrics stream per metric
+family, not in one arbitrary aggregate stream. Metric names are therefore
+queried through PromQL. The provisioning policy applies 15-day retention to
+allow-listed metric streams whose names start with `ifritah_`, `node_`,
+`alloy_`, `otelcol_`, or `prometheus_`; rerun provisioning after a new metric
+family first appears.
 
 The pilot defaults are inside the already-approved operating ranges:
 
@@ -508,6 +521,13 @@ Future metrics MAY add only reviewed bounded labels such as
 by tenant/user/request/trace/span/resource IDs, SKU, VIN, invoice number,
 raw URL, error text, image digest, or arbitrary exception type.
 
+OpenObserve `v1.0.3` native OTLP metric ingestion may expose constant transport
+metadata labels such as `flag`, `start_time`, and
+`instrumentation_library_name`/`instrumentation_library_version` in PromQL
+results. These labels are bounded implementation metadata, not application
+dimensions; dashboards and alerts MUST NOT group by them. The collector still
+MUST remove unapproved application/resource attributes before export.
+
 Recommended resource metric names are:
 
 ```text
@@ -711,7 +731,7 @@ contract:
 | Dashboard access middleware | request ID, route, method, status, duration, normalized client IP; no headers/cookies/query/body | `http.request.completed` with optional `client_ip` |
 | Shell `lib.sh` | UTC timestamp, severity, script, `operation_id`, sanitized tenant, bounded message, command-free `ERR` trap | `deployment.operation`; parse only reviewed operation/stage/error fields |
 | Current Alloy/Loki profile | Dashboard-only labelled collection, private network, persistent positions, bounded local retention | Keep unchanged and separate from the OpenObserve collector profile |
-| OpenObserve Alloy profile | Allow-listed Docker JSON/logfmt parsing, canonical field validation, OTLP intake, attribute allow-lists, bounded batches, private gateway export | `ifritah_logs_v1`, `ifritah_traces_v1`, and `ifritah_metrics_v1`; no direct OpenObserve egress |
+| OpenObserve Alloy profile | Allow-listed Docker JSON/logfmt parsing, canonical field validation, OTLP intake, attribute allow-lists, bounded batches, private gateway export | `ifritah_logs_v1`, `ifritah_traces_v1`, native per-metric streams, and `ifritah_telemetry_health_v1`; no direct OpenObserve egress |
 | OpenObserve gateway | Separate 64 MiB-per-signal durable queues, bounded retries, status-aware drops, auth/schema health, private forwarding | `ifritah_*_v1` streams with health metrics in `ifritah_telemetry_health_v1` |
 | OpenObserve resource path | Filtered read-only Docker API, dashboard/tenant role allow-list, node-exporter host mounts, role-only aggregation | Host/container CPU, memory, disk, network, running, restart, and collector health metrics |
 

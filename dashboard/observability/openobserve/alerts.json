@@ -159,11 +159,16 @@
     {
       "name": "Ifritah - Resource pressure",
       "stream_type": "metrics",
-      "stream_name": "ifritah_metrics_v1",
-      "description": "Notify when a resource metric reports a bounded pressure value.",
+      "stream_name": "ifritah_container_cpu_usage_ratio",
+      "description": "Notify when approved container-role CPU exceeds 90 percent.",
       "query_condition": {
-        "type": "sql",
-        "sql": "SELECT MAX(value) * 100 AS alert_value FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND metric_name = 'ifritah_container_cpu_usage_ratio'"
+        "type": "promql",
+        "promql": "100 * max by (container_role) (ifritah_container_cpu_usage_ratio)",
+        "promql_condition": {
+          "column": "value",
+          "operator": ">=",
+          "value": 90
+        }
       },
       "trigger_condition": {
         "period": 10,
@@ -181,11 +186,16 @@
     {
       "name": "Ifritah - Container memory pressure",
       "stream_type": "metrics",
-      "stream_name": "ifritah_metrics_v1",
+      "stream_name": "ifritah_container_memory_working_set_bytes",
       "description": "Notify when an approved container role's aggregate working set exceeds the 1 GiB pilot threshold.",
       "query_condition": {
-        "type": "sql",
-        "sql": "SELECT MAX(value) AS alert_value FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND metric_name = 'ifritah_container_memory_working_set_bytes' AND host_role = 'deployment'"
+        "type": "promql",
+        "promql": "max by (container_role) (ifritah_container_memory_working_set_bytes)",
+        "promql_condition": {
+          "column": "value",
+          "operator": ">=",
+          "value": 1073741824
+        }
       },
       "trigger_condition": {
         "period": 10,
@@ -203,16 +213,21 @@
     {
       "name": "Ifritah - Filesystem or disk pressure",
       "stream_type": "metrics",
-      "stream_name": "ifritah_metrics_v1",
+      "stream_name": "node_filesystem_avail_bytes",
       "description": "Notify when an allow-listed filesystem reports less than 10 GiB of available/free space.",
       "query_condition": {
-        "type": "sql",
-        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND host_role = 'deployment' AND metric_name IN ('node_filesystem_avail_bytes', 'node_filesystem_free_bytes') AND value < 10737418240"
+        "type": "promql",
+        "promql": "min by (mountpoint) (node_filesystem_avail_bytes)",
+        "promql_condition": {
+          "column": "value",
+          "operator": "<",
+          "value": 10737418240
+        }
       },
       "trigger_condition": {
         "period": 10,
-        "operator": ">=",
-        "threshold": 1,
+        "operator": "<",
+        "threshold": 10737418240,
         "frequency": 5,
         "frequency_type": "minutes",
         "silence": 30
@@ -225,11 +240,16 @@
     {
       "name": "Ifritah - Container restart loop",
       "stream_type": "metrics",
-      "stream_name": "ifritah_metrics_v1",
+      "stream_name": "ifritah_container_restarts_total",
       "description": "Notify when the bounded container-role restart counter increases by three or more within ten minutes.",
       "query_condition": {
-        "type": "sql",
-        "sql": "SELECT SUM(delta) AS alert_value FROM (SELECT container_role, MAX(value) - MIN(value) AS delta FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND metric_name = 'ifritah_container_restarts_total' AND host_role = 'deployment' GROUP BY container_role) AS restart_deltas"
+        "type": "promql",
+        "promql": "sum by (container_role) (increase(ifritah_container_restarts_total[10m]))",
+        "promql_condition": {
+          "column": "value",
+          "operator": ">=",
+          "value": 3
+        }
       },
       "trigger_condition": {
         "period": 10,
@@ -247,16 +267,21 @@
     {
       "name": "Ifritah - Host memory pressure",
       "stream_type": "metrics",
-      "stream_name": "ifritah_metrics_v1",
+      "stream_name": "node_memory_MemAvailable_bytes",
       "description": "Notify when host available memory falls below the 512 MiB pilot threshold.",
       "query_condition": {
-        "type": "sql",
-        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND host_role = 'deployment' AND metric_name = 'node_memory_MemAvailable_bytes' AND value < 536870912"
+        "type": "promql",
+        "promql": "min(node_memory_MemAvailable_bytes)",
+        "promql_condition": {
+          "column": "value",
+          "operator": "<",
+          "value": 536870912
+        }
       },
       "trigger_condition": {
         "period": 10,
-        "operator": ">=",
-        "threshold": 1,
+        "operator": "<",
+        "threshold": 536870912,
         "frequency": 5,
         "frequency_type": "minutes",
         "silence": 30
@@ -269,11 +294,16 @@
     {
       "name": "Ifritah - Host resource metrics health",
       "stream_type": "metrics",
-      "stream_name": "ifritah_metrics_v1",
+      "stream_name": "node_cpu_seconds_total",
       "description": "Notify when the node-exporter host resource baseline provides fewer than four CPU samples during the evaluation window.",
       "query_condition": {
-        "type": "sql",
-        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND host_role = 'deployment' AND metric_name = 'node_cpu_seconds_total'"
+        "type": "promql",
+        "promql": "count(node_cpu_seconds_total)",
+        "promql_condition": {
+          "column": "value",
+          "operator": "<",
+          "value": 4
+        }
       },
       "trigger_condition": {
         "period": 10,
@@ -291,11 +321,16 @@
     {
       "name": "Ifritah - Resource exporter health",
       "stream_type": "metrics",
-      "stream_name": "ifritah_metrics_v1",
+      "stream_name": "ifritah_resource_exporter_up",
       "description": "Notify when the resource exporter provides no healthy heartbeat during the evaluation window.",
       "query_condition": {
-        "type": "sql",
-        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND metric_name = 'ifritah_resource_exporter_up' AND value >= 1"
+        "type": "promql",
+        "promql": "max(ifritah_resource_exporter_up)",
+        "promql_condition": {
+          "column": "value",
+          "operator": "<",
+          "value": 1
+        }
       },
       "trigger_condition": {
         "period": 10,
@@ -313,11 +348,16 @@
     {
       "name": "Ifritah - Resource exporter scrape errors",
       "stream_type": "metrics",
-      "stream_name": "ifritah_metrics_v1",
+      "stream_name": "ifritah_resource_exporter_scrape_errors_total",
       "description": "Notify when the resource exporter's cumulative scrape-error counter increases during the evaluation window.",
       "query_condition": {
-        "type": "sql",
-        "sql": "SELECT MAX(value) - MIN(value) AS alert_value FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND metric_name = 'ifritah_resource_exporter_scrape_errors_total'"
+        "type": "promql",
+        "promql": "sum(increase(ifritah_resource_exporter_scrape_errors_total[10m]))",
+        "promql_condition": {
+          "column": "value",
+          "operator": ">=",
+          "value": 1
+        }
       },
       "trigger_condition": {
         "period": 10,
@@ -335,11 +375,16 @@
     {
       "name": "Ifritah - Telemetry gateway heartbeat missing",
       "stream_type": "metrics",
-      "stream_name": "ifritah_metrics_v1",
+      "stream_name": "ifritah_gateway_up",
       "description": "Notify when the telemetry gateway provides no healthy heartbeat during the evaluation window.",
       "query_condition": {
-        "type": "sql",
-        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND metric_name = 'ifritah_gateway_up' AND value >= 1"
+        "type": "promql",
+        "promql": "max(ifritah_gateway_up)",
+        "promql_condition": {
+          "column": "value",
+          "operator": "<",
+          "value": 1
+        }
       },
       "trigger_condition": {
         "period": 10,
@@ -357,11 +402,16 @@
     {
       "name": "Ifritah - Telemetry gateway health",
       "stream_type": "metrics",
-      "stream_name": "ifritah_metrics_v1",
+      "stream_name": "ifritah_gateway_forward_failures_total",
       "description": "Notify when the bounded telemetry gateway's cumulative failure counters increase during the evaluation window.",
       "query_condition": {
-        "type": "sql",
-        "sql": "SELECT SUM(delta) AS alert_value FROM (SELECT metric_name, signal, MAX(value) - MIN(value) AS delta FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND metric_name IN ('ifritah_gateway_forward_failures_total', 'ifritah_gateway_dropped_records_total', 'ifritah_gateway_oversized_payloads_total', 'ifritah_gateway_queue_write_errors_total') GROUP BY metric_name, signal) AS counter_deltas"
+        "type": "promql",
+        "promql": "sum(increase(ifritah_gateway_forward_failures_total[10m])) + sum(increase(ifritah_gateway_oversized_payloads_total[10m])) + sum(increase(ifritah_gateway_queue_write_errors_total[10m]))",
+        "promql_condition": {
+          "column": "value",
+          "operator": ">=",
+          "value": 1
+        }
       },
       "trigger_condition": {
         "period": 10,
@@ -379,11 +429,16 @@
     {
       "name": "Ifritah - Telemetry gateway authentication blocked",
       "stream_type": "metrics",
-      "stream_name": "ifritah_metrics_v1",
+      "stream_name": "ifritah_gateway_auth_blocked",
       "description": "Notify when the telemetry gateway reports an active OpenObserve authentication block.",
       "query_condition": {
-        "type": "sql",
-        "sql": "SELECT MAX(value) AS alert_value FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND metric_name = 'ifritah_gateway_auth_blocked'"
+        "type": "promql",
+        "promql": "max(ifritah_gateway_auth_blocked)",
+        "promql_condition": {
+          "column": "value",
+          "operator": ">=",
+          "value": 1
+        }
       },
       "trigger_condition": {
         "period": 10,

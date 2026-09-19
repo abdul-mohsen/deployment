@@ -131,8 +131,8 @@ if printf '%s\n' "$proxy_block" | grep -q 'networks: \[observability\]'; then
 fi
 printf '%s\n' "$proxy_block" | grep -q '/var/run/docker.sock:/var/run/docker.sock:ro' \
     || fail "socket proxy socket mount is not read-only"
-printf '%s\n' "$proxy_block" | grep -q 'read_only: true' \
-    || fail "socket proxy filesystem is not read-only"
+printf '%s\n' "$proxy_block" | grep -q 'The image entrypoint generates HAProxy config' \
+    || fail "socket proxy writable config boundary is undocumented"
 printf '%s\n' "$proxy_block" | grep -q 'cap_drop: \[ALL\]' \
     || fail "socket proxy does not drop Linux capabilities"
 printf '%s\n' "$proxy_block" | grep -q 'mem_limit: 128m' \

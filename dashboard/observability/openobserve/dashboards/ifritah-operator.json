@@ -416,40 +416,29 @@
         {
           "id": "resource-health",
           "type": "line",
-          "title": "Host and container resource health",
-          "description": "Bounded CPU, memory, disk, and restart metric review.",
+          "title": "Container CPU health",
+          "description": "Bounded container CPU ratio by approved role.",
           "config": {
             "show_legends": true,
             "legends_position": "bottom",
-            "unit": "short",
+            "unit": "percent",
             "unit_custom": null
           },
-          "queryType": "sql",
+          "queryType": "promql",
           "queries": [
             {
-              "query": "SELECT histogram(_timestamp) AS x_axis_1, metric_name, AVG(value) AS y_axis_1 FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND metric_name IN ('node_cpu_seconds_total', 'node_memory_MemTotal_bytes', 'node_memory_MemAvailable_bytes', 'node_filesystem_free_bytes', 'ifritah_container_cpu_usage_ratio', 'ifritah_container_memory_working_set_bytes') GROUP BY x_axis_1, metric_name ORDER BY x_axis_1 LIMIT 120",
+              "query": "100 * avg by (container_role) (ifritah_container_cpu_usage_ratio)",
               "customQuery": true,
+              "vrlFunctionQuery": "",
               "fields": {
-                "stream": "ifritah_metrics_v1",
+                "stream": "ifritah_container_cpu_usage_ratio",
                 "stream_type": "metrics",
-                "x": [
-                  {
-                    "label": "x_axis_1",
-                    "alias": "x_axis_1",
-                    "column": "x_axis_1",
-                    "aggregationFunction": null
-                  }
-                ],
-                "y": [
-                  {
-                    "label": "y_axis_1",
-                    "alias": "y_axis_1",
-                    "column": "y_axis_1",
-                    "aggregationFunction": null
-                  }
-                ],
+                "x": [],
+                "y": [],
                 "z": [],
                 "breakdown": [],
+                "promql_labels": [],
+                "promql_operations": [],
                 "filter": {
                   "filterType": "group",
                   "logicalOperator": "AND",
@@ -457,7 +446,9 @@
                 }
               },
               "config": {
-                "promql_legend": ""
+                "promql_legend": "{{container_role}}",
+                "query_label": "",
+                "step_value": null
               }
             }
           ],
@@ -470,6 +461,100 @@
           }
         },
         {
+          "id": "memory-health",
+          "type": "line",
+          "title": "Container memory health",
+          "description": "Container working set by approved role.",
+          "config": {
+            "show_legends": true,
+            "legends_position": "bottom",
+            "unit": "bytes",
+            "unit_custom": null
+          },
+          "queryType": "promql",
+          "queries": [
+            {
+              "query": "sum by (container_role) (ifritah_container_memory_working_set_bytes)",
+              "customQuery": true,
+              "vrlFunctionQuery": "",
+              "fields": {
+                "stream": "ifritah_container_memory_working_set_bytes",
+                "stream_type": "metrics",
+                "x": [],
+                "y": [],
+                "z": [],
+                "breakdown": [],
+                "promql_labels": [],
+                "promql_operations": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": "{{container_role}}",
+                "query_label": "",
+                "step_value": null
+              }
+            }
+          ],
+          "layout": {
+            "x": 0,
+            "y": 78,
+            "w": 48,
+            "h": 12,
+            "i": 10
+          }
+        },
+        {
+          "id": "disk-health",
+          "type": "line",
+          "title": "Host filesystem availability",
+          "description": "Available bytes for deployment filesystems; host metrics require Linux node-exporter mounts.",
+          "config": {
+            "show_legends": true,
+            "legends_position": "bottom",
+            "unit": "bytes",
+            "unit_custom": null
+          },
+          "queryType": "promql",
+          "queries": [
+            {
+              "query": "min by (mountpoint) (node_filesystem_avail_bytes)",
+              "customQuery": true,
+              "vrlFunctionQuery": "",
+              "fields": {
+                "stream": "node_filesystem_avail_bytes",
+                "stream_type": "metrics",
+                "x": [],
+                "y": [],
+                "z": [],
+                "breakdown": [],
+                "promql_labels": [],
+                "promql_operations": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": "{{mountpoint}}",
+                "query_label": "",
+                "step_value": null
+              }
+            }
+          ],
+          "layout": {
+            "x": 0,
+            "y": 90,
+            "w": 48,
+            "h": 12,
+            "i": 11
+          }
+        },
+        {
           "id": "restart-pressure",
           "type": "table",
           "title": "Container restart pressure",
@@ -478,34 +563,24 @@
             "show_legends": false,
             "legends_position": null,
             "unit": null,
-            "unit_custom": null
+            "unit_custom": null,
+            "promql_table_mode": "all"
           },
-          "queryType": "sql",
+          "queryType": "promql",
           "queries": [
             {
-              "query": "SELECT event_time, service_name, container_role, value, metric_name FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND metric_name = 'ifritah_container_restarts_total' ORDER BY _timestamp DESC LIMIT 100",
+              "query": "sum by (container_role) (rate(ifritah_container_restarts_total[10m]))",
               "customQuery": true,
+              "vrlFunctionQuery": "",
               "fields": {
-                "stream": "ifritah_metrics_v1",
+                "stream": "ifritah_container_restarts_total",
                 "stream_type": "metrics",
-                "x": [
-                  {
-                    "label": "event_time",
-                    "alias": "event_time",
-                    "column": "event_time",
-                    "aggregationFunction": null
-                  }
-                ],
-                "y": [
-                  {
-                    "label": "value",
-                    "alias": "value",
-                    "column": "value",
-                    "aggregationFunction": null
-                  }
-                ],
+                "x": [],
+                "y": [],
                 "z": [],
                 "breakdown": [],
+                "promql_labels": [],
+                "promql_operations": [],
                 "filter": {
                   "filterType": "group",
                   "logicalOperator": "AND",
@@ -513,13 +588,15 @@
                 }
               },
               "config": {
-                "promql_legend": ""
+                "promql_legend": "{{container_role}}",
+                "query_label": "",
+                "step_value": null
               }
             }
           ],
           "layout": {
             "x": 0,
-            "y": 78,
+            "y": 102,
             "w": 48,
             "h": 12,
             "i": 9
@@ -575,10 +652,10 @@
           ],
           "layout": {
             "x": 0,
-            "y": 90,
+            "y": 114,
             "w": 48,
             "h": 12,
-            "i": 10
+            "i": 12
           }
         },
         {
@@ -631,10 +708,10 @@
           ],
           "layout": {
             "x": 0,
-            "y": 102,
+            "y": 126,
             "w": 48,
             "h": 12,
-            "i": 11
+            "i": 13
           }
         }
       ]

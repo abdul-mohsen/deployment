@@ -60,7 +60,6 @@ for reference in (
 expected = {
     "ifritah_logs_v1": ("logs", 14),
     "ifritah_traces_v1": ("traces", 7),
-    "ifritah_metrics_v1": ("metrics", 15),
     "ifritah_telemetry_health_v1": ("logs", 14),
 }
 actual = {}
@@ -79,6 +78,11 @@ for stream in stream_doc["streams"]:
         for key in stream["create"]["settings"]
     )
 assert actual == expected
+metric_policy = stream_doc["metric_stream_policy"]
+assert metric_policy["retention_days"] == 15
+assert metric_policy["max_query_range"] == 24
+assert "ifritah_" in metric_policy["allowed_name_prefixes"]
+assert "node_" in metric_policy["allowed_name_prefixes"]
 
 assert dashboard["version"] == 5
 assert dashboard["title"] == "Ifritah OpenObserve Operations"
@@ -86,7 +90,7 @@ assert dashboard["dashboardId"] == ""
 panels = dashboard["tabs"][0]["panels"]
 assert len(panels) >= 8
 for panel in panels:
-    assert panel["id"] and panel["title"] and panel["queryType"] == "sql"
+    assert panel["id"] and panel["title"] and panel["queryType"] in {"sql", "promql"}
     layout = panel["layout"]
     assert isinstance(layout["i"], int)
     assert 0 <= layout["x"] <= 47
@@ -95,7 +99,6 @@ for panel in panels:
     assert layout["h"] > 0
     for query in panel["queries"]:
         assert query["customQuery"] is True
-        assert query["fields"]["stream"] in expected
         assert isinstance(query["fields"]["x"], list)
         assert isinstance(query["fields"]["y"], list)
         assert query["fields"]["z"] == []
@@ -104,20 +107,45 @@ for panel in panels:
             "logicalOperator": "AND",
             "conditions": [],
         }
+        if panel["queryType"] == "sql":
+            assert query["fields"]["stream"] in expected
+        else:
+            assert query["fields"]["stream"] not in expected
+            assert query["fields"]["stream_type"] == "metrics"
+            assert query["vrlFunctionQuery"] == ""
+            assert isinstance(query["fields"]["promql_labels"], list)
+            assert isinstance(query["fields"]["promql_operations"], list)
+            assert query["config"]["step_value"] is None
+            assert "promql_legend" in query["config"]
 
 assert len(views["views"]) >= 8
 for view in views["views"]:
-    assert view["stream"] in expected
     assert view["relative_time"] in {"1h", "24h", "7d"}
-    assert "_timestamp >= now() - INTERVAL" in view["query"]
-    assert "LIMIT " in view["query"]
+    if view.get("query_type", "sql") == "promql":
+        assert view["stream"] not in expected
+        assert view["stream_type"] == "metrics"
+        assert "_timestamp" not in view["query"]
+    else:
+        assert view["stream"] in expected
+        assert "_timestamp >= now() - INTERVAL" in view["query"]
+        assert "LIMIT " in view["query"]
 
 assert len(alerts["alerts"]) >= 15
 assert alerts["destination_placeholder"] == "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
 for alert in alerts["alerts"]:
-    assert alert["stream_name"] in expected
-    assert alert["query_condition"]["type"] == "sql"
-    assert "_timestamp >= now() - INTERVAL" in alert["query_condition"]["sql"]
+    query_condition = alert["query_condition"]
+    if query_condition["type"] == "sql":
+        assert alert["stream_name"] in expected
+        assert "_timestamp >= now() - INTERVAL" in query_condition["sql"]
+    else:
+        assert query_condition["type"] == "promql"
+        assert alert["stream_name"] not in expected
+        assert query_condition["promql"]
+        assert {
+            "column",
+            "operator",
+            "value",
+        } <= set(query_condition["promql_condition"])
     assert {
         "period",
         "operator",
@@ -146,9 +174,10 @@ missing_alerts = sorted(set(required_alerts) - set(alerts_by_name))
 assert not missing_alerts, f"resource alert templates missing: {missing_alerts}"
 for name, metric_name in required_alerts.items():
     alert = alerts_by_name[name]
-    query = alert["query_condition"]["sql"]
+    query = alert["query_condition"].get("promql", "")
     assert metric_name in query, f"{name} does not use {metric_name}"
-    assert alert["stream_name"] == "ifritah_metrics_v1"
+    assert alert["query_condition"]["type"] == "promql"
+    assert alert["stream_name"] == metric_name
     assert alert["destinations"] == ["${OPENOBSERVE_ALERT_DESTINATION_NAME}"]
     assert alert["enabled"] is False
 
@@ -157,10 +186,7 @@ for name in (
     "Ifritah - Resource exporter scrape errors",
     "Ifritah - Telemetry gateway health",
 ):
-    assert "MAX(value) - MIN(value)" in alerts_by_name[name]["query_condition"]["sql"], name
-
-assert "GROUP BY container_role" in alerts_by_name["Ifritah - Container restart loop"]["query_condition"]["sql"]
-assert "GROUP BY metric_name, signal" in alerts_by_name["Ifritah - Telemetry gateway health"]["query_condition"]["sql"]
+    assert "increase(" in alerts_by_name[name]["query_condition"]["promql"], name
 
 for name in (
     "Ifritah - Resource exporter health",
@@ -168,15 +194,14 @@ for name in (
 ):
     alert = alerts_by_name[name]
     assert alert["trigger_condition"]["operator"] == "<", name
-    assert "COUNT(*)" in alert["query_condition"]["sql"], name
+    assert alert["query_condition"]["promql_condition"]["operator"] == "<", name
 
 for name, counter in {
     "Ifritah - Resource exporter scrape errors": "ifritah_resource_exporter_scrape_errors_total",
     "Ifritah - Telemetry gateway health": "ifritah_gateway_forward_failures_total",
 }.items():
-    query = alerts_by_name[name]["query_condition"]["sql"]
+    query = alerts_by_name[name]["query_condition"]["promql"]
     assert counter in query
-    assert not re.search(rf"{re.escape(counter)}[^\"']*value\s*>\s*0", query, re.I), name
 
 all_json = json.dumps([manifest, stream_doc, dashboard, views, alerts, notifications])
 terms = [
@@ -244,8 +269,16 @@ grep -Fq 'schema_path="/api/$ORG_PATH/streams/$encoded_stream/schema?type=$strea
     || fail "apply script does not use the supported stream schema existence check"
 grep -Fq 'api_status GET "$schema_path"' "$apply" \
     || fail "apply script does not use the schema existence check before stream creation"
+grep -Fq 'wait_for_status GET "$schema_path" 200' "$apply" \
+    || fail "apply script does not wait for eventual stream schema consistency"
 grep -Fq 'streams/$encoded_stream/settings?type=$stream_type' "$apply" \
     || fail "apply script does not use the stream settings endpoint"
+grep -Fq '/api/$ORG_PATH/streams?type=metrics' "$apply" \
+    || fail "apply script does not discover native metric streams"
+grep -Fq 'allowed_name_prefixes' "$apply" \
+    || fail "apply script does not bound native metric retention by name prefix"
+grep -Fq 'view.get("query_type", "sql")' "$apply" \
+    || fail "apply script does not preserve PromQL saved-view mode"
 grep -Fq '/savedviews' "$apply" \
     || fail "apply script does not provision saved views"
 grep -Fq 'api_put "/api/$ORG_PATH/savedviews/$(urlencode "$view_id")"' "$apply" \

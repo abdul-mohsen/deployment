@@ -393,13 +393,13 @@ public_tenant_url() {
     public_url "${tenant}.${base_domain}"
 }
 
-# OpenObserve application telemetry is deliberately opt-in. The collector
-# network name is fixed by dashboard/docker-compose.openobserve.yml; accepting
-# another name would make it possible to point tenant apps at an unreviewed or
-# public network.
-OPENOBSERVE_DEFAULT_NETWORK_NAME="ifritah-observability-openobserve"
+# OpenObserve application telemetry is deliberately opt-in. Tenant apps join
+# only the ingest network; the collector, gateway, Docker API, and storage stay
+# on the separate core network defined by dashboard/docker-compose.openobserve.yml.
+OPENOBSERVE_DEFAULT_NETWORK_NAME="ifritah-observability-openobserve-ingest"
+OPENOBSERVE_CORE_NETWORK_NAME="ifritah-observability-openobserve-core"
 OPENOBSERVE_OTLP_ENDPOINT="http://alloy-openobserve:4318/v1/traces"
-readonly OPENOBSERVE_DEFAULT_NETWORK_NAME OPENOBSERVE_OTLP_ENDPOINT
+readonly OPENOBSERVE_DEFAULT_NETWORK_NAME OPENOBSERVE_CORE_NETWORK_NAME OPENOBSERVE_OTLP_ENDPOINT
 
 openobserve_warn() {
     if declare -F deployment_log >/dev/null 2>&1; then
@@ -468,7 +468,7 @@ openobserve_ensure_network() {
     if ! docker network create \
         --driver bridge \
         --internal \
-        --label com.docker.compose.network=openobserve \
+        --label com.docker.compose.network=openobserve-ingest \
         "$network" >/dev/null 2>&1; then
         openobserve_warn \
             "could not create internal Docker network '$network'; tenant deployment will continue without telemetry wiring."
@@ -647,6 +647,9 @@ openobserve_app_configure() {
         "OTEL_BSP_EXPORT_TIMEOUT=${export_timeout}"
         "IFRITAH_OPENOBSERVE_WIRING=1"
     )
+    if [ "$component" = "backend" ]; then
+        args+=("METRICS_TOKEN=${OPENOBSERVE_TENANT_OTLP_TOKEN}")
+    fi
 
     for pair in "${args[@]}"; do
         key="${pair%%=*}"

@@ -6,6 +6,7 @@ ENDPOINT="${OPENOBSERVE_ENDPOINT:-}"
 ORG="${OPENOBSERVE_ORG:-}"
 USER_NAME="${OPENOBSERVE_USER:-}"
 PASSWORD="${OPENOBSERVE_PASSWORD:-}"
+PASSWORD_FILE="${OPENOBSERVE_PASSWORD_FILE:-}"
 DESTINATION="${OPENOBSERVE_ALERT_DESTINATION_NAME:-}"
 APPLY_ALERTS="${OPENOBSERVE_APPLY_ALERTS:-false}"
 ENABLE_ALERTS="${OPENOBSERVE_ENABLE_ALERTS:-false}"
@@ -17,6 +18,10 @@ usage() {
 Usage:
   OPENOBSERVE_ENDPOINT=... OPENOBSERVE_ORG=... \
   OPENOBSERVE_USER=... OPENOBSERVE_PASSWORD=... \
+  ./apply-openobserve.sh
+
+  # Or read the password from an operator-managed file:
+  OPENOBSERVE_PASSWORD_FILE=/run/secrets/openobserve-password \
   ./apply-openobserve.sh
 
 Optional alert variables:
@@ -42,6 +47,14 @@ for command in curl python3; do
         exit 1
     }
 done
+
+if [[ -n "$PASSWORD_FILE" ]]; then
+    if [[ ! -r "$PASSWORD_FILE" ]]; then
+        echo "OpenObserve password file is not readable: $PASSWORD_FILE" >&2
+        exit 1
+    fi
+    PASSWORD="$(<"$PASSWORD_FILE")"
+fi
 
 if [[ -z "$ENDPOINT" || -z "$ORG" || -z "$USER_NAME" || -z "$PASSWORD" ]]; then
     usage >&2
@@ -98,6 +111,27 @@ api_delete() {
     curl "${AUTH[@]}" --fail --silent --show-error -X DELETE "$ENDPOINT$path"
 }
 
+wait_for_status() {
+    local method="$1"
+    local path="$2"
+    local expected="$3"
+    local attempts="${4:-10}"
+    local delay_seconds="${5:-2}"
+    local status=""
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        status="$(api_status "$method" "$path" || true)"
+        if [[ "$status" == "$expected" ]]; then
+            return 0
+        fi
+        if (( attempt < attempts )); then
+            sleep "$delay_seconds"
+        fi
+    done
+    echo "timed out waiting for HTTP $expected on $path (last status: $status)" >&2
+    return 1
+}
+
 echo "checking OpenObserve endpoint: $ENDPOINT"
 health_status="$(api_status GET "/healthz")"
 [[ "$health_status" == "200" ]] || {
@@ -137,6 +171,7 @@ PY
         echo "  exists: $stream_name"
     else
         api_post "$stream_path" "$create_body" >/dev/null
+        wait_for_status GET "$schema_path" 200 10 2
         echo "  created: $stream_name"
     fi
     api_put "$settings_path" "$settings_body" >/dev/null
@@ -149,6 +184,50 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     document = json.load(handle)
 for item in document["streams"]:
     print(f'{item["name"]}\t{item["type"]}')
+PY
+)
+
+metric_policy="$(python3 - "$STREAMS_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    policy = json.load(handle).get("metric_stream_policy", {})
+print(json.dumps(policy, separators=(",", ":")))
+PY
+)"
+metric_streams="$(api_get "/api/$ORG_PATH/streams?type=metrics")"
+while IFS= read -r metric_name; do
+    [[ -n "$metric_name" ]] || continue
+    encoded_metric="$(urlencode "$metric_name")"
+    metric_settings="$(python3 - "$metric_policy" <<'PY'
+import json
+import sys
+
+policy = json.loads(sys.argv[1])
+print(json.dumps({
+    "data_retention": policy["retention_days"],
+    "max_query_range": policy.get("max_query_range", 24),
+}, separators=(",", ":")))
+PY
+)"
+    api_put "/api/$ORG_PATH/streams/$encoded_metric/settings?type=metrics" "$metric_settings" >/dev/null
+    echo "  metric retention applied: $metric_name"
+done < <(python3 - "$metric_streams" "$metric_policy" <<'PY'
+import json
+import sys
+
+raw, policy_raw = sys.argv[1:]
+value = json.loads(raw)
+if isinstance(value, str):
+    value = json.loads(value)
+policy = json.loads(policy_raw)
+prefixes = tuple(policy.get("allowed_name_prefixes", []))
+items = value.get("list", value if isinstance(value, list) else [])
+for item in items:
+    name = item.get("name", "") if isinstance(item, dict) else str(item)
+    if name.startswith(prefixes):
+        print(name)
 PY
 )
 
@@ -289,9 +368,9 @@ for view in document["views"]:
             "refreshInterval": 0,
             "showHistogram": True,
             "showTransformEditor": False,
-            "sqlMode": True,
+            "sqlMode": view.get("query_type", "sql") != "promql",
             "quickMode": False,
-            "logsVisualizeToggle": "logs",
+            "logsVisualizeToggle": "metrics" if view.get("query_type", "sql") == "promql" else "logs",
             "showSearchScheduler": False,
             "jobId": "",
             "jobRecords": 200,

@@ -76,11 +76,30 @@
     },
     {
       "view_name": "Ifritah - Resource and restart health",
-      "stream": "ifritah_metrics_v1",
+      "stream": "ifritah_container_cpu_usage_ratio",
       "stream_type": "metrics",
+      "query_type": "promql",
       "relative_time": "1h",
-      "description": "Host and container CPU, RAM, disk, and restart metrics.",
-      "query": "SELECT event_time, metric_name, service_name, container_role, host_role, value, outcome FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND metric_name IN ('node_cpu_seconds_total', 'node_memory_MemTotal_bytes', 'node_memory_MemAvailable_bytes', 'node_filesystem_free_bytes', 'ifritah_container_cpu_usage_ratio', 'ifritah_container_memory_working_set_bytes', 'ifritah_container_restarts_total') ORDER BY _timestamp DESC LIMIT 200"
+      "description": "Container CPU by approved role; use PromQL metric streams for resource investigation.",
+      "query": "avg by (container_role) (ifritah_container_cpu_usage_ratio)"
+    },
+    {
+      "view_name": "Ifritah - Container memory health",
+      "stream": "ifritah_container_memory_working_set_bytes",
+      "stream_type": "metrics",
+      "query_type": "promql",
+      "relative_time": "1h",
+      "description": "Container working set by approved role.",
+      "query": "sum by (container_role) (ifritah_container_memory_working_set_bytes)"
+    },
+    {
+      "view_name": "Ifritah - Host disk and restart health",
+      "stream": "ifritah_container_restarts_total",
+      "stream_type": "metrics",
+      "query_type": "promql",
+      "relative_time": "1h",
+      "description": "Container restart counters; host disk uses node_filesystem_avail_bytes in PromQL.",
+      "query": "sum by (container_role) (rate(ifritah_container_restarts_total[10m]))"
     },
     {
       "view_name": "Ifritah - OpenObserve health",

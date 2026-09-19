@@ -77,6 +77,7 @@ for text in \
     "OPENOBSERVE_ORG=" \
     "OPENOBSERVE_USER=" \
     "OPENOBSERVE_PASSWORD=" \
+    "OPENOBSERVE_PASSWORD_FILE" \
     "dashboard import action" \
     "apply streams and saved views" \
     "OPENOBSERVE_REPLACE_DASHBOARD=false" \
@@ -128,8 +129,8 @@ for text in \
     "scripts/rollback-tenant.sh" \
     "remove the external notification binding" \
     "Stop or reroute the collector before deleting any contract stream." \
-    "docker network inspect ifritah-observability-openobserve" \
-    "docker network rm ifritah-observability-openobserve" \
+    "docker network inspect ifritah-observability-openobserve-ingest" \
+    "docker network rm ifritah-observability-openobserve-ingest" \
     "without \`--volumes\`" \
     "Never remove the named data, gateway, or Alloy volumes"; do
     contains "$runbook" "$text" "runbook covers rollback/removal guard: $text"
@@ -162,8 +163,10 @@ contains "$compose" 'profiles: ["openobserve"]' \
     "OpenObserve services remain profile-gated"
 contains "$compose" '127.0.0.1}:${OBS_OPENOBSERVE_PORT:-5080}:5080' \
     "OpenObserve host publication remains loopback-only"
-contains "$compose" 'name: ifritah-observability-openobserve' \
-    "OpenObserve network has the approved stable name"
+contains "$compose" 'name: ifritah-observability-openobserve-core' \
+    "OpenObserve core network has the approved stable name"
+contains "$compose" 'name: ifritah-observability-openobserve-ingest' \
+    "OpenObserve ingest network has the approved stable name"
 contains "$compose" "internal: true" \
     "OpenObserve network is internal-only"
 not_contains_regex "$compose" '^[[:space:]]+-[[:space:]]*"?[^"]*:(4317|4318):' \

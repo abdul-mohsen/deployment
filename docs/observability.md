@@ -82,16 +82,22 @@ OpenObserve is available as a separate, operator-only pilot in
 [`dashboard/docker-compose.openobserve.yml`](../dashboard/docker-compose.openobserve.yml)
 with the `openobserve` profile. Its runbook is
 [`docs/runbooks/openobserve-pilot.md`](runbooks/openobserve-pilot.md).
-The pilot uses the pinned OpenObserve `v1.0.3` image, a persistent `/data`
-volume, a private internal network, loopback-only host publication by default,
-native root credentials from the ignored `dashboard/observability/openobserve.env`,
-and bounded retention/resource settings.
+The pilot uses the pinned OpenObserve `v1.0.3` image and Grafana Alloy
+`v1.19.2` image, each digest-pinned, plus a persistent `/data` volume, private
+internal networks, loopback-only host publication by default, native root
+credentials from the ignored `dashboard/observability/openobserve.env`, and
+bounded retention/resource settings. Alloy `v1.19.2` is required because this
+profile uses authenticated OTLP receivers.
+OpenObserve stays on the internal core network; a small pinned Nginx edge is
+the only service on the dedicated UI publish network and owns the configurable
+loopback host port. This keeps Docker Desktop and Linux behavior consistent
+without publishing the core network or collector ports.
 
 This is intentionally parallel to the Loki/Grafana profile above. It does not
 change the existing Loki/Grafana Compose file. Tenant application wiring is
 explicitly opt-in through `OPENOBSERVE_TENANT_TELEMETRY_ENABLED=false` in
-`config.env`; when enabled, lifecycle scripts attach both tenant apps to the
-fixed internal `ifritah-observability-openobserve` network and configure only
+`config.env`; when enabled, lifecycle scripts attach both tenant apps only to
+the internal `ifritah-observability-openobserve-ingest` network and configure
 private, authenticated OTLP trace export to
 `http://alloy-openobserve:4318/v1/traces`. The protected
 `OPENOBSERVE_TENANT_OTLP_TOKEN` is required by both the Alloy receiver and
@@ -107,17 +113,17 @@ reviewed.
 
 ## Metrics and tracing extension points
 
-This slice does not add a Prometheus client or OpenTelemetry SDK. The
-deployment repository only supplies bounded standard OTEL environment values;
-the backend instrumentation owns SDK behavior, and the frontend values are
-reserved for a future restored frontend worktree. Prometheus currently scrapes
-Alloy and the observability services only; it does not scrape tenant
-applications.
-The dashboard access middleware exposes a tested
-`web.RequestObserver` callback so a future metrics/tracing adapter can add
-bounded counters and spans without changing request redaction or route
-correlation. Any future `/metrics` endpoint must keep tenant IDs, request IDs,
-trace IDs, user IDs, resource IDs, and arbitrary error strings out of labels.
+The backend exposes protected bounded HTTP metrics and OTLP traces. OpenObserve
+Alloy scrapes backend metrics, host/resource exporters, and private
+collector/gateway health endpoints; it also accepts authenticated application
+OTLP signals. Frontend propagation remains pending until its separate worktree
+is restored. Native OpenObserve OTLP metrics create one stream per metric
+family, so PromQL dashboards and alerts query names such as
+`ifritah_container_cpu_usage_ratio` and
+`ifritah_container_memory_working_set_bytes`; no synthetic aggregate metrics
+stream is assumed.
+All metric labels remain bounded: tenant IDs, request IDs, trace IDs, user IDs,
+resource IDs, and arbitrary error strings must not become metric labels.
 
 ## Operator dashboards and alerts
 

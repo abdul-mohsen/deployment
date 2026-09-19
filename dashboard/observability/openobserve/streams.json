@@ -90,43 +90,6 @@
       ]
     },
     {
-      "name": "ifritah_metrics_v1",
-      "type": "metrics",
-      "retention_days": 15,
-      "create": {
-        "fields": [],
-        "settings": {
-          "data_retention": 15,
-          "max_query_range": 24,
-          "store_original_data": false,
-          "index_fields": [
-            "metric_name",
-            "service_name",
-            "deployment_environment",
-            "component",
-            "container_role",
-            "host_role",
-            "outcome"
-          ],
-          "full_text_search_keys": [
-            "metric_name",
-            "service_name",
-            "component"
-          ]
-        }
-      },
-      "settings": {
-        "data_retention": 15
-      },
-      "search_fields": [
-        "metric_name",
-        "service_name",
-        "deployment_environment",
-        "component",
-        "container_role"
-      ]
-    },
-    {
       "name": "ifritah_telemetry_health_v1",
       "type": "logs",
       "retention_days": 14,
@@ -171,5 +134,17 @@
         "dropped_records"
       ]
     }
-  ]
+  ],
+  "metric_stream_policy": {
+    "retention_days": 15,
+    "max_query_range": 24,
+    "allowed_name_prefixes": [
+      "ifritah_",
+      "node_",
+      "alloy_",
+      "otelcol_",
+      "prometheus_"
+    ],
+    "note": "OpenObserve native OTLP metrics create one metrics stream per metric family; retention is applied to matching streams after ingestion."
+  }
 }

@@ -17,6 +17,9 @@ services:
       # daemon events. All mutating and unrelated API sections stay disabled.
       CONTAINERS: "1"
       EVENTS: "1"
+      # Alloy discovery computes per-container network labels through the
+      # read-only Docker networks API.
+      NETWORKS: "1"
       POST: "0"
       DELETE: "0"
       EXEC: "0"
@@ -35,7 +38,6 @@ services:
       GRPC: "0"
       IMAGES: "0"
       INFO: "0"
-      NETWORKS: "0"
       NODES: "0"
       PLUGINS: "0"
       SECRETS: "0"
@@ -49,7 +51,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     expose: ["2375"]
     networks: [docker-api]
-    read_only: true
+    # The image entrypoint generates HAProxy config under /usr/local/etc.
+    # The Docker socket remains read-only and the container drops all caps.
     tmpfs:
       - /tmp
     mem_limit: 128m
@@ -86,6 +89,7 @@ services:
     pids_limit: 64
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
     logging: *collector-logging
 
   alloy:

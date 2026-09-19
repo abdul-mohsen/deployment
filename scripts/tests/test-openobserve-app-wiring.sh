@@ -20,7 +20,7 @@ pass "tenant lifecycle scripts pass bash syntax"
 
 tr -d '\r' < config.env.example | grep -Fx 'OPENOBSERVE_TENANT_TELEMETRY_ENABLED=false' >/dev/null \
     || fail "OpenObserve tenant telemetry is not opt-in by default"
-tr -d '\r' < config.env.example | grep -Fx 'OPENOBSERVE_NETWORK_NAME=ifritah-observability-openobserve' >/dev/null \
+tr -d '\r' < config.env.example | grep -Fx 'OPENOBSERVE_NETWORK_NAME=ifritah-observability-openobserve-ingest' >/dev/null \
     || fail "approved OpenObserve network name is missing from config example"
 grep -Fq 'OPENOBSERVE_TENANT_OTLP_TOKEN=replace-with-a-random-otlp-token' config.env.example \
     || fail "deployment OTLP token contract is missing from config example"
@@ -50,8 +50,19 @@ grep -Fq 'openobserve_app_network_value "$app" --network-computed-attach-post-de
     || fail "existing Dokku network settings are not read before telemetry wiring"
 grep -Fq 'docker network connect "$network" "$container_id"' scripts/lib.sh \
     || fail "running tenant containers are not connected to the collector network"
-grep -Fq 'readonly OPENOBSERVE_DEFAULT_NETWORK_NAME OPENOBSERVE_OTLP_ENDPOINT' scripts/lib.sh \
+grep -Fq 'readonly OPENOBSERVE_DEFAULT_NETWORK_NAME OPENOBSERVE_CORE_NETWORK_NAME OPENOBSERVE_OTLP_ENDPOINT' scripts/lib.sh \
     || fail "approved network and collector endpoint are not protected constants"
+grep -Fq 'name: ifritah-observability-openobserve-core' dashboard/docker-compose.openobserve.yml \
+    || fail "core observability network is missing"
+grep -Fq 'name: ifritah-observability-openobserve-ingest' dashboard/docker-compose.openobserve.yml \
+    || fail "tenant ingest network is missing"
+grep -Fq 'networks: [openobserve-core, openobserve-ingest]' dashboard/docker-compose.openobserve.yml \
+    || fail "Alloy is not the only service bridging ingest and core networks"
+if tr -d "\r" < dashboard/docker-compose.openobserve.yml |
+    grep -E '^[[:space:]]+networks: \[[^]]*openobserve-ingest' |
+    grep -v -Fx '    networks: [openobserve-core, openobserve-ingest]' >/dev/null; then
+    fail "core services must not attach to the tenant ingest network"
+fi
 pass "network validation, persistence, and live-container connection are present"
 
 grep -Fq 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OPENOBSERVE_OTLP_ENDPOINT}' scripts/lib.sh \
@@ -99,7 +110,7 @@ unset OPENOBSERVE_TENANT_TELEMETRY_ENABLED
 if openobserve_validate_network_name bridge >/dev/null 2>&1; then
     fail "arbitrary bridge network name was accepted"
 fi
-openobserve_validate_network_name ifritah-observability-openobserve \
+openobserve_validate_network_name ifritah-observability-openobserve-ingest \
     || fail "approved network name was rejected"
 pass "default mode and network allow-list are enforced"
 
@@ -127,10 +138,10 @@ docker() {
     esac
 }
 
-if ! openobserve_ensure_network ifritah-observability-openobserve; then
+if ! openobserve_ensure_network ifritah-observability-openobserve-ingest; then
     fail "internal network creation failed in stubbed validation"
 fi
-if ! openobserve_ensure_network ifritah-observability-openobserve; then
+if ! openobserve_ensure_network ifritah-observability-openobserve-ingest; then
     fail "existing internal network validation failed"
 fi
 [ "$(grep -c '^network create' "$OPENOBSERVE_TEST_LOG")" -eq 1 ] \
@@ -138,7 +149,7 @@ fi
 pass "internal network creation and reuse are idempotent"
 
 OPENOBSERVE_NETWORK_INTERNAL=false
-if openobserve_ensure_network ifritah-observability-openobserve; then
+if openobserve_ensure_network ifritah-observability-openobserve-ingest; then
     fail "non-internal existing network was accepted"
 fi
 OPENOBSERVE_NETWORK_INTERNAL=true
@@ -221,10 +232,13 @@ grep -Fq 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://alloy-openobserve:4318/v1/tr
 grep -Fq 'OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic' \
     "$OPENOBSERVE_TEST_LOG" \
     || fail "deployment-provided OTLP authentication header was not passed to Dokku"
-grep -Fq 'network:set acme-backend attach-post-deploy existing-backend-network ifritah-observability-openobserve' \
+grep -Fq 'METRICS_TOKEN=deployment-token-123456' \
+    "$OPENOBSERVE_TEST_LOG" \
+    || fail "backend metrics authentication token was not passed to Dokku"
+grep -Fq 'network:set acme-backend attach-post-deploy existing-backend-network ifritah-observability-openobserve-ingest' \
     "$OPENOBSERVE_TEST_LOG" \
     || fail "backend Dokku networks were not preserved while adding telemetry"
-grep -Fq 'network:set acme-frontend attach-post-deploy existing-frontend-network ifritah-observability-openobserve' \
+grep -Fq 'network:set acme-frontend attach-post-deploy existing-frontend-network ifritah-observability-openobserve-ingest' \
     "$OPENOBSERVE_TEST_LOG" \
     || fail "frontend Dokku networks were not preserved while adding telemetry"
 openobserve_reconcile_tenant_apps acme
@@ -233,8 +247,8 @@ openobserve_reconcile_tenant_apps acme
 pass "enabled wiring is idempotent and uses the private collector endpoint"
 
 # A network added by an operator after enablement must survive disablement.
-TEST_NETWORKS["acme-backend"]="existing-backend-network post-enable-backend-network ifritah-observability-openobserve"
-TEST_NETWORKS["acme-frontend"]="existing-frontend-network post-enable-frontend-network ifritah-observability-openobserve"
+TEST_NETWORKS["acme-backend"]="existing-backend-network post-enable-backend-network ifritah-observability-openobserve-ingest"
+TEST_NETWORKS["acme-frontend"]="existing-frontend-network post-enable-frontend-network ifritah-observability-openobserve-ingest"
 OPENOBSERVE_TENANT_TELEMETRY_ENABLED=false
 openobserve_reconcile_tenant_apps acme
 first_config_unsets="$(grep -c '^config:unset' "$OPENOBSERVE_TEST_LOG")"
@@ -258,7 +272,7 @@ OPENOBSERVE_TENANT_TELEMETRY_ENABLED=false
 if openobserve_reconcile_tenant_apps acme; then
     fail "network:set failure was swallowed during disablement"
 fi
-[ "${TEST_NETWORKS["acme-backend"]}" = "existing-backend-network post-enable-backend-network ifritah-observability-openobserve" ] \
+[ "${TEST_NETWORKS["acme-backend"]}" = "existing-backend-network post-enable-backend-network ifritah-observability-openobserve-ingest" ] \
     || fail "failed rollback changed backend networks"
 [ "${TEST_CONFIG["acme-backend:IFRITAH_OPENOBSERVE_NETWORK_CAPTURED"]:-}" = "1" ] \
     || fail "failed rollback discarded the backend capture marker"

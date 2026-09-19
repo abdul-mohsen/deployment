@@ -39,8 +39,11 @@ grep -Fq 'regex         = "^/?[a-z0-9][a-z0-9-]{0,61}-frontend' "$alloy" \
 if [ "$(grep -c 'target_label  = "tenant_id"' "$alloy")" -lt 2 ]; then
     fail "tenant identity is not derived from backend/frontend container names"
 fi
-if [ "$(grep -c 'template = `{{ .tenant_id }}`' "$alloy")" -lt 2 ]; then
+if [ "$(grep -c 'template = `{{ .tenant_id | default .tenant_input }}`' "$alloy")" -lt 2 ]; then
     fail "backend/frontend log pipelines do not use trusted container tenant identity"
+fi
+if [ "$(grep -c 'stage.label_drop' "$alloy")" -lt 2 ]; then
+    fail "tenant identity remains exposed as a stream label"
 fi
 grep -Fq 'container_role' "$resource" \
     || fail "resource exporter role aggregation is missing"
@@ -74,6 +77,23 @@ grep -Fq 'set(attributes["service.name"], "ifritah-tenant")' "$alloy" \
 if grep -Fq 'set(attributes["tenant_id"], attributes["tenant.id"])' "$alloy"; then
     fail "shared OTLP receiver trusts caller-supplied tenant.id"
 fi
+grep -Fq 'timestamp_input              = "time"' "$alloy" \
+    || fail "slog time field is not mapped into canonical event time"
+grep -Fq 'message_input                = "msg"' "$alloy" \
+    || fail "slog msg field is not mapped into canonical event type"
+grep -Fq 'status_input                 = "status"' "$alloy" \
+    || fail "slog status field is not mapped into canonical status code"
+grep -Fq 'source   = "outcome_candidate"' "$alloy" \
+    || fail "status-derived outcome mapping is missing"
+grep -Fq 'set(attributes["method"], attributes["http.request.method"])' "$alloy" \
+    || fail "native trace method is not mapped to canonical method"
+grep -Fq 'set(attributes["route"], attributes["http.route"])' "$alloy" \
+    || fail "native trace route is not mapped to canonical route"
+grep -Fq 'set(attributes["status_code"], attributes["http.response.status_code"])' "$alloy" \
+    || fail "native trace status is not mapped to canonical status code"
+grep -Fq 'set(attributes["duration_ms"], (end_time_unix_nano - start_time_unix_nano) / 1000000)' "$alloy" \
+    || fail "native trace duration is not converted from span timestamps"
+pass "producer field mapping and trace canonicalization are configured"
 pass "redaction, size, and attribute allow-lists are configured"
 
 grep -Fq 'QUEUE_MAX_BYTES' "$gateway" \
@@ -96,25 +116,58 @@ grep -Fq 'containers/[A-Za-z0-9_.-]+/logs' "$docker_filter" \
     || fail "filtered Docker API does not allow logs"
 grep -Fq 'containers/[A-Za-z0-9_.-]+/(?:json|stats)' "$docker_filter" \
     || fail "filtered Docker API does not allow inspect/stats"
+grep -Fq 'networks(?:/[A-Za-z0-9_.-]+)?' "$docker_filter" \
+    || fail "filtered Docker API does not allow read-only network discovery"
 grep -Fq 'if ($request_method != GET)' "$docker_filter" \
     || fail "filtered Docker API is not read-only"
+grep -Fq 'NETWORKS: "1"' "$compose" \
+    || fail "Docker socket proxy does not allow read-only network discovery"
 grep -Fq 'docker.sock:/var/run/docker.sock:ro' "$compose" \
     || fail "Docker socket is not mounted read-only at the proxy boundary"
+grep -Fq 'The image entrypoint generates HAProxy config' "$compose" \
+    || fail "Docker socket proxy writable config boundary is undocumented"
 grep -Fq 'openobserve-gateway:4318/v1/logs' "$alloy" \
     || fail "logs do not use the single gateway egress"
 grep -Fq 'openobserve-gateway:4318/v1/metrics' "$alloy" \
     || fail "metrics do not use the single gateway egress"
 grep -Fq 'openobserve-gateway:4318/v1/traces' "$alloy" \
     || fail "traces do not use the single gateway egress"
+grep -Fq 'prometheus.scrape "backend_http"' "$alloy" \
+    || fail "backend HTTP metrics are not scraped"
+grep -Fq 'forward_to = [otelcol.receiver.prometheus.application.receiver]' "$alloy" \
+    || fail "backend metrics do not feed the OTel Prometheus receiver directly"
+grep -Fq 'prometheus.scrape "container_resources"' "$alloy" \
+    || fail "container resource metrics are not scraped"
+grep -Fq 'forward_to = [otelcol.receiver.prometheus.direct.receiver]' "$alloy" \
+    || fail "resource metrics do not feed the OTel Prometheus receiver directly"
+if grep -Fq 'prometheus.relabel "container_resources"' "$alloy"; then
+    fail "resource metrics still use the incompatible relabel-to-OTel fan-in path"
+fi
+grep -Fq 'type        = "Bearer"' "$alloy" \
+    || fail "backend metrics scrape is not authenticated"
 grep -Fq 'OPENOBSERVE_TENANT_OTLP_TOKEN: ${OPENOBSERVE_TENANT_OTLP_TOKEN:?set OPENOBSERVE_TENANT_OTLP_TOKEN in observability/openobserve.env}' "$compose" \
     || fail "Alloy token is not sourced from a protected operator environment"
+grep -Fq 'ZO_ROOT_USER_PASSWORD: ${ZO_ROOT_USER_PASSWORD:?set ZO_ROOT_USER_PASSWORD in observability/openobserve.env}' "$compose" \
+    || fail "Alloy OpenObserve exporter password is not sourced from a protected operator environment"
+grep -Fq 'cap_add: [CHOWN, SETGID, SETUID]' "$compose" \
+    || fail "Nginx filter lacks the least privilege needed to initialize its cache"
+grep -Fq 'name: ifritah-observability-openobserve-core' "$compose" \
+    || fail "core network is not declared"
+grep -Fq 'name: ifritah-observability-openobserve-ingest' "$compose" \
+    || fail "ingest network is not declared"
+grep -Fq 'name: ifritah-observability-openobserve-ui' "$compose" \
+    || fail "UI publish network is not declared"
+grep -Fq './observability/openobserve-ui/nginx.conf:/etc/nginx/nginx.conf:ro' "$compose" \
+    || fail "OpenObserve UI edge configuration is not mounted read-only"
+grep -Fq 'networks: [openobserve-core, openobserve-ingest]' "$compose" \
+    || fail "Alloy is not the only core/ingest bridge"
 if grep -Fq 'openobserve:5080' "$alloy"; then
     fail "Alloy has a direct OpenObserve egress"
 fi
 for image in \
     'tecnativa/docker-socket-proxy:0.1.2@sha256:' \
     'nginx:1.27.1-alpine@sha256:' \
-    'grafana/alloy:v1.5.1@sha256:' \
+    'grafana/alloy:v1.19.2@sha256:' \
     'quay.io/prometheus/node-exporter:v1.8.2@sha256:'; do
     grep -Fq "image: ${image}" "$compose" \
         || fail "OpenObserve image is not pinned immutably: ${image}"

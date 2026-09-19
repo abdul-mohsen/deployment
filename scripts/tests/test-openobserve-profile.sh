@@ -40,12 +40,16 @@ grep -Fq 'openobserve-data:/data' <<<"$compose_text" \
     || fail "OpenObserve data volume is not mounted at /data"
 grep -Fq 'name: ifritah-observability-openobserve-data' <<<"$compose_text" \
     || fail "OpenObserve data volume does not have a stable persistent name"
-grep -Fq 'name: ifritah-observability-openobserve' <<<"$compose_text" \
-    || fail "OpenObserve network does not have a stable name"
+grep -Fq 'name: ifritah-observability-openobserve-core' <<<"$compose_text" \
+    || fail "OpenObserve core network does not have a stable name"
+grep -Fq 'name: ifritah-observability-openobserve-ingest' <<<"$compose_text" \
+    || fail "OpenObserve ingest network does not have a stable name"
 grep -Fq 'internal: true' <<<"$compose_text" \
     || fail "OpenObserve network is not internal-only"
-grep -Fq 'networks: [openobserve]' <<<"$compose_text" \
-    || fail "OpenObserve service is not attached to its private network"
+grep -Fq 'networks: [openobserve-core]' <<<"$compose_text" \
+    || fail "OpenObserve service is not attached to its private core network"
+grep -Fq 'networks: [openobserve-core, openobserve-ingest]' <<<"$compose_text" \
+    || fail "Alloy is not attached to both collector networks"
 pass "OpenObserve storage and network boundaries are explicit"
 
 grep -Fq 'healthcheck:' <<<"$compose_text" \
@@ -65,6 +69,7 @@ grep -Fq 'pids_limit:' <<<"$compose_text" \
 pass "OpenObserve health, retention, and resource limits are configured"
 
 for service in \
+    openobserve-ui \
     docker-socket-proxy-openobserve \
     docker-api-filter-openobserve \
     openobserve-gateway \
@@ -74,6 +79,12 @@ for service in \
     grep -Eq "^[[:space:]]{2}${service}:" <<<"$compose_text" \
         || fail "OpenObserve collector service is missing: ${service}"
 done
+grep -Fq './observability/openobserve-ui/nginx.conf:/etc/nginx/nginx.conf:ro' <<<"$compose_text" \
+    || fail "OpenObserve UI edge configuration is not mounted read-only"
+grep -Fq 'networks: [openobserve-core, openobserve-ui]' <<<"$compose_text" \
+    || fail "OpenObserve UI edge is not attached to private core and publish networks"
+grep -Fq 'name: ifritah-observability-openobserve-ui' <<<"$compose_text" \
+    || fail "OpenObserve UI publish network does not have a stable name"
 grep -Fq 'openobserve-gateway-data:/var/lib/openobserve-gateway' <<<"$compose_text" \
     || fail "OpenObserve gateway durable queue volume is missing"
 grep -Fq 'openobserve-alloy-data:/var/lib/alloy' <<<"$compose_text" \
@@ -94,8 +105,8 @@ echo
 echo "=== OpenObserve Compose config ==="
 compose_config="$(
     cd dashboard
-    OBS_OPENOBSERVE_ENV_FILE=observability/openobserve.env.example \
-        "$compose_cli" compose --env-file observability/openobserve.env.example \
+    export OBS_OPENOBSERVE_ENV_FILE=observability/openobserve.env.example
+    "$compose_cli" compose --env-file observability/openobserve.env.example \
         -f docker-compose.openobserve.yml --profile openobserve config </dev/null
 )" || fail "OpenObserve Compose config failed"
 printf '%s\n' "$compose_config" | grep -Fq 'name: ifritah-observability-openobserve-data' \

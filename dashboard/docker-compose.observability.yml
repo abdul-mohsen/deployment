@@ -89,7 +89,7 @@ services:
     logging: *collector-logging
 
   alloy:
-    image: grafana/alloy:v1.5.1
+    image: grafana/alloy:v1.5.1@sha256:01a63f4e032ce54ee94b22049bc27f597e74f85566478c377f4b5c7f020c1eb3
     profiles: ["observability"]
     restart: unless-stopped
     command:
@@ -112,7 +112,7 @@ services:
     logging: *collector-logging
 
   loki:
-    image: grafana/loki:3.3.2
+    image: grafana/loki:3.3.2@sha256:8af2de1abbdd7aa92b27c9bcc96f0f4140c9096b507c77921ffddf1c6ad6c48f
     profiles: ["observability"]
     restart: unless-stopped
     command: ["-config.file=/etc/loki/config.yml"]
@@ -127,7 +127,7 @@ services:
     logging: *collector-logging
 
   prometheus:
-    image: prom/prometheus:v3.1.0
+    image: prom/prometheus:v3.1.0@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218
     profiles: ["observability"]
     restart: unless-stopped
     command:
@@ -150,7 +150,7 @@ services:
     logging: *collector-logging
 
   grafana:
-    image: grafana/grafana:11.5.2
+    image: grafana/grafana:11.5.2@sha256:8b37a2f028f164ce7b9889e1765b9d6ee23fec80f871d156fbf436d6198d32b7
     profiles: ["observability"]
     restart: unless-stopped
     environment:

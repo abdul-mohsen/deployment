@@ -207,6 +207,7 @@ func (e *exporter) collect(ctx context.Context) snapshot {
 	}
 
 	var allowlisted uint64
+	var pollErrors uint64
 	for _, container := range containers {
 		role, ok := roleForContainer(container)
 		if !ok {
@@ -222,8 +223,11 @@ func (e *exporter) collect(ctx context.Context) snapshot {
 			if inspect.State.Running {
 				current.running++
 			}
-		} else if strings.EqualFold(container.State, "running") {
-			current.running++
+		} else {
+			pollErrors++
+			if strings.EqualFold(container.State, "running") {
+				current.running++
+			}
 		}
 
 		if !strings.EqualFold(container.State, "running") {
@@ -232,6 +236,7 @@ func (e *exporter) collect(ctx context.Context) snapshot {
 		}
 		stats, statsErr := e.client.stats(ctx, container.ID)
 		if statsErr != nil {
+			pollErrors++
 			roles[role] = current
 			continue
 		}
@@ -253,6 +258,11 @@ func (e *exporter) collect(ctx context.Context) snapshot {
 	current.scrapeErrors = e.snapshot.scrapeErrors
 	current.lastErrorUnix = e.snapshot.lastErrorUnix
 	current.lastErrorMessage = e.snapshot.lastErrorMessage
+	if pollErrors > 0 {
+		current.scrapeErrors += pollErrors
+		current.lastErrorUnix = time.Now().Unix()
+		current.lastErrorMessage = "docker_container_collection_failed"
+	}
 	e.snapshot = current
 	e.mu.Unlock()
 	return current

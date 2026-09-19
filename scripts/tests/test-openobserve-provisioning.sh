@@ -136,7 +136,10 @@ required_alerts = {
     "Ifritah - Host memory pressure": "node_memory_MemAvailable_bytes",
     "Ifritah - Host resource metrics health": "node_cpu_seconds_total",
     "Ifritah - Resource exporter health": "ifritah_resource_exporter_up",
+    "Ifritah - Resource exporter scrape errors": "ifritah_resource_exporter_scrape_errors_total",
+    "Ifritah - Telemetry gateway heartbeat missing": "ifritah_gateway_up",
     "Ifritah - Telemetry gateway health": "ifritah_gateway_forward_failures_total",
+    "Ifritah - Telemetry gateway authentication blocked": "ifritah_gateway_auth_blocked",
 }
 alerts_by_name = {alert["name"]: alert for alert in alerts["alerts"]}
 missing_alerts = sorted(set(required_alerts) - set(alerts_by_name))
@@ -148,6 +151,32 @@ for name, metric_name in required_alerts.items():
     assert alert["stream_name"] == "ifritah_metrics_v1"
     assert alert["destinations"] == ["${OPENOBSERVE_ALERT_DESTINATION_NAME}"]
     assert alert["enabled"] is False
+
+for name in (
+    "Ifritah - Container restart loop",
+    "Ifritah - Resource exporter scrape errors",
+    "Ifritah - Telemetry gateway health",
+):
+    assert "MAX(value) - MIN(value)" in alerts_by_name[name]["query_condition"]["sql"], name
+
+assert "GROUP BY container_role" in alerts_by_name["Ifritah - Container restart loop"]["query_condition"]["sql"]
+assert "GROUP BY metric_name, signal" in alerts_by_name["Ifritah - Telemetry gateway health"]["query_condition"]["sql"]
+
+for name in (
+    "Ifritah - Resource exporter health",
+    "Ifritah - Telemetry gateway heartbeat missing",
+):
+    alert = alerts_by_name[name]
+    assert alert["trigger_condition"]["operator"] == "<", name
+    assert "COUNT(*)" in alert["query_condition"]["sql"], name
+
+for name, counter in {
+    "Ifritah - Resource exporter scrape errors": "ifritah_resource_exporter_scrape_errors_total",
+    "Ifritah - Telemetry gateway health": "ifritah_gateway_forward_failures_total",
+}.items():
+    query = alerts_by_name[name]["query_condition"]["sql"]
+    assert counter in query
+    assert not re.search(rf"{re.escape(counter)}[^\"']*value\s*>\s*0", query, re.I), name
 
 all_json = json.dumps([manifest, stream_doc, dashboard, views, alerts, notifications])
 terms = [
@@ -219,6 +248,15 @@ grep -Fq 'streams/$encoded_stream/settings?type=$stream_type' "$apply" \
     || fail "apply script does not use the stream settings endpoint"
 grep -Fq '/savedviews' "$apply" \
     || fail "apply script does not provision saved views"
+grep -Fq 'api_put "/api/$ORG_PATH/savedviews/$(urlencode "$view_id")"' "$apply" \
+    || fail "apply script does not update existing saved views"
+grep -Fq 'api_put "/api/v2/$ORG_PATH/alerts/$(urlencode "$alert_id")"' "$apply" \
+    || fail "apply script does not update existing alerts"
+grep -Fq 'refusing to create duplicate state' "$apply" \
+    || fail "apply script does not fail closed when existing-resource listing fails"
+if grep -Fq 'exists: $view_name' "$apply" || grep -Fq 'exists: $alert_name' "$apply"; then
+    fail "apply script silently skips stale saved views or alerts"
+fi
 if grep -Eiq 'webhook|smtp|pagerduty|authorization:|bearer ' "$apply"; then
     fail "apply script contains notification credential or delivery configuration"
 fi

@@ -30,6 +30,8 @@ grep -Fq 'ZO_ROOT_USER_EMAIL' <<<"$credentials_text" \
     || fail "native OpenObserve root email is missing from the env example"
 grep -Fq 'ZO_ROOT_USER_PASSWORD' <<<"$credentials_text" \
     || fail "native OpenObserve root password is missing from the env example"
+grep -Fq 'OPENOBSERVE_TENANT_OTLP_TOKEN=replace-with-a-random-otlp-token' <<<"$credentials_text" \
+    || fail "deployment OTLP token is missing from the protected env example"
 grep -Fxq 'dashboard/observability/openobserve.env' <<<"$gitignore_text" \
     || fail "OpenObserve credentials file is not ignored"
 pass "native credentials use an ignored operator env file"

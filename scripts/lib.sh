@@ -398,7 +398,7 @@ public_tenant_url() {
 # another name would make it possible to point tenant apps at an unreviewed or
 # public network.
 OPENOBSERVE_DEFAULT_NETWORK_NAME="ifritah-observability-openobserve"
-OPENOBSERVE_OTLP_ENDPOINT="http://alloy-openobserve:4318"
+OPENOBSERVE_OTLP_ENDPOINT="http://alloy-openobserve:4318/v1/traces"
 readonly OPENOBSERVE_DEFAULT_NETWORK_NAME OPENOBSERVE_OTLP_ENDPOINT
 
 openobserve_warn() {
@@ -508,6 +508,22 @@ openobserve_sampler_arg() {
     fi
 }
 
+openobserve_otlp_headers() {
+    local token="${OPENOBSERVE_TENANT_OTLP_TOKEN:-}" encoded
+    if [[ ! "$token" =~ ^[A-Za-z0-9._~+/=-]{16,256}$ ]]; then
+        openobserve_warn \
+            "OPENOBSERVE_TENANT_OTLP_TOKEN must be a bounded printable token; refusing unauthenticated OTLP wiring."
+        return 1
+    fi
+    if ! command -v base64 >/dev/null 2>&1; then
+        openobserve_warn "base64 is unavailable; refusing unauthenticated OTLP wiring."
+        return 1
+    fi
+    encoded="$(printf 'ifritah-tenant:%s' "$token" | base64 | tr -d '\r\n')" || return 1
+    [ -n "$encoded" ] || return 1
+    printf 'Authorization=Basic %s' "$encoded"
+}
+
 openobserve_environment_name() {
     local value="${DEPLOY_ENV:-${DASHBOARD_ENV:-production}}"
     value="${value,,}"
@@ -590,7 +606,7 @@ openobserve_restart_running_app() {
 openobserve_app_configure() {
     local app="$1" component="$2" environment
     local queue_size batch_default batch_size schedule_delay export_timeout sampler sampler_arg
-    local resource_attributes pair key expected current changed=0
+    local resource_attributes otlp_headers pair key expected current changed=0
     local -a args=()
 
     environment="$(openobserve_environment_name)"
@@ -612,10 +628,12 @@ openobserve_app_configure() {
     esac
     sampler_arg="$(openobserve_sampler_arg)"
     resource_attributes="service.namespace=ifritah,deployment.environment=${environment}"
+    otlp_headers="$(openobserve_otlp_headers)" || return 1
 
     args=(
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OPENOBSERVE_OTLP_ENDPOINT}"
         "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf"
+        "OTEL_EXPORTER_OTLP_HEADERS=${otlp_headers}"
         "OTEL_TRACES_EXPORTER=otlp"
         "OTEL_EXPORTER_OTLP_TRACES_INSECURE=true"
         "OTEL_SERVICE_NAME=ifritah-${component}"
@@ -668,10 +686,14 @@ openobserve_set_app_networks() {
     local app="$1"
     shift
     if [ "$#" -eq 0 ]; then
-        dokku network:set "$app" attach-post-deploy "" >/dev/null 2>&1
-    else
-        dokku network:set "$app" attach-post-deploy "$@" >/dev/null 2>&1
+        if dokku network:set "$app" attach-post-deploy "" >/dev/null 2>&1; then
+            return 0
+        fi
+    elif dokku network:set "$app" attach-post-deploy "$@" >/dev/null 2>&1; then
+        return 0
     fi
+    openobserve_warn "Dokku network:set failed for $app."
+    return 1
 }
 
 openobserve_capture_app_network() {
@@ -717,18 +739,9 @@ openobserve_remove_app_network() {
 }
 
 openobserve_restore_app_network() {
-    local app="$1" network="$2" captured previous existing found=0
-    local -a networks=() remaining=()
-    captured="$(dokku config:get "$app" IFRITAH_OPENOBSERVE_NETWORK_CAPTURED 2>/dev/null || true)"
-    if [ "$captured" = "1" ]; then
-        previous="$(dokku config:get \
-            "$app" IFRITAH_OPENOBSERVE_PREVIOUS_ATTACH_POST_DEPLOY 2>/dev/null || true)"
-        if [ -n "$previous" ]; then
-            read -r -a networks <<< "$previous"
-        fi
-        openobserve_set_app_networks "$app" "${networks[@]}"
-        return 0
-    fi
+    local app="$1" network="$2"
+    # Reconcile the current Dokku value instead of restoring the old snapshot
+    # wholesale. Operators may have added networks after telemetry enablement.
     openobserve_remove_app_network "$app" "$network"
 }
 
@@ -749,11 +762,15 @@ openobserve_disable_app() {
     captured="$(dokku config:get "$app" IFRITAH_OPENOBSERVE_NETWORK_CAPTURED 2>/dev/null || true)"
     [ "$marker" = "1" ] || [ "$captured" = "1" ] || return 0
 
-    openobserve_restore_app_network "$app" "$network" || \
-        openobserve_warn "could not restore the previous Dokku network settings for $app."
-    dokku config:unset --no-restart "$app" \
+    if ! openobserve_restore_app_network "$app" "$network"; then
+        openobserve_warn \
+            "could not remove the approved OpenObserve network from $app; retaining telemetry capture state."
+        return 1
+    fi
+    if dokku config:unset --no-restart "$app" \
         OTEL_EXPORTER_OTLP_TRACES_ENDPOINT \
         OTEL_EXPORTER_OTLP_TRACES_PROTOCOL \
+        OTEL_EXPORTER_OTLP_HEADERS \
         OTEL_TRACES_EXPORTER \
         OTEL_EXPORTER_OTLP_TRACES_INSECURE \
         OTEL_SERVICE_NAME \
@@ -767,8 +784,12 @@ openobserve_disable_app() {
         OTEL_BSP_EXPORT_TIMEOUT \
         IFRITAH_OPENOBSERVE_NETWORK_CAPTURED \
         IFRITAH_OPENOBSERVE_PREVIOUS_ATTACH_POST_DEPLOY \
-        IFRITAH_OPENOBSERVE_WIRING >/dev/null 2>&1 || \
+        IFRITAH_OPENOBSERVE_WIRING >/dev/null 2>&1; then
+        :
+    else
         openobserve_warn "could not remove OpenObserve environment from $app."
+        return 1
+    fi
     openobserve_disconnect_running_app "$app" "$network"
     openobserve_restart_running_app "$app"
 }
@@ -777,7 +798,7 @@ openobserve_reconcile_tenant_apps() {
     local tenant="${1:-}"
     local backend_app="${2:-${tenant}-backend}"
     local frontend_app="${3:-${tenant}-frontend}"
-    local mode network app component
+    local mode network app component reconcile_failed=0
 
     [ -n "$tenant" ] || return 0
     mode="$(openobserve_telemetry_mode)"
@@ -786,9 +807,12 @@ openobserve_reconcile_tenant_apps() {
             network="$OPENOBSERVE_DEFAULT_NETWORK_NAME"
             for app in "$backend_app" "$frontend_app"; do
                 if dokku apps:exists "$app" >/dev/null 2>&1; then
-                    openobserve_disable_app "$app" "$network"
+                    if ! openobserve_disable_app "$app" "$network"; then
+                        reconcile_failed=1
+                    fi
                 fi
             done
+            return "$reconcile_failed"
             ;;
         invalid)
             return 0

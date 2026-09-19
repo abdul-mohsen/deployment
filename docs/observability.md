@@ -92,8 +92,12 @@ change the existing Loki/Grafana Compose file. Tenant application wiring is
 explicitly opt-in through `OPENOBSERVE_TENANT_TELEMETRY_ENABLED=false` in
 `config.env`; when enabled, lifecycle scripts attach both tenant apps to the
 fixed internal `ifritah-observability-openobserve` network and configure only
-private OTLP trace export to `alloy-openobserve:4318`. Docker logs remain
-collector-side Docker API ingestion, not an application OTLP log exporter. The
+private, authenticated OTLP trace export to
+`http://alloy-openobserve:4318/v1/traces`. The protected
+`OPENOBSERVE_TENANT_OTLP_TOKEN` is required by both the Alloy receiver and
+tenant app wiring; caller-provided OTLP service/tenant identity is overwritten
+or rejected at the shared receiver. Docker logs remain collector-side Docker
+API ingestion, not an application OTLP log exporter. The
 versioned operator UI bundle in
 `dashboard/observability/openobserve/` can be applied after the service starts;
 it provisions the contract streams, an operator dashboard, saved views, and

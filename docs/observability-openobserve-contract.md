@@ -251,6 +251,28 @@ mapping layer, but exported labels and searchable fields MUST obey this
 contract. Trace/span IDs remain native OTLP IDs and are also queryable through
 the canonical `trace_id` and `span_id` fields.
 
+### 3.7 Shared tenant OTLP identity
+
+Tenant applications use the explicit signal endpoint
+`http://alloy-openobserve:4318/v1/traces` on the private Docker network. The
+deployment injects a bounded Basic-auth header from the protected
+`OPENOBSERVE_TENANT_OTLP_TOKEN` value. The token is supplied to Alloy through
+the ignored operator environment file and to tenant apps through protected
+Dokku configuration; it MUST NOT appear in tracked files, logs, or runbooks.
+Missing or malformed tokens MUST fail closed for OTLP intake without blocking
+the tenant request path.
+
+The shared OTLP receiver MUST authenticate the deployment header before
+accepting tenant telemetry. It MUST overwrite resource `service.name` with
+the bounded `ifritah-tenant` identity and MUST remove caller-provided
+`tenant.id`/`tenant_id` from OTLP traces and metrics. A caller-supplied
+`service.name`, `tenant.id`, or equivalent span/resource attribute MUST NOT
+select another tenant or service. Tenant identity in Docker logs is derived
+from the collector's allow-listed Dokku container metadata; it is not taken
+from an arbitrary OTLP payload. The receiver's overwrite is intentional:
+OTLP application identity is authenticated but not used as a tenant-directory
+lookup.
+
 ## 4. Event taxonomy and examples
 
 The first implementation MUST support these event types:

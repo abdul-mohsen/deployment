@@ -479,6 +479,7 @@ info "  Domain:         $TENANT_DOMAIN"
 info "  Backend app:    $BACKEND_APP  → internal only (${BACKEND_APP}.web:${BACKEND_PORT})"
 info "  Frontend app:   $FRONTEND_APP → $TENANT_DOMAIN"
 info "  Docker network: $TENANT_NETWORK"
+info "  OpenObserve telemetry: ${OPENOBSERVE_TENANT_TELEMETRY_ENABLED:-false}"
 info "  Backend port:   $BACKEND_PORT"
 info "  Frontend port:  $FRONTEND_PORT"
 info "  Storage:        $STORAGE_ROOT/$TENANT_NAME/{uploads,data}"
@@ -747,6 +748,12 @@ SQLEOF
         fi
     fi
 fi
+
+# ---- 7b. Optional OpenObserve application wiring --------------------------
+# This is deliberately after the normal tenant/database environment setup so
+# an enabled pilot wins over a user-supplied OTEL endpoint, while the helper
+# still fails open if Docker or the collector network is unavailable.
+openobserve_reconcile_tenant_apps "$TENANT_NAME" "$BACKEND_APP" "$FRONTEND_APP" || true
 
 # ---- 8. Health checks ----
 # Modern Dokku (>= 0.30) uses an app-root CHECKS file or app.json for HTTP

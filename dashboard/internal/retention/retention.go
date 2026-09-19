@@ -12,11 +12,13 @@ package retention
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
 	"time"
+
+	"github.com/abdul-mohsen/deployment/dashboard/internal/logging"
 )
 
 const (
@@ -31,6 +33,7 @@ type Runner struct {
 	scriptsHostPath string
 	backupDir       string
 	retentionDays   int
+	logger          *slog.Logger
 	stop            chan struct{}
 }
 
@@ -44,7 +47,15 @@ func New(dockerBin, runnerImage, scriptsHostPath string, retentionDays int) *Run
 		runnerImage:     runnerImage,
 		scriptsHostPath: scriptsHostPath,
 		retentionDays:   retentionDays,
+		logger:          slog.Default(),
 		stop:            make(chan struct{}),
+	}
+}
+
+// SetLogger replaces the logger used by background retention runs.
+func (r *Runner) SetLogger(logger *slog.Logger) {
+	if logger != nil {
+		r.logger = logger
 	}
 }
 
@@ -110,11 +121,15 @@ exec bash scripts/manage-backups.sh prune --retention-days "$1"`
 
 // run executes manage-backups.sh prune --retention-days N.
 func (r *Runner) run(ctx context.Context) {
+	logger := r.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	if r.scriptsHostPath == "" {
-		log.Println("[retention] SCRIPTS_HOST_PATH not set — skipping")
+		logger.WarnContext(ctx, "retention run skipped", "reason", "scripts_host_path_not_set")
 		return
 	}
-	log.Printf("[retention] running auto-backup prune (retention=%d days)", r.retentionDays)
+	logger.InfoContext(ctx, "retention prune started", "retention_days", r.retentionDays)
 
 	dockerSocket := "/var/run/docker.sock:/var/run/docker.sock"
 	if _, err := os.Stat(`\\.\pipe\dockerDesktopLinuxEngine`); err == nil {
@@ -130,8 +145,8 @@ func (r *Runner) run(ctx context.Context) {
 	cmd.Env = append(os.Environ(), "TERM=dumb")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("[retention] prune error: %v\noutput: %s", err, out)
+		logger.ErrorContext(ctx, "retention prune failed", logging.ErrorAttr(err), "output_bytes", len(out))
 	} else {
-		log.Printf("[retention] prune complete\noutput: %s", out)
+		logger.InfoContext(ctx, "retention prune completed", "output_bytes", len(out))
 	}
 }

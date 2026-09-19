@@ -13,6 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${REPO_DIR}/scripts/lib.sh"
 
 # Preserve production path and Docker settings used by restart-stack.sh while
 # keeping image identity validation in this stop-safe entrypoint.
@@ -28,6 +29,45 @@ done
 IMAGE="${DASHBOARD_IMAGE:-ssdawweq/dokku-dashboard:prod}"
 CONTAINER="dokku-dashboard-prod"
 COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.prod.yml"
+DASHBOARD_LOG_TAIL_LINES="${DASHBOARD_LOG_TAIL_LINES:-80}"
+if ! [[ "$DASHBOARD_LOG_TAIL_LINES" =~ ^[0-9]+$ ]] ||
+    [ "$DASHBOARD_LOG_TAIL_LINES" -lt 1 ] ||
+    [ "$DASHBOARD_LOG_TAIL_LINES" -gt 200 ]; then
+    DASHBOARD_LOG_TAIL_LINES=80
+fi
+FAILURE_REPORTED=0
+
+# Keep failure diagnostics bounded and focused on the dashboard container.
+# This reports state and recent dashboard logs; it never attempts an automatic
+# rollback or emits tenant application log streams.
+deployment_failure_report() {
+    local exit_code="${1:-1}" line_number="${2:-0}"
+    [ "$FAILURE_REPORTED" -eq 0 ] || return 0
+    FAILURE_REPORTED=1
+    echo "" >&2
+    echo "[!] Dashboard update failed (exit=${exit_code}, line=${line_number})." >&2
+    echo "    Container state:" >&2
+    if ! docker inspect "$CONTAINER" --format \
+        'status={{.State.Status}} exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} error_present={{if .State.Error}}true{{else}}false{{end}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} image={{.Image}}' \
+        2>/dev/null | sed -n '1p' | cut -c1-2048 >&2; then
+        echo "    container=${CONTAINER} not found" >&2
+    fi
+    echo "    Recent dashboard logs (up to ${DASHBOARD_LOG_TAIL_LINES} lines):" >&2
+    docker logs --tail "$DASHBOARD_LOG_TAIL_LINES" --timestamps "$CONTAINER" 2>&1 \
+        | sed -n "1,${DASHBOARD_LOG_TAIL_LINES}p" \
+        | sed 's/^/      /' >&2 || true
+}
+
+deployment_init_logging
+deployment_exit_report() {
+    local exit_code=$?
+    trap - EXIT
+    if [ "$exit_code" -ne 0 ]; then
+        deployment_failure_report "$exit_code" "${BASH_LINENO[0]:-0}"
+    fi
+    exit "$exit_code"
+}
+trap deployment_exit_report EXIT
 
 BRANCH="$(git -C "$REPO_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
 if [ "$BRANCH" != "main" ]; then
@@ -112,6 +152,6 @@ if [ "$STATUS" = "running" ]; then
 else
     echo ""
     echo "[!] Container is not running — check logs:"
-    echo "    docker logs $CONTAINER"
+    deployment_failure_report 1 "${LINENO}"
     exit 1
 fi

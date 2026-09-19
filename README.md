@@ -101,6 +101,37 @@ templates/                  # COPY these into your backend / frontend repos
 - MySQL on the host (or reachable via `host.docker.internal`)
 - Wildcard DNS: `*.app.example.com → server IP`
 
+## Deployment logging and observability
+
+The dashboard emits JSON `log/slog` events by default. Configure
+`DASHBOARD_LOG_LEVEL` (`debug`, `info`, `warn`, or `error`) and
+`DASHBOARD_LOG_FORMAT` (`json` or `text`) in `config.env`. Request access
+events are correlated with Chi request IDs and contain only a route pattern,
+status, duration, and normalized client IP; headers, cookies, query values,
+and bodies are intentionally excluded. Recovered handler panics return a
+generic 500 and log only panic type/request ID, never panic values or stacks.
+The optional collector uses a pinned read-only Docker socket proxy behind a
+pinned path-filter proxy; Alloy does not mount or directly reach the host
+socket. Shell file logging is bounded and disables itself visibly if rotation
+or writing fails.
+
+Shell entrypoints add UTC operation fields and bounded failure diagnostics.
+See [`docs/observability.md`](docs/observability.md) for the optional,
+operator-only Alloy/Loki/Prometheus/Grafana profile, retention defaults, and
+resource sizing. The profile collects only explicitly labelled dashboard
+containers, not raw tenant application logs. Provisioned dashboards and
+alert-triage/startup/uptime runbooks are linked from that document; alert
+delivery remains opt-in and requires an operator-approved egress path.
+
+The separate OpenObserve deployment-only pilot is documented in
+[`docs/runbooks/openobserve-pilot.md`](docs/runbooks/openobserve-pilot.md).
+It uses its own Compose file/profile, private loopback publication, persistent
+storage, and native credentials file. Tenant application trace wiring remains
+off by default and is enabled only with
+`OPENOBSERVE_TENANT_TELEMETRY_ENABLED=true`; the scripts attach apps to the
+fixed internal network and configure private OTLP traces without copying
+OpenObserve credentials into tenant apps.
+
 ## Initial setup
 
 ```bash

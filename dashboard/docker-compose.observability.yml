@@ -1,0 +1,211 @@
+# Optional, operator-only observability profile for the dashboard.
+#
+# Start from this directory with:
+#   cp observability/.env.example observability/.env
+#   docker compose --env-file observability/.env \
+#     -f docker-compose.observability.yml --profile observability up -d
+#
+# Only Grafana is published, and only on loopback. The Docker socket proxy is
+# isolated on docker-api; the path filter bridges docker-api to observability.
+services:
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.1.2@sha256:dc8ec925b1360c54e6bf350602d6faac4e33c5d8d809118e4c000c0b14a4529a
+    profiles: ["observability"]
+    restart: unless-stopped
+    environment:
+      # Alloy needs only container discovery, container log streaming, and
+      # daemon events. All mutating and unrelated API sections stay disabled.
+      CONTAINERS: "1"
+      EVENTS: "1"
+      POST: "0"
+      DELETE: "0"
+      EXEC: "0"
+      PING: "1"
+      VERSION: "1"
+      ALLOW_START: "0"
+      ALLOW_STOP: "0"
+      ALLOW_RESTARTS: "0"
+      ALLOW_PAUSE: "0"
+      ALLOW_UNPAUSE: "0"
+      AUTH: "0"
+      BUILD: "0"
+      COMMIT: "0"
+      CONFIGS: "0"
+      DISTRIBUTION: "0"
+      GRPC: "0"
+      IMAGES: "0"
+      INFO: "0"
+      NETWORKS: "0"
+      NODES: "0"
+      PLUGINS: "0"
+      SECRETS: "0"
+      SERVICES: "0"
+      SESSION: "0"
+      SWARM: "0"
+      SYSTEM: "0"
+      TASKS: "0"
+      VOLUMES: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    expose: ["2375"]
+    networks: [docker-api]
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 128m
+    cpus: "0.25"
+    pids_limit: 64
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: &collector-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  docker-api-filter:
+    image: nginx:1.27.1-alpine@sha256:a5127daff3d6f4606be3100a252419bfa84fd6ee5cd74d0feaca1a5068f97dcf
+    profiles: ["observability"]
+    restart: unless-stopped
+    entrypoint: ["nginx"]
+    command: ["-g", "daemon off;"]
+    depends_on:
+      docker-socket-proxy:
+        condition: service_started
+    volumes:
+      - ./observability/docker-api-filter/nginx.conf:/etc/nginx/nginx.conf:ro
+    expose: ["2375"]
+    networks: [docker-api, observability]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    mem_limit: 128m
+    cpus: "0.25"
+    pids_limit: 64
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *collector-logging
+
+  alloy:
+    image: grafana/alloy:v1.5.1
+    profiles: ["observability"]
+    restart: unless-stopped
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy
+    depends_on:
+      docker-api-filter:
+        condition: service_started
+      loki:
+        condition: service_started
+    networks: [observability]
+    mem_limit: 256m
+    cpus: "0.50"
+    security_opt: [no-new-privileges:true]
+    logging: *collector-logging
+
+  loki:
+    image: grafana/loki:3.3.2
+    profiles: ["observability"]
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/config.yml"]
+    volumes:
+      - loki-data:/loki
+      - ./observability/loki/config.yml:/etc/loki/config.yml:ro
+    expose: ["3100"]
+    networks: [observability]
+    mem_limit: 1g
+    cpus: "1.00"
+    security_opt: [no-new-privileges:true]
+    logging: *collector-logging
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    profiles: ["observability"]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${OBS_PROMETHEUS_RETENTION_TIME:-7d}
+      - --storage.tsdb.retention.size=${OBS_PROMETHEUS_RETENTION_SIZE:-5GB}
+      - --web.enable-lifecycle=false
+    volumes:
+      - prometheus-data:/prometheus
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    expose: ["9090"]
+    depends_on:
+      alloy:
+        condition: service_started
+    networks: [observability]
+    mem_limit: 512m
+    cpus: "1.00"
+    security_opt: [no-new-privileges:true]
+    logging: *collector-logging
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    profiles: ["observability"]
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${OBS_GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${OBS_GRAFANA_ADMIN_PASSWORD:?set OBS_GRAFANA_ADMIN_PASSWORD in observability/.env}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_SERVER_HTTP_ADDR: 0.0.0.0
+      GF_UNIFIED_ALERTING_ENABLED: "true"
+      GF_METRICS_ENABLED: "true"
+      # SMTP and Slack values are optional and are consumed only by an
+      # operator-installed contact-point file. No contact point is enabled by
+      # default, and the observability network remains internal-only.
+      GF_SMTP_ENABLED: ${OBS_SMTP_ENABLED:-false}
+      GF_SMTP_HOST: ${OBS_SMTP_HOST:-}
+      GF_SMTP_PORT: ${OBS_SMTP_PORT:-587}
+      GF_SMTP_USER: ${OBS_SMTP_USER:-}
+      GF_SMTP_PASSWORD: ${OBS_SMTP_PASSWORD:-}
+      GF_SMTP_FROM_ADDRESS: ${OBS_SMTP_FROM_ADDRESS:-}
+      GF_SMTP_FROM_NAME: ${OBS_SMTP_FROM_NAME:-Ifritah Grafana}
+      GF_SMTP_STARTTLS_POLICY: ${OBS_SMTP_STARTTLS_POLICY:-MandatoryStartTLS}
+      GF_SMTP_SKIP_VERIFY: ${OBS_SMTP_SKIP_VERIFY:-false}
+      OBS_ALERT_SLACK_WEBHOOK_URL: ${OBS_ALERT_SLACK_WEBHOOK_URL:-}
+      OBS_ALERT_EMAIL_TO: ${OBS_ALERT_EMAIL_TO:-}
+    ports:
+      - "127.0.0.1:${OBS_GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      loki:
+        condition: service_started
+      prometheus:
+        condition: service_started
+    networks: [observability]
+    mem_limit: 512m
+    cpus: "1.00"
+    security_opt: [no-new-privileges:true]
+    logging: *collector-logging
+
+networks:
+  docker-api:
+    name: ifritah-observability-docker-api
+    internal: true
+  observability:
+    name: ifritah-observability
+    internal: true
+
+volumes:
+  alloy-data:
+    name: ifritah-observability-alloy
+  loki-data:
+    name: ifritah-observability-loki
+  prometheus-data:
+    name: ifritah-observability-prometheus
+  grafana-data:
+    name: ifritah-observability-grafana

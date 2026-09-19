@@ -38,10 +38,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/lib.sh"
 
-# Try to source config.env for BASE_DOMAIN if not provided
-if [ -z "${BASE_DOMAIN:-}" ] && [ -f "$PROJECT_DIR/config.env" ]; then
-    # shellcheck disable=SC1091
-    source "$PROJECT_DIR/config.env"
+# Load config.env when it supplies BASE_DOMAIN or the optional telemetry flag.
+# Preserve an explicitly supplied BASE_DOMAIN while still allowing operators
+# to migrate existing tenants with OpenObserve enabled from config.env.
+if [ -f "$PROJECT_DIR/config.env" ]; then
+    if [ -z "${BASE_DOMAIN:-}" ] ||
+        [ -z "${OPENOBSERVE_TENANT_TELEMETRY_ENABLED+x}" ]; then
+        _base_domain_override="${BASE_DOMAIN:-}"
+        # shellcheck disable=SC1091
+        source "$PROJECT_DIR/config.env"
+        if [ -n "$_base_domain_override" ]; then
+            BASE_DOMAIN="$_base_domain_override"
+        fi
+        unset _base_domain_override
+    fi
 fi
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set (in env or $PROJECT_DIR/config.env)}"
 
@@ -68,6 +78,11 @@ dk() {
 }
 
 dk_dokku() { dk dokku "$@"; }
+
+# lib.sh uses the normal Dokku command name. This repair script runs from the
+# host, where Dokku is inside the container, so route those calls through the
+# same wrapper used by the rest of this script.
+dokku() { dk_dokku "$@"; }
 
 validate_docker_network_name() {
     local network="$1"
@@ -190,6 +205,15 @@ for t in "${TENANTS[@]}"; do
     if ! dk_dokku apps:exists "$fe" >/dev/null 2>&1; then
         warn "  $fe does not exist; skipping"
         continue
+    fi
+
+    if [ "$DRY_RUN" = "1" ]; then
+        info "  [dry-run] would reconcile optional OpenObserve telemetry wiring"
+    else
+        # The shared helper validates the fixed internal network, persists the
+        # Dokku hook, and connects live containers without making telemetry a
+        # deployment prerequisite.
+        openobserve_reconcile_tenant_apps "$t" "$be" "$fe" || true
     fi
 
     info "  network: $net"

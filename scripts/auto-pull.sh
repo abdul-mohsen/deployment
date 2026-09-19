@@ -20,11 +20,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/lib.sh"
+deployment_init_logging
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
-log()  { echo -e "[$(date '+%F %T')] ${GREEN}[+]${NC} $*"; }
-warn() { echo -e "[$(date '+%F %T')] ${YELLOW}[!]${NC} $*"; }
-info() { echo -e "[$(date '+%F %T')] ${BLUE}[i]${NC} $*"; }
+log()  { deployment_log INFO "$*"; echo -e "[$(date '+%F %T')] ${GREEN}[+]${NC} $*"; }
+warn() { deployment_log WARN "$*"; echo -e "[$(date '+%F %T')] ${YELLOW}[!]${NC} $*"; }
+info() { deployment_log INFO "$*"; echo -e "[$(date '+%F %T')] ${BLUE}[i]${NC} $*"; }
 
 CONFIG_FILE="$PROJECT_DIR/config.env"
 CHECK_TYPE="both"   # backend | frontend | both
@@ -45,6 +46,7 @@ BACKEND_IMAGE="${BACKEND_IMAGE:-${DOCKERHUB_USERNAME:+${DOCKERHUB_USERNAME}/ifri
 FRONTEND_IMAGE="${FRONTEND_IMAGE:-${DOCKERHUB_USERNAME:+${DOCKERHUB_USERNAME}/ifritah-web}}"
 DEV_TAG="${DEV_TAG:-dev}"
 DEV_TENANT="$(tenant_full_name "${DEV_TENANT:-dev}")" || exit 1
+deployment_set_tenant "$DEV_TENANT"
 TENANT_STATE_DIR="${TENANT_STATE_DIR:-/opt/tenant-state}"
 export DEV_TAG
 DIGEST_DIR="$(auto_pull_state_dir)"

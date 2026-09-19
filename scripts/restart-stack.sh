@@ -22,12 +22,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
+deployment_init_logging
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
-log()   { echo -e "${GREEN}[+]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-error() { echo -e "${RED}[x]${NC} $*" >&2; }
-info()  { echo -e "${BLUE}[i]${NC} $*"; }
+log()   { deployment_log INFO "$*"; echo -e "${GREEN}[+]${NC} $*"; }
+warn()  { deployment_log WARN "$*"; echo -e "${YELLOW}[!]${NC} $*"; }
+error() { deployment_log ERROR "$*"; echo -e "${RED}[x]${NC} $*" >&2; }
+info()  { deployment_log INFO "$*"; echo -e "${BLUE}[i]${NC} $*"; }
 
 ENV_NAME="dev"
 DOKKU_ONLY=false

@@ -1,0 +1,42 @@
+// Collect only containers explicitly labelled
+// com.ifritah.observability=dashboard. Tenant application logs are not
+// collected by this optional profile.
+logging {
+  level  = "info"
+  format = "json"
+}
+
+discovery.docker "containers" {
+  host = "http://docker-api-filter:2375"
+  filter {
+    name   = "label"
+    values = ["com.ifritah.observability=dashboard"]
+  }
+}
+
+discovery.relabel "dashboard_only" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_ifritah_observability"]
+    regex         = "dashboard"
+    action        = "keep"
+  }
+}
+
+loki.source.docker "dashboard" {
+  host       = "http://docker-api-filter:2375"
+  targets    = discovery.relabel.dashboard_only.output
+  labels     = {"app" = "ifritah-dashboard"}
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+
+  external_labels = {
+    cluster = "ifritah",
+  }
+}

@@ -23,6 +23,8 @@ type Config struct {
 	SessionKey          []byte // cookie signing key.
 	LogBufferLines      int    // ring-buffer size per log/activity key.
 	LogDir              string // persistent directory for application and action logs.
+	LogLevel            string // structured logger level: debug, info, warn, or error.
+	LogFormat           string // structured logger format: json (default) or text.
 	CookieSecure        bool   // set Secure flag on session cookie.
 	ScriptsHostPath     string // host path to /opt/deployment (for sidecar runner).
 	RunnerImage         string // image used to execute deployment scripts.
@@ -56,6 +58,8 @@ type Config struct {
 //	SESSION_KEY=<hex>         (auto-generated if missing — sessions reset on restart)
 //	LOG_BUFFER_LINES=2000
 //	LOG_DIR=/opt/dashboard-logs
+//	DASHBOARD_LOG_LEVEL=info
+//	DASHBOARD_LOG_FORMAT=json|text
 //	COOKIE_SECURE=false
 //	STORAGE_ROOT=/opt/tenant-data
 //	BACKUP_RETENTION_DAYS=30
@@ -71,6 +75,8 @@ func Load() (Config, error) {
 		AdminHash:           os.Getenv("ADMIN_PASSWORD_HASH"),
 		LogBufferLines:      envInt("LOG_BUFFER_LINES", 2000),
 		LogDir:              envOr("LOG_DIR", "/opt/dashboard-logs"),
+		LogLevel:            envOr("DASHBOARD_LOG_LEVEL", "info"),
+		LogFormat:           envOr("DASHBOARD_LOG_FORMAT", "json"),
 		CookieSecure:        strings.EqualFold(os.Getenv("COOKIE_SECURE"), "true"),
 		ScriptsHostPath:     envOr("SCRIPTS_HOST_PATH", ""),
 		RunnerImage:         envOr("SCRIPT_RUNNER_IMAGE", "mysql:8.0"),

@@ -13,3 +13,7 @@ dashboard/node_modules/
 dashboard/e2e/node_modules/
 dashboard/e2e/test-results/
 dashboard/.dashboard-logs/
+dashboard/observability/.env
+dashboard/observability/openobserve.env
+dashboard/observability/grafana/provisioning/alerting/contact-points.yml
+dashboard/observability/grafana/provisioning/alerting/policies.yml

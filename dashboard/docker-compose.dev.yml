@@ -28,6 +28,8 @@ services:
       SESSION_KEY: ${SESSION_KEY:-}
       LOG_BUFFER_LINES: 2000
       LOG_DIR: /opt/dashboard-logs
+      DASHBOARD_LOG_LEVEL: ${DASHBOARD_LOG_LEVEL:-debug}
+      DASHBOARD_LOG_FORMAT: ${DASHBOARD_LOG_FORMAT:-text}
       TENANT_STATE_DIR: /opt/tenant-state
       COOKIE_SECURE: "false"
       DOCKERHUB_USERNAME: ${DOCKERHUB_USERNAME:-}
@@ -58,3 +60,5 @@ services:
       - ${TENANT_STATE_DIR:-./.tenant-state}:/opt/tenant-state
       - ${BACKUP_DIR:-/opt/tenant-backups}:${BACKUP_DIR:-/opt/tenant-backups}
       - ${STORAGE_ROOT:-/opt/tenant-data}:${STORAGE_ROOT:-/opt/tenant-data}
+    labels:
+      com.ifritah.observability: "dashboard"

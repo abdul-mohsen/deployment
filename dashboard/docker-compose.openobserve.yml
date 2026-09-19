@@ -1,0 +1,268 @@
+# Deployment-only OpenObserve profile. It is intentionally separate from the
+# existing Loki/Grafana profile.
+services:
+  openobserve:
+    image: public.ecr.aws/zinclabs/openobserve:v1.0.3@sha256:600f92cafd2a0697abf2cb443f8ab533e06f7d2d3c031986210fce8339b214d9
+    profiles: ["openobserve"]
+    restart: unless-stopped
+    env_file:
+      - ${OBS_OPENOBSERVE_ENV_FILE:-observability/openobserve.env}
+    environment:
+      ZO_LOCAL_MODE: "true"
+      ZO_LOCAL_MODE_STORAGE: disk
+      ZO_DATA_DIR: /data
+      ZO_DATA_DB_DIR: /data/db
+      ZO_DATA_WAL_DIR: /data/wal
+      ZO_DATA_STREAM_DIR: /data/stream
+      ZO_HTTP_PORT: "5080"
+      ZO_GRPC_PORT: "5081"
+      ZO_COMPACT_DATA_RETENTION_DAYS: ${OBS_OPENOBSERVE_RETENTION_DAYS:-14}
+      ZO_COMPACT_EXTENDED_DATA_RETENTION_DAYS: ${OBS_OPENOBSERVE_RETENTION_DAYS:-14}
+      ZO_IGNORE_FILE_RETENTION_BY_STREAM: ${OBS_OPENOBSERVE_IGNORE_STREAM_RETENTION:-false}
+      ZO_COMPACT_DELETE_FILES_DELAY_HOURS: ${OBS_OPENOBSERVE_DELETE_DELAY_HOURS:-2}
+    ports:
+      - "${OBS_OPENOBSERVE_BIND:-127.0.0.1}:${OBS_OPENOBSERVE_PORT:-5080}:5080"
+    expose:
+      - "5080"
+      - "5081"
+    volumes:
+      - openobserve-data:/data
+    networks: [openobserve]
+    healthcheck:
+      # The pinned image is distroless, so use its native authenticated,
+      # read-only node status command instead of assuming curl or a shell.
+      test: ["CMD", "/openobserve", "node", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    mem_limit: ${OBS_OPENOBSERVE_MEMORY_LIMIT:-1g}
+    cpus: "${OBS_OPENOBSERVE_CPUS:-1.00}"
+    pids_limit: ${OBS_OPENOBSERVE_PIDS_LIMIT:-256}
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    logging: &openobserve-logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  docker-socket-proxy-openobserve:
+    image: tecnativa/docker-socket-proxy:0.1.2@sha256:dc8ec925b1360c54e6bf350602d6faac4e33c5d8d809118e4c000c0b14a4529a
+    profiles: ["openobserve"]
+    restart: unless-stopped
+    environment:
+      CONTAINERS: "1"
+      EVENTS: "0"
+      POST: "0"
+      DELETE: "0"
+      EXEC: "0"
+      PING: "1"
+      VERSION: "1"
+      ALLOW_START: "0"
+      ALLOW_STOP: "0"
+      ALLOW_RESTARTS: "0"
+      ALLOW_PAUSE: "0"
+      ALLOW_UNPAUSE: "0"
+      AUTH: "0"
+      BUILD: "0"
+      COMMIT: "0"
+      CONFIGS: "0"
+      DISTRIBUTION: "0"
+      GRPC: "0"
+      IMAGES: "0"
+      INFO: "0"
+      NETWORKS: "0"
+      NODES: "0"
+      PLUGINS: "0"
+      SECRETS: "0"
+      SERVICES: "0"
+      SESSION: "0"
+      SWARM: "0"
+      SYSTEM: "0"
+      TASKS: "0"
+      VOLUMES: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    expose: ["2375"]
+    networks: [docker-api-openobserve]
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: ${OBS_OPENOBSERVE_DOCKER_PROXY_MEMORY_LIMIT:-128m}
+    cpus: "${OBS_OPENOBSERVE_DOCKER_PROXY_CPUS:-0.25}"
+    pids_limit: ${OBS_OPENOBSERVE_DOCKER_PROXY_PIDS_LIMIT:-64}
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *openobserve-logging
+
+  docker-api-filter-openobserve:
+    image: nginx:1.27.1-alpine@sha256:a5127daff3d6f4606be3100a252419bfa84fd6ee5cd74d0feaca1a5068f97dcf
+    profiles: ["openobserve"]
+    restart: unless-stopped
+    entrypoint: ["nginx"]
+    command: ["-g", "daemon off;"]
+    depends_on:
+      docker-socket-proxy-openobserve:
+        condition: service_started
+    volumes:
+      - ./observability/openobserve-docker-api-filter/nginx.conf:/etc/nginx/nginx.conf:ro
+    expose: ["2375"]
+    networks: [docker-api-openobserve, openobserve]
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    mem_limit: ${OBS_OPENOBSERVE_DOCKER_FILTER_MEMORY_LIMIT:-128m}
+    cpus: "${OBS_OPENOBSERVE_DOCKER_FILTER_CPUS:-0.25}"
+    pids_limit: ${OBS_OPENOBSERVE_DOCKER_FILTER_PIDS_LIMIT:-64}
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *openobserve-logging
+
+  openobserve-gateway:
+    profiles: ["openobserve"]
+    build:
+      context: ./observability/openobserve-gateway
+    restart: unless-stopped
+    env_file:
+      - ${OBS_OPENOBSERVE_ENV_FILE:-observability/openobserve.env}
+    environment:
+      OPENOBSERVE_BASE_URL: http://openobserve:5080/api/default
+      QUEUE_DIR: /var/lib/openobserve-gateway
+      QUEUE_MAX_BYTES: ${OBS_OPENOBSERVE_QUEUE_MAX_BYTES:-67108864}
+      MAX_BODY_BYTES: ${OBS_OPENOBSERVE_MAX_BODY_BYTES:-4194304}
+      LISTEN_ADDR: ":4318"
+      HEALTH_ADDR: ":8080"
+    depends_on:
+      openobserve:
+        condition: service_healthy
+    expose:
+      - "4318"
+      - "8080"
+    volumes:
+      - openobserve-gateway-data:/var/lib/openobserve-gateway
+    networks: [openobserve]
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: ${OBS_OPENOBSERVE_GATEWAY_MEMORY_LIMIT:-256m}
+    cpus: "${OBS_OPENOBSERVE_GATEWAY_CPUS:-0.50}"
+    pids_limit: ${OBS_OPENOBSERVE_GATEWAY_PIDS_LIMIT:-128}
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "/openobserve-gateway", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *openobserve-logging
+
+  node-exporter-openobserve:
+    image: quay.io/prometheus/node-exporter:v1.8.2@sha256:4032c6d5bfd752342c3e631c2f1de93ba6b86c41db6b167b9a35372c139e7706
+    profiles: ["openobserve"]
+    restart: unless-stopped
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/host/root
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($|/)
+    expose: ["9100"]
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro,rslave
+    networks: [openobserve]
+    read_only: true
+    mem_limit: ${OBS_OPENOBSERVE_NODE_EXPORTER_MEMORY_LIMIT:-128m}
+    cpus: "${OBS_OPENOBSERVE_NODE_EXPORTER_CPUS:-0.25}"
+    pids_limit: ${OBS_OPENOBSERVE_NODE_EXPORTER_PIDS_LIMIT:-128}
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *openobserve-logging
+
+  resource-exporter-openobserve:
+    profiles: ["openobserve"]
+    build:
+      context: ./observability/resource-exporter
+    restart: unless-stopped
+    environment:
+      DOCKER_API_URL: http://docker-api-filter-openobserve:2375
+      LISTEN_ADDR: ":8080"
+      POLL_INTERVAL: ${OBS_OPENOBSERVE_RESOURCE_POLL_INTERVAL:-15s}
+    depends_on:
+      docker-api-filter-openobserve:
+        condition: service_started
+    expose: ["8080"]
+    networks: [openobserve]
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: ${OBS_OPENOBSERVE_RESOURCE_EXPORTER_MEMORY_LIMIT:-128m}
+    cpus: "${OBS_OPENOBSERVE_RESOURCE_EXPORTER_CPUS:-0.25}"
+    pids_limit: ${OBS_OPENOBSERVE_RESOURCE_EXPORTER_PIDS_LIMIT:-128}
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "/resource-exporter", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *openobserve-logging
+
+  alloy-openobserve:
+    image: grafana/alloy:v1.5.1@sha256:01a63f4e032ce54ee94b22049bc27f597e74f85566478c377f4b5c7f020c1eb3
+    profiles: ["openobserve"]
+    restart: unless-stopped
+    command:
+      - run
+      - --stability.level=public-preview
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./observability/openobserve/config.alloy:/etc/alloy/config.alloy:ro
+      - openobserve-alloy-data:/var/lib/alloy
+    depends_on:
+      docker-api-filter-openobserve:
+        condition: service_started
+      openobserve-gateway:
+        condition: service_healthy
+      node-exporter-openobserve:
+        condition: service_started
+      resource-exporter-openobserve:
+        condition: service_healthy
+    expose:
+      - "4317"
+      - "4318"
+      - "12345"
+    networks: [openobserve]
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: ${OBS_OPENOBSERVE_ALLOY_MEMORY_LIMIT:-384m}
+    cpus: "${OBS_OPENOBSERVE_ALLOY_CPUS:-0.75}"
+    pids_limit: ${OBS_OPENOBSERVE_ALLOY_PIDS_LIMIT:-256}
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *openobserve-logging
+
+networks:
+  docker-api-openobserve:
+    name: ifritah-observability-openobserve-docker-api
+    internal: true
+  openobserve:
+    name: ifritah-observability-openobserve
+    internal: true
+
+volumes:
+  openobserve-data:
+    name: ifritah-observability-openobserve-data
+  openobserve-gateway-data:
+    name: ifritah-observability-openobserve-gateway
+  openobserve-alloy-data:
+    name: ifritah-observability-openobserve-alloy

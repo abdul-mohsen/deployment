@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "payload_schema": "openobserve-search-state-v1",
+  "views": [
+    {
+      "view_name": "Ifritah - Request ID correlation",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "24h",
+      "description": "Replace REQUEST_ID_VALUE with a validated request_id, then correlate trace_id and service records.",
+      "query": "SELECT event_time, request_id, trace_id, span_id, service_name, route, status_code, duration_ms, outcome, error_code FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND request_id = 'REQUEST_ID_VALUE' ORDER BY _timestamp ASC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - Trace ID correlation",
+      "stream": "ifritah_traces_v1",
+      "stream_type": "traces",
+      "relative_time": "24h",
+      "description": "Replace TRACE_ID_VALUE with a lower-case W3C trace ID.",
+      "query": "SELECT event_time, trace_id, span_id, parent_span_id, service_name, operation, route, duration_ms, status_code, error_type FROM \"ifritah_traces_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND trace_id = 'TRACE_ID_VALUE' ORDER BY _timestamp ASC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - 5xx requests",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "1h",
+      "description": "Server-error request completions grouped by stable service and route fields.",
+      "query": "SELECT event_time, tenant_id, request_id, trace_id, service_name, route, status_code, duration_ms, error_code, outcome FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND event_type = 'http.request.completed' AND status_class = '5xx' ORDER BY _timestamp DESC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - Panic and exception events",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "24h",
+      "description": "Recovered panic and bounded exception categories only.",
+      "query": "SELECT event_time, request_id, trace_id, service_name, route, panic_type, exception_type, error_type, stack_fingerprint, outcome FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND (event_type = 'http.panic_recovered' OR panic_type IS NOT NULL OR exception_type IS NOT NULL) ORDER BY _timestamp DESC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - Authentication failures",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "24h",
+      "description": "Rejected auth decisions using stable operation and error_code fields.",
+      "query": "SELECT event_time, tenant_scope, tenant_id, actor_id, operation, error_code, outcome, service_name FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND event_type = 'auth.decision' AND outcome = 'rejected' ORDER BY _timestamp DESC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - Migration and deployment failures",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "7d",
+      "description": "Deployment operation failures, including migration stage, without command text.",
+      "query": "SELECT event_time, operation_id, tenant_id, script, deployment_stage, build_version, build_commit, image_digest, scripts_revision, error_code, outcome FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '7 days' AND event_type = 'deployment.operation' AND outcome = 'failure' AND deployment_stage IN ('migration', 'backup', 'image_swap', 'verify', 'rollback') ORDER BY _timestamp DESC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - Dependency timeouts",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "1h",
+      "description": "Dependency failures and timeouts by bounded dependency and operation.",
+      "query": "SELECT event_time, service_name, dependency, operation, attempt, duration_ms, error_code, outcome, trace_id FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND event_type = 'dependency.call.completed' AND outcome IN ('timeout', 'failure') ORDER BY _timestamp DESC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - Tenant and service latency",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "1h",
+      "description": "Replace TENANT_ID_VALUE with a normalized tenant_id for a bounded service latency summary.",
+      "query": "SELECT service_name, AVG(duration_ms) AS avg_duration_ms, COUNT(*) AS request_count FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND event_type = 'http.request.completed' AND tenant_id = 'TENANT_ID_VALUE' GROUP BY service_name ORDER BY avg_duration_ms DESC LIMIT 64"
+    },
+    {
+      "view_name": "Ifritah - Collector drops and lag",
+      "stream": "ifritah_telemetry_health_v1",
+      "stream_type": "logs",
+      "relative_time": "1h",
+      "description": "Pipeline drops, parse failures, lag, queue depth, and disk pressure.",
+      "query": "SELECT event_time, component, service_name, operation, outcome, error_code, dropped_records, parse_failures, lag_ms, queue_depth, disk_usage_ratio FROM \"ifritah_telemetry_health_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND (outcome IN ('dropped', 'degraded', 'failure') OR dropped_records > 0 OR parse_failures > 0 OR lag_ms > 60000 OR queue_depth > 1000 OR disk_usage_ratio > 0.85) ORDER BY _timestamp DESC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - Resource and restart health",
+      "stream": "ifritah_metrics_v1",
+      "stream_type": "metrics",
+      "relative_time": "1h",
+      "description": "Host and container CPU, RAM, disk, and restart metrics.",
+      "query": "SELECT event_time, metric_name, service_name, container_role, host_role, value, outcome FROM \"ifritah_metrics_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND metric_name IN ('node_cpu_seconds_total', 'node_memory_MemTotal_bytes', 'node_memory_MemAvailable_bytes', 'node_filesystem_free_bytes', 'ifritah_container_cpu_usage_ratio', 'ifritah_container_memory_working_set_bytes', 'ifritah_container_restarts_total') ORDER BY _timestamp DESC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - OpenObserve health",
+      "stream": "ifritah_telemetry_health_v1",
+      "stream_type": "logs",
+      "relative_time": "24h",
+      "description": "OpenObserve and collector readiness, export, and ingestion health.",
+      "query": "SELECT event_time, component, service_name, event_type, operation, outcome, error_code, lag_ms, queue_depth FROM \"ifritah_telemetry_health_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND (component IN ('collector', 'openobserve') OR service_name = 'openobserve') ORDER BY _timestamp DESC LIMIT 200"
+    }
+  ]
+}

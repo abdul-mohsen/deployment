@@ -49,6 +49,34 @@ jobs:
         shell: bash
         run: bash scripts/tests/test-release-contract.sh
 
+      - name: Check deployment logging contracts
+        shell: bash
+        run: bash scripts/tests/test-logging-contract.sh
+
+      - name: Check observability provisioning contracts
+        shell: bash
+        run: bash scripts/tests/test-observability-provisioning.sh
+
+      - name: Check OpenObserve deployment profile contracts
+        shell: bash
+        run: bash scripts/tests/test-openobserve-profile.sh
+
+      - name: Check OpenObserve UI provisioning contracts
+        shell: bash
+        run: bash scripts/tests/test-openobserve-provisioning.sh
+
+      - name: Check OpenObserve collector and resource contracts
+        shell: bash
+        run: bash scripts/tests/test-openobserve-pipeline.sh
+
+      - name: Check OpenObserve tenant application wiring
+        shell: bash
+        run: bash scripts/tests/test-openobserve-app-wiring.sh
+
+      - name: Check OpenObserve pilot runbook contracts
+        shell: bash
+        run: bash scripts/tests/test-openobserve-runbook.sh
+
   dashboard-release-gate:
     name: Dashboard test, vet, and build
     runs-on: ubuntu-latest

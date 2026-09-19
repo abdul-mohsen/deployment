@@ -63,6 +63,7 @@ for i in $(seq 1 $#); do
 done
 
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+deployment_init_logging
 IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-${IMAGE_PULL_POLICY:-always}}"
 VERIFY_RETRIES="${TENANT_VERIFY_RETRIES:-15}"
 VERIFY_DELAY="${TENANT_VERIFY_DELAY:-2}"
@@ -71,9 +72,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
-log()   { echo -e "${GREEN}[+]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-error() { echo -e "${RED}[✗]${NC} $*" >&2; }
+log()   { deployment_log INFO "$*"; echo -e "${GREEN}[+]${NC} $*"; }
+warn()  { deployment_log WARN "$*"; echo -e "${YELLOW}[!]${NC} $*"; }
+error() { deployment_log ERROR "$*"; echo -e "${RED}[✗]${NC} $*" >&2; }
 
 TENANT_NAME=""
 BACKEND_IMAGE=""
@@ -391,6 +392,7 @@ if [ -z "$TENANT_NAME" ]; then
     exit 1
 fi
 TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
+deployment_set_tenant "$TENANT_NAME"
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"
 PUBLIC_TENANT_URL="$(public_tenant_url "$TENANT_NAME")" || exit 1
 
@@ -399,7 +401,9 @@ FRONTEND_APP="${TENANT_NAME}-frontend"
 
 # Reconcile persisted routing before any image pull, migration, or deploy.
 # This makes the configured BASE_DOMAIN authoritative even when a later
-# update step fails.
+# update step fails. The shared routing helper also applies the optional,
+# private OpenObserve app-network/trace wiring without making telemetry a
+# deployment prerequisite.
 log "Synchronizing tenant routing: ${PUBLIC_TENANT_URL}"
 reconcile_tenant_routing "$TENANT_NAME"
 
@@ -418,7 +422,7 @@ if [ -n "$BACKEND_IMAGE" ] || [ -n "$FRONTEND_IMAGE" ]; then
 fi
 for ev in "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; do
     if [[ "$ev" == *"="* ]]; then
-        log "Setting env: $ev"
+        log "Setting env key: ${ev%%=*}"
         dokku config:set --no-restart "$BACKEND_APP" "$ev"
     fi
 done

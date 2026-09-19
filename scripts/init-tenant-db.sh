@@ -11,6 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/lib.sh"
+deployment_init_logging
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -18,10 +19,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-log()   { echo -e "${GREEN}[+]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-error() { echo -e "${RED}[x]${NC} $*" >&2; }
-info()  { echo -e "${BLUE}[i]${NC} $*"; }
+log()   { deployment_log INFO "$*"; echo -e "${GREEN}[+]${NC} $*"; }
+warn()  { deployment_log WARN "$*"; echo -e "${YELLOW}[!]${NC} $*"; }
+error() { deployment_log ERROR "$*"; echo -e "${RED}[x]${NC} $*" >&2; }
+info()  { deployment_log INFO "$*"; echo -e "${BLUE}[i]${NC} $*"; }
 
 usage() {
     cat <<EOF
@@ -106,6 +107,7 @@ else
 fi
 
 TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
+deployment_set_tenant "$TENANT_NAME"
 
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"
 DOKKU_PORT="${DOKKU_PORT:-8080}"
@@ -917,7 +919,7 @@ register_seed_user() {
         status="${response##*$'\n'}"
         body="${response%$'\n'$status}"
         if [ "${DASHBOARD_ENV:-}" = "dev" ]; then
-            info "[dev-diag] register attempt=${attempt} status='${status}' body_len=${#body} body_head=$(printf '%.120s' "$body")"
+            info "[dev-diag] register attempt=${attempt} status='${status}' body_len=${#body}"
         fi
 
         if [ "$status" = "201" ] || [ "$status" = "200" ] || [ "$status" = "409" ]; then
@@ -931,7 +933,7 @@ register_seed_user() {
             continue
         fi
 
-        error "Failed to register user '$username' (HTTP $status): $body"
+        error "Failed to register user '$username' (HTTP $status, response_bytes=${#body})"
         exit 1
     done
 

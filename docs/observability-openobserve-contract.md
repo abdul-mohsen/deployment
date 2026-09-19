@@ -675,8 +675,9 @@ or attach directly to a host Docker socket to recover.
 The OpenObserve UI and API MUST be reachable only through the operator-managed
 private bind/reverse-proxy path. OTLP, collector health, Docker API, and
 OpenObserve storage ports MUST NOT be host-published by default. Credentials
-MUST come from an ignored operator secret file or secret manager; no
-credential belongs in this repository or in telemetry.
+MUST come from an ignored operator secret file or secret manager; the
+provisioning script accepts `OPENOBSERVE_PASSWORD_FILE` for file-mounted
+secrets. No credential belongs in this repository or in telemetry.
 
 Operators investigating an incident should preserve:
 

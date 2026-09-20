@@ -105,6 +105,8 @@ func TestDiskQueuePeekEmptyIsNotCorrupt(t *testing.T) {
 func TestSignalQueuesHaveIndependentCapacity(t *testing.T) {
 	t.Setenv("QUEUE_DIR", t.TempDir())
 	t.Setenv("QUEUE_MAX_BYTES", "4")
+	t.Setenv("OPENOBSERVE_USERNAME", "operator@example.invalid")
+	t.Setenv("OPENOBSERVE_PASSWORD", "test-password")
 
 	gateway, err := newGateway()
 	if err != nil {

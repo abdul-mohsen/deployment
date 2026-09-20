@@ -21,7 +21,8 @@
 #   --backend-port <port>     Port the backend listens on (default: 3000)
 #   --frontend-port <port>    Port the frontend listens on (default: 80)
 #   --no-database             Skip database creation
-#   --env KEY=VALUE           Set env var (repeatable)
+#   --env KEY=VALUE           Set application env var (repeatable; reserved
+#                             deployment keys are rejected; see REQUIREMENTS.md)
 #   --git-only                Create apps without deploying (deploy via git push)
 #   --dry-run                 Show plan without executing
 #   --migrate <cmd>           Run migration after initial deploy (e.g. "npm run migrate")
@@ -233,7 +234,11 @@ while [[ $# -gt 0 ]]; do
         --backend-port)   BACKEND_PORT="$2"; shift 2 ;;
         --frontend-port)  FRONTEND_PORT="$2"; shift 2 ;;
         --no-database)    NO_DATABASE=true; shift ;;
-        --env)            ENV_VARS+=("$2"); shift 2 ;;
+        --env)
+            [ "$#" -ge 2 ] || { error "--env requires KEY=VALUE"; exit 1; }
+            ENV_VARS+=("$2")
+            shift 2
+            ;;
         --git-only)       GIT_ONLY=true; shift ;;
         --dry-run)        DRY_RUN=true; shift ;;
         --update)         FORCE_UPDATE=true; shift ;;
@@ -251,6 +256,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if ! validate_tenant_env_overrides "${ENV_VARS[@]}"; then
+    error "Refusing invalid or reserved --env override."
+    exit 1
+fi
 
 # ---- Validate ----
 if [ -z "$TENANT_NAME" ]; then
@@ -498,7 +508,7 @@ if $GIT_ONLY; then
     info "  Deploy method:  git push (no image deploy now)"
 fi
 for ev in "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; do
-    info "  Env var:        $ev"
+    info "  Env key:        ${ev%%=*}"
 done
 echo ""
 

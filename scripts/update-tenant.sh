@@ -8,7 +8,9 @@
 # Options:
 #   --backend-image <image>    Deploy new backend image
 #   --frontend-image <image>   Deploy new frontend image
-#   --env KEY=VALUE            Set/update env var (repeatable)
+#   --env KEY=VALUE            Set/update application env var (repeatable;
+#                              reserved deployment keys are rejected; see
+#                              REQUIREMENTS.md)
 #   --restart                  Restart all tenant containers
 #   --scale <n>                Scale backend to n instances
 #   --skip-drift-check         Deploy even if backend + frontend image
@@ -375,7 +377,11 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --backend-image)     BACKEND_IMAGE="$2"; shift 2 ;;
         --frontend-image)    FRONTEND_IMAGE="$2"; shift 2 ;;
-        --env)               ENV_VARS+=("$2"); shift 2 ;;
+        --env)
+            [ "$#" -ge 2 ] || { error "--env requires KEY=VALUE"; exit 1; }
+            ENV_VARS+=("$2")
+            shift 2
+            ;;
         --restart)           RESTART=true; shift ;;
         --scale)             SCALE="$2"; shift 2 ;;
         --skip-drift-check)  SKIP_DRIFT_CHECK=true; shift ;;
@@ -386,6 +392,11 @@ while [[ $# -gt 0 ]]; do
         *)                   [ -z "$TENANT_NAME" ] && TENANT_NAME="$1"; shift ;;
     esac
 done
+
+if ! validate_tenant_env_overrides "${ENV_VARS[@]}"; then
+    error "Refusing invalid or reserved --env override."
+    exit 1
+fi
 
 if [ -z "$TENANT_NAME" ]; then
     echo "Usage: $0 <tenant-name> [--backend-image <image>] [--frontend-image <image>]"

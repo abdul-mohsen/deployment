@@ -172,6 +172,72 @@ deployment_error_trap() {
     return "$exit_code"
 }
 
+# Validate an application environment override before it reaches Dokku.
+#
+# Tenant scripts intentionally allow arbitrary application keys, but deployment
+# settings, database-admin credentials, migration controls, Docker settings,
+# and telemetry credentials must remain owned by this control plane. Keep this
+# as a reserved-key policy instead of an application allow-list so new tenant
+# application settings do not require a deployment-script change.
+validate_tenant_env_override() {
+    local assignment="${1:-}" key reason=""
+
+    if [[ "$assignment" != *=* ]]; then
+        printf '%s\n' "Rejected --env override: expected KEY=VALUE." >&2
+        return 1
+    fi
+
+    key="${assignment%%=*}"
+    if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        printf 'Rejected --env key %q: key must match [A-Za-z_][A-Za-z0-9_]*.\n' \
+            "$key" >&2
+        return 1
+    fi
+
+    case "$key" in
+        # Control-plane, tenant identity, routing, and deployment provenance.
+        APP_*|AUTO_BACKUP_BEFORE_REDEPLOY|AUTO_REDEPLOY_DISABLED|\
+        BACKEND_IMAGE|BASE_DOMAIN|BASEURL|BACKUP_DIR|DASHBOARD_*|\
+        DEPLOY_*|DEPLOY_ENV|DEV_TAG|DEV_TENANT|DOCKERHUB_*|\
+        IMAGE_PULL_POLICY|LOG_DIR|MSG_HOST|MSG_PORT|NATS_URL|NGINX_*|\
+        PORT|PUBLIC_PROTOCOL|PULL_TAG|SERVER_PORT|STORAGE_ROOT|\
+        TENANT_APP_NETWORK|TENANT_ID|\
+        TENANT_IMAGE_PULL_POLICY|TENANT_NAME_PREFIX|TENANT_NETWORK|\
+        TENANT_PROVENANCE_*|TENANT_STATE_DIR|TENANT_VERIFY_*|\
+        WEBHOOK_SECRET)
+            reason="control-plane key" ;;
+
+        # Deployment/admin database credentials and connection controls.
+        DB_ADMIN_*|MYSQL_*|MYSQL_PWD)
+            reason="database-admin or deployment-managed database key" ;;
+
+        # Schema and migration controls are applied from the selected image.
+        BACKUP_BEFORE_MIGRATION|MIGRATE_CMD|MIGRATION_*|\
+        TENANT_IGNORED_SCHEMA_FILES|TENANT_MIGRATIONS_*|TENANT_SCHEMA_*)
+            reason="migration-control key" ;;
+
+        # Prevent a tenant override from changing Docker/Dokku execution.
+        DOCKER_*|DOKKU_*)
+            reason="Docker or Dokku control key" ;;
+
+        # Telemetry wiring and authentication are provisioned by the operator.
+        METRICS_TOKEN|OPENOBSERVE_*|OTEL_*)
+            reason="telemetry or telemetry-secret key" ;;
+    esac
+
+    if [ -n "$reason" ]; then
+        printf 'Rejected --env key %q: %s is reserved.\n' "$key" "$reason" >&2
+        return 1
+    fi
+}
+
+validate_tenant_env_overrides() {
+    local assignment
+    for assignment in "$@"; do
+        validate_tenant_env_override "$assignment" || return 1
+    done
+}
+
 # Detect whether this shell should use a local mysql client or a mysql helper
 # container. MYSQL_CLIENT_MODE=docker is used by the dashboard runner so MySQL
 # grants scoped to Docker bridge clients keep working even if the runner image

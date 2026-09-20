@@ -15,19 +15,29 @@ views="$root/saved-views.json"
 alerts="$root/alerts.json"
 notifications="$root/notifications.example.json"
 apply="$root/apply-openobserve.sh"
+alloy="$root/config.alloy"
 
-for path in "$manifest" "$streams" "$dashboard" "$views" "$alerts" "$notifications" "$apply"; do
+for path in "$manifest" "$streams" "$dashboard" "$views" "$alerts" "$notifications" "$apply" "$alloy"; do
     [ -f "$path" ] || fail "missing OpenObserve provisioning file: $path"
 done
 pass "OpenObserve provisioning inventory is present"
 
-python3 - "$manifest" "$streams" "$dashboard" "$views" "$alerts" "$notifications" <<'PY'
+python3 - "$manifest" "$streams" "$dashboard" "$views" "$alerts" "$notifications" "$apply" "$alloy" <<'PY'
 import json
 import re
 import sys
 from pathlib import Path
 
-manifest_path, streams_path, dashboard_path, views_path, alerts_path, notifications_path = sys.argv[1:]
+(
+    manifest_path,
+    streams_path,
+    dashboard_path,
+    views_path,
+    alerts_path,
+    notifications_path,
+    apply_path,
+    alloy_path,
+) = sys.argv[1:]
 
 def load(path):
     with open(path, encoding="utf-8") as handle:
@@ -39,6 +49,8 @@ dashboard = load(dashboard_path)
 views = load(views_path)
 alerts = load(alerts_path)
 notifications = load(notifications_path)
+apply_text = Path(apply_path).read_text(encoding="utf-8")
+alloy_text = Path(alloy_path).read_text(encoding="utf-8")
 
 assert manifest["schema_version"] == 1
 assert manifest["endpoint"]["placeholder"] == "${OPENOBSERVE_ENDPOINT}"
@@ -88,8 +100,65 @@ for document in (stream_doc, manifest):
 metric_policy = stream_doc["metric_stream_policy"]
 assert metric_policy["retention_days"] == 15
 assert metric_policy["max_query_range"] == 24
-assert "ifritah_" in metric_policy["allowed_name_prefixes"]
-assert "node_" in metric_policy["allowed_name_prefixes"]
+families = metric_policy["approved_metric_families"]
+assert set(families) == {"backend", "resource", "health"}
+assert "allowed_name_prefixes" not in metric_policy
+manifest_policy = manifest["metric_stream_policy"]
+assert manifest_policy["retention_days"] == metric_policy["retention_days"]
+assert manifest_policy["max_query_range"] == metric_policy["max_query_range"]
+assert manifest_policy["approved_metric_families"] == families
+approved_metric_names = set()
+for source, names in families.items():
+    assert names, source
+    assert len(names) == len(set(names)), f"duplicate approved metric in {source}"
+    approved_metric_names.update(names)
+
+assert "approved_metric_families" in apply_text
+assert "allowed_name_prefixes" not in apply_text
+assert "if name in approved" in apply_text
+
+for source, names in families.items():
+    match = re.search(
+        rf'otelcol\.processor\.filter "{source}_metrics".*?'
+        r'not IsMatch\(name, "([^"]+)"\)',
+        alloy_text,
+        re.S,
+    )
+    assert match, f"missing exact {source} metric-family filter"
+    pattern_text = match.group(1)
+    pattern = re.compile(pattern_text)
+    assert pattern_text.startswith("^") and pattern_text.endswith("$")
+    assert pattern_text.startswith("^(") and pattern_text.endswith(")$")
+    regex_names = set(pattern_text[2:-2].split("|"))
+    assert regex_names == set(names), source
+    assert all(pattern.fullmatch(name) for name in names), source
+
+unapproved_by_source = {
+    "backend": ["ifritah_http_requests_total_extra"],
+    "resource": [
+        "node_cpu_seconds_total_extra",
+        "ifritah_container_request_id_bytes",
+    ],
+    "health": [
+        "ifritah_gateway_secret_tokens_total",
+        "alloy_build_info_extra",
+        "otelcol_exporter_sent_metric_points_extra",
+    ],
+}
+for source, candidates in unapproved_by_source.items():
+    match = re.search(
+        rf'otelcol\.processor\.filter "{source}_metrics".*?'
+        r'not IsMatch\(name, "([^"]+)"\)',
+        alloy_text,
+        re.S,
+    )
+    for candidate in candidates:
+        assert candidate not in families[source], (
+            f"unapproved family listed for {source}: {candidate}"
+        )
+        assert not re.fullmatch(match.group(1), candidate), (
+            f"unapproved family accepted by {source} filter: {candidate}"
+        )
 
 assert dashboard["version"] == 5
 assert dashboard["title"] == "Ifritah OpenObserve Operations"
@@ -183,6 +252,9 @@ for name, metric_name in required_alerts.items():
     alert = alerts_by_name[name]
     query = alert["query_condition"].get("promql", "")
     assert metric_name in query, f"{name} does not use {metric_name}"
+    assert metric_name in approved_metric_names, (
+        f"{name} uses a metric family outside the approved policy: {metric_name}"
+    )
     assert alert["query_condition"]["type"] == "promql"
     assert alert["stream_name"] == metric_name
     assert alert["destinations"] == ["${OPENOBSERVE_ALERT_DESTINATION_NAME}"]
@@ -283,8 +355,13 @@ grep -Fq 'streams/$encoded_stream/settings?type=$stream_type' "$apply" \
     || fail "apply script does not use the stream settings endpoint"
 grep -Fq '/api/$ORG_PATH/streams?type=metrics' "$apply" \
     || fail "apply script does not discover native metric streams"
-grep -Fq 'allowed_name_prefixes' "$apply" \
-    || fail "apply script does not bound native metric retention by name prefix"
+grep -Fq 'approved_metric_families' "$apply" \
+    || fail "apply script does not use the approved native metric-family policy"
+grep -Fq 'if name in approved' "$apply" \
+    || fail "apply script does not use exact native metric-family membership"
+if grep -Fq 'startswith(prefixes)' "$apply"; then
+    fail "apply script still uses broad native metric-family prefix retention"
+fi
 grep -Fq 'view.get("query_type", "sql")' "$apply" \
     || fail "apply script does not preserve PromQL saved-view mode"
 grep -Fq '/savedviews' "$apply" \

@@ -76,8 +76,9 @@ else
 fi
 
 # Function-level test with stub dokku
-tmpdir="$REPO_DIR/.test-create-tenant-dokku.$$"
+tmpdir="$REPO_DIR/scripts/tests/.test-create-tenant.$$"
 mkdir -p "$tmpdir"
+trap 'rm -rf "$tmpdir"' EXIT
 
 cat > "$tmpdir/dokku" <<'EOF'
 #!/usr/bin/env bash
@@ -109,6 +110,46 @@ if echo "$mounted" | grep -qF "/host/data:/app/data" && ! echo "$mounted" | grep
 else
     echo "MOUNTED log: $mounted"
     fail "ensure_storage_mount behaviour is wrong"
+fi
+
+echo ""
+echo "=== MySQL password SQL literal escaping ==="
+eval "$(awk '/^mysql_password_sql_literal\(\)/,/^\}$/' scripts/create-tenant.sh)"
+
+quote_input="quote'\"value"
+quote_expected="'quote''\"value'"
+[ "$(mysql_password_sql_literal "$quote_input")" = "$quote_expected" ] \
+    && pass "single quotes are doubled in password literals" \
+    || fail "single quote escaping is incorrect"
+
+backslash_input='back\slash\\value'
+backslash_expected="'$backslash_input'"
+[ "$(mysql_password_sql_literal "$backslash_input")" = "$backslash_expected" ] \
+    && pass "backslashes remain literal under NO_BACKSLASH_ESCAPES" \
+    || fail "backslash handling is incorrect"
+
+metachar_input='$(touch should-not-run);`command` -- comment # $HOME'
+metachar_expected="'$metachar_input'"
+[ "$(mysql_password_sql_literal "$metachar_input")" = "$metachar_expected" ] \
+    && pass "shell and SQL metacharacters remain inside the literal" \
+    || fail "metacharacter handling is incorrect"
+
+if grep -qF "SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'NO_BACKSLASH_ESCAPES');" scripts/create-tenant.sh; then
+    pass "password SQL uses a backslash-safe MySQL session mode"
+else
+    fail "password SQL does not force NO_BACKSLASH_ESCAPES"
+fi
+
+if grep -qF "run_mysql --binary-mode <<SQLEOF" scripts/create-tenant.sh; then
+    pass "mysql batch mode does not interpret password backslash commands"
+else
+    fail "mysql provisioning is missing binary batch mode"
+fi
+
+if grep -qF "IDENTIFIED BY '\${TENANT_DB_PASS}'" scripts/create-tenant.sh; then
+    fail "raw tenant password interpolation remains in MySQL SQL"
+else
+    pass "raw tenant password interpolation is absent"
 fi
 
 echo ""

@@ -53,6 +53,15 @@ warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[✗]${NC} $*" >&2; }
 info()  { echo -e "${BLUE}[i]${NC} $*"; }
 
+# MySQL's CLI has no bind-parameter mode for CREATE USER/ALTER USER. Keep the
+# password in a SQL string literal, doubling quotes and disabling backslash
+# escapes for this connection so existing passwords are passed byte-for-byte.
+mysql_password_sql_literal() {
+    local password="$1"
+    password="${password//\'/\'\'}"
+    printf "'%s'" "$password"
+}
+
 # ---- Load config ----
 CONFIG_FILE="${CONFIG_FILE:-$PROJECT_DIR/config.env}"
 for i in $(seq 1 $#); do
@@ -696,6 +705,7 @@ if ! $NO_DATABASE; then
         if [ -z "$TENANT_DB_PASS" ]; then
             TENANT_DB_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)
         fi
+        TENANT_DB_PASS_SQL="$(mysql_password_sql_literal "$TENANT_DB_PASS")"
 
         log "Creating MySQL database: $TENANT_DB_NAME (user: $TENANT_DB_USER@'$MYSQL_TENANT_HOST')"
 
@@ -708,11 +718,14 @@ if ! $NO_DATABASE; then
             info "[dev-diag] SQL: DROP @'localhost'; CREATE/ALTER @'${MYSQL_TENANT_HOST}'; GRANT ON ${TENANT_DB_NAME}.*"
             set +e
         fi
-        run_mysql <<SQLEOF
+        # Binary mode prevents the mysql batch client from interpreting
+        # backslash commands if a reused password contains them.
+        run_mysql --binary-mode <<SQLEOF
+SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'NO_BACKSLASH_ESCAPES');
 CREATE DATABASE IF NOT EXISTS \`${TENANT_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 DROP USER IF EXISTS '${TENANT_DB_USER}'@'localhost';
-CREATE USER IF NOT EXISTS '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY '${TENANT_DB_PASS}';
-ALTER USER '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY '${TENANT_DB_PASS}';
+CREATE USER IF NOT EXISTS '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY ${TENANT_DB_PASS_SQL};
+ALTER USER '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY ${TENANT_DB_PASS_SQL};
 GRANT ALL PRIVILEGES ON \`${TENANT_DB_NAME}\`.* TO '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}';
 SQLEOF
         _mysql_rc=$?

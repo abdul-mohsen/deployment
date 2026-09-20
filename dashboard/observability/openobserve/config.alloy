@@ -1580,9 +1580,10 @@ otelcol.receiver.prometheus "application" {
 	}
 }
 
-// Scrape only bounded component/gateway health metrics. These signals are
-// exported separately so queue pressure and auth/schema failures remain
-// visible even when normal telemetry is being dropped.
+// Scrape only bounded component/gateway health metrics. These signals use a
+// separate receiver, processor, batch, exporter, and gateway queue so queue
+// pressure and auth/schema failures remain visible without also entering the
+// ordinary metrics path.
 prometheus.scrape "collector_health" {
 	job_name        = "openobserve-collector-health"
 	scrape_interval = "15s"
@@ -1602,12 +1603,59 @@ prometheus.scrape "collector_health" {
 			"component"    = "gateway",
 		},
 	]
-	forward_to = [otelcol.receiver.prometheus.health_direct.receiver]
+	forward_to = [otelcol.receiver.prometheus.health.receiver]
 }
 
-otelcol.receiver.prometheus "health_direct" {
+otelcol.receiver.prometheus "health" {
 	output {
-		metrics = [otelcol.processor.memory_limiter.main.input]
+		metrics = [otelcol.processor.memory_limiter.health.input]
+	}
+}
+
+otelcol.processor.memory_limiter "health" {
+	check_interval = "1s"
+	limit          = "32MiB"
+	spike_limit    = "8MiB"
+
+	output {
+		metrics = [otelcol.processor.transform.health.input]
+	}
+}
+
+otelcol.processor.transform "health" {
+	error_mode = "ignore"
+
+	metric_statements {
+		context    = "resource"
+		statements = [
+			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`set(attributes["service.name"], "ifritah-telemetry-health")`,
+			`keep_keys(attributes, ["service.name", "service.version", "deployment.environment.name", "component", "host.role", "service_name", "job"])`,
+			`truncate_all(attributes, 64)`,
+		]
+	}
+
+	metric_statements {
+		context    = "datapoint"
+		statements = [
+			`delete_matching_keys(attributes, "(?i).*(tenant|request|trace|span|actor|user|resource|digest|authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`keep_keys(attributes, ["service_name", "component", "signal", "reason", "status_class", "job", "host_role"])`,
+			`truncate_all(attributes, 64)`,
+		]
+	}
+
+	output {
+		metrics = [otelcol.processor.batch.health.input]
+	}
+}
+
+otelcol.processor.batch "health" {
+	timeout             = "10s"
+	send_batch_size     = 64
+	send_batch_max_size = 64
+
+	output {
+		metrics = [otelcol.exporter.otlphttp.health.input]
 	}
 }
 

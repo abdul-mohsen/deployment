@@ -88,53 +88,21 @@
         "route",
         "duration_ms"
       ]
-    },
-    {
-      "name": "ifritah_telemetry_health_v1",
-      "type": "logs",
-      "retention_days": 14,
-      "create": {
-        "fields": [],
-        "settings": {
-          "data_retention": 14,
-          "max_query_range": 168,
-          "store_original_data": false,
-          "index_fields": [
-            "event_type",
-            "component",
-            "service_name",
-            "deployment_environment",
-            "operation",
-            "outcome",
-            "error_code",
-            "lag_ms",
-            "queue_depth",
-            "dropped_records",
-            "parse_failures",
-            "disk_usage_ratio"
-          ],
-          "full_text_search_keys": [
-            "event_type",
-            "component",
-            "operation",
-            "error_code"
-          ]
-        }
-      },
-      "settings": {
-        "data_retention": 14
-      },
-      "search_fields": [
-        "component",
-        "event_type",
-        "outcome",
-        "error_code",
-        "lag_ms",
-        "queue_depth",
-        "dropped_records"
-      ]
     }
   ],
+  "health_signal": {
+    "ingress_path": "/v1/health",
+    "signal_type": "metrics",
+    "query_mode": "promql",
+    "retention_days": 15,
+    "metric_name_prefixes": [
+      "ifritah_gateway_",
+      "alloy_",
+      "otelcol_",
+      "prometheus_"
+    ],
+    "note": "Health metrics use a dedicated Alloy pipeline and gateway queue, then land in native OpenObserve metric-family streams. No synthetic health log stream is created."
+  },
   "metric_stream_policy": {
     "retention_days": 15,
     "max_query_range": 24,

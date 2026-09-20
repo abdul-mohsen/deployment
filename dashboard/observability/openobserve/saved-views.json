@@ -67,12 +67,13 @@
       "query": "SELECT service_name, AVG(duration_ms) AS avg_duration_ms, COUNT(*) AS request_count FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND event_type = 'http.request.completed' AND tenant_id = 'TENANT_ID_VALUE' GROUP BY service_name ORDER BY avg_duration_ms DESC LIMIT 64"
     },
     {
-      "view_name": "Ifritah - Collector drops and lag",
-      "stream": "ifritah_telemetry_health_v1",
-      "stream_type": "logs",
+      "view_name": "Ifritah - Collector drops and queue pressure",
+      "stream": "ifritah_gateway_dropped_records_total",
+      "stream_type": "metrics",
+      "query_type": "promql",
       "relative_time": "1h",
-      "description": "Pipeline drops, parse failures, lag, queue depth, and disk pressure.",
-      "query": "SELECT event_time, component, service_name, operation, outcome, error_code, dropped_records, parse_failures, lag_ms, queue_depth, disk_usage_ratio FROM \"ifritah_telemetry_health_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND (outcome IN ('dropped', 'degraded', 'failure') OR dropped_records > 0 OR parse_failures > 0 OR lag_ms > 60000 OR queue_depth > 1000 OR disk_usage_ratio > 0.85) ORDER BY _timestamp DESC LIMIT 200"
+      "description": "Dedicated health-path view for gateway drops and durable queue pressure.",
+      "query": "sum(increase(ifritah_gateway_dropped_records_total[10m])) + sum(ifritah_gateway_queue_files)"
     },
     {
       "view_name": "Ifritah - Resource and restart health",
@@ -102,12 +103,13 @@
       "query": "sum by (container_role) (rate(ifritah_container_restarts_total[10m]))"
     },
     {
-      "view_name": "Ifritah - OpenObserve health",
-      "stream": "ifritah_telemetry_health_v1",
-      "stream_type": "logs",
+      "view_name": "Ifritah - Telemetry gateway health",
+      "stream": "ifritah_gateway_up",
+      "stream_type": "metrics",
+      "query_type": "promql",
       "relative_time": "24h",
-      "description": "OpenObserve and collector readiness, export, and ingestion health.",
-      "query": "SELECT event_time, component, service_name, event_type, operation, outcome, error_code, lag_ms, queue_depth FROM \"ifritah_telemetry_health_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND (component IN ('collector', 'openobserve') OR service_name = 'openobserve') ORDER BY _timestamp DESC LIMIT 200"
+      "description": "Dedicated health-path heartbeat for the private telemetry gateway.",
+      "query": "max by (signal) (ifritah_gateway_up)"
     }
   ]
 }

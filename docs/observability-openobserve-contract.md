@@ -83,7 +83,6 @@ contract version and is not a tenant name:
 |---|---|---|---:|
 | `ifritah_logs_v1` | Logs | JSON application, dashboard, and deployment events | 14 days |
 | `ifritah_traces_v1` | Traces | OTLP spans and span events | 7 days |
-| `ifritah_telemetry_health_v1` | Pipeline health | Collector/export/drop/parse health | 14 days |
 
 Native OpenObserve OTLP metrics are stored in one metrics stream per metric
 family, not in one arbitrary aggregate stream. Metric names are therefore
@@ -91,6 +90,14 @@ queried through PromQL. The provisioning policy applies 15-day retention to
 allow-listed metric streams whose names start with `ifritah_`, `node_`,
 `alloy_`, `otelcol_`, or `prometheus_`; rerun provisioning after a new metric
 family first appears.
+
+Pipeline health is a native metric signal, not a third log stream. Alloy
+scrapes only the allow-listed collector and gateway health endpoints through
+the dedicated `collector_health` receiver, health processor/batch/exporter,
+and private gateway `/v1/health` queue. The gateway maps that ingress to
+OpenObserve's native `/v1/metrics` endpoint without a `stream-name` override.
+The ordinary application/resource metrics pipeline never receives these
+samples, so each health sample has one path and one durable queue.
 
 The pilot defaults are inside the already-approved operating ranges:
 
@@ -112,9 +119,14 @@ retention decision.
 
 ## 3. Canonical event envelope
 
-Every log or pipeline-health record MUST be a single JSON object. New fields
+Every log record MUST be a single JSON object. New fields
 are additive; a breaking change requires a new stream suffix. Unknown input
 fields MUST NOT be copied into the exported record by default.
+
+Pipeline health metrics retain native OTLP metric encoding and are queried by
+metric family through PromQL. They MUST use the metric label and retention
+rules in sections 7.2 and 8.3; they are not serialized as synthetic JSON log
+records.
 
 OpenObserve's `_timestamp` MUST be populated from `event_time`, not from
 collector arrival time. Collector arrival time MAY be retained as
@@ -299,7 +311,7 @@ The first implementation MUST support these event types:
 | `worker.job.completed` | workers | `operation`, `outcome`, `origin_trace_id` when linked, `tenant_id` when tenant-owned |
 | `deployment.operation` | dashboard/scripts | `operation_id`, `script`, `deployment_stage`, `tenant_id` when scoped, build identity, `outcome` |
 | `runtime.lifecycle` | every service | `operation` such as `startup`, `shutdown`, `readiness_changed` and `outcome` |
-| `telemetry.pipeline` | collector | `operation`, `outcome`, `error_code`, bounded counts/queue state |
+| `telemetry.pipeline` | collector | bounded metric families for drops, queue state, export failures, and auth/schema health |
 
 The following is a successful tenant request. It is illustrative; it is not
 permission to add arbitrary fields:
@@ -663,12 +675,33 @@ The collector MUST expose private, operator-readable health signals for:
 - last successful export time; and
 - OpenObserve authentication or schema errors.
 
-When OpenObserve is unavailable, the collector emits one bounded
-`telemetry.pipeline` event per condition and interval, keeps retrying within
-the limits above, and drops only after the queue limit is reached. When the
-backend recovers, ingestion resumes without restarting tenant applications.
-The collector MUST NOT bypass redaction, publish a public fallback endpoint,
-or attach directly to a host Docker socket to recover.
+When OpenObserve is unavailable, the collector exports bounded health metrics
+through the dedicated health path, keeps retrying within the limits above, and
+drops only after the health queue limit is reached. When the backend recovers,
+ingestion resumes without restarting tenant applications. The collector MUST
+NOT bypass redaction, publish a public fallback endpoint, or attach directly
+to a host Docker socket to recover.
+
+### 8.4 Dedicated health signal path
+
+The health path MUST remain distinct from ordinary application, resource, and
+trace delivery:
+
+1. `prometheus.scrape "collector_health"` reads only the Alloy admin metrics
+   endpoint and the private gateway `/metrics` endpoint.
+2. `otelcol.receiver.prometheus "health"` applies its own memory limit,
+   attribute sanitization, and bounded batch.
+3. `otelcol.exporter.otlphttp "health"` sends OTLP metrics to the gateway's
+   private `/v1/health` ingress.
+4. The gateway stores health payloads in the `health` durable queue and maps
+   them to OpenObserve `/v1/metrics`; it MUST NOT set a synthetic stream name.
+5. OpenObserve stores the resulting native metric families. Dashboards,
+   saved views, alerts, and retention provisioning MUST use PromQL and the
+   allow-listed metric prefixes.
+
+Health samples MUST NOT also enter the ordinary metrics exporter or queue.
+This prevents duplicate health records and preserves health visibility when
+ordinary telemetry is backlogged or dropped.
 
 ## 9. Operator access and retention operations
 
@@ -732,8 +765,8 @@ contract:
 | Dashboard access middleware | request ID, route, method, status, duration, normalized client IP; no headers/cookies/query/body | `http.request.completed` with optional `client_ip` |
 | Shell `lib.sh` | UTC timestamp, severity, script, `operation_id`, sanitized tenant, bounded message, command-free `ERR` trap | `deployment.operation`; parse only reviewed operation/stage/error fields |
 | Current Alloy/Loki profile | Dashboard-only labelled collection, private network, persistent positions, bounded local retention | Keep unchanged and separate from the OpenObserve collector profile |
-| OpenObserve Alloy profile | Allow-listed Docker JSON/logfmt parsing, canonical field validation, OTLP intake, attribute allow-lists, bounded batches, private gateway export | `ifritah_logs_v1`, `ifritah_traces_v1`, native per-metric streams, and `ifritah_telemetry_health_v1`; no direct OpenObserve egress |
-| OpenObserve gateway | Separate 64 MiB-per-signal durable queues, bounded retries, status-aware drops, auth/schema health, private forwarding | `ifritah_*_v1` streams with health metrics in `ifritah_telemetry_health_v1` |
+| OpenObserve Alloy profile | Allow-listed Docker JSON/logfmt parsing, canonical field validation, OTLP intake, attribute allow-lists, bounded batches, private gateway export, and a separate health pipeline | `ifritah_logs_v1`, `ifritah_traces_v1`, and native per-metric streams; no direct OpenObserve egress |
+| OpenObserve gateway | Separate 64 MiB-per-signal durable queues, bounded retries, status-aware drops, auth/schema health, private forwarding | `ifritah_logs_v1`, `ifritah_traces_v1`, and native metrics through the dedicated health queue |
 | OpenObserve resource path | Filtered read-only Docker API, dashboard/tenant role allow-list, node-exporter host mounts, role-only aggregation | Host/container CPU, memory, disk, network, running, restart, and collector health metrics |
 
 The following remain separate implementation work, not assumptions hidden by

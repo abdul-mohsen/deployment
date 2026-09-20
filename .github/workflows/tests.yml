@@ -70,6 +70,10 @@ jobs:
         shell: bash
         run: bash scripts/tests/test-openobserve-pipeline.sh
 
+      - name: Check OpenObserve health routing contracts
+        shell: bash
+        run: bash scripts/tests/test-openobserve-health-routing.sh
+
       - name: Check OpenObserve tenant application wiring
         shell: bash
         run: bash scripts/tests/test-openobserve-app-wiring.sh

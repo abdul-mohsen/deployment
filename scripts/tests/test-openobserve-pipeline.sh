@@ -108,6 +108,15 @@ grep -Fq 'ifritah_gateway_auth_blocked' "$gateway" \
     || fail "gateway authentication health metric is missing"
 grep -Fq 'forwardPath' "$gateway" \
     || fail "gateway health-stream forwarding mapping is missing"
+grep -Fq 'forward_to = [otelcol.receiver.prometheus.health.receiver]' "$alloy" \
+    || fail "collector health does not use the dedicated receiver"
+grep -Fq 'otelcol.processor.batch "health"' "$alloy" \
+    || fail "collector health does not use the dedicated batch"
+grep -Fq 'metrics_endpoint = "http://openobserve-gateway:4318/v1/health"' "$alloy" \
+    || fail "collector health does not use the dedicated exporter"
+if grep -Fq 'health_direct' "$alloy"; then
+    fail "obsolete collector health receiver remains"
+fi
 pass "bounded queues, retries, and pipeline health signals are configured"
 
 grep -Fq 'containers/json' "$docker_filter" \

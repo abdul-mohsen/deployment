@@ -605,40 +605,29 @@
         {
           "id": "telemetry-pipeline",
           "type": "line",
-          "title": "Collector drops and lag",
-          "description": "Pipeline health for drops, parse failures, queue depth, and lag.",
+          "title": "Collector drops and queue pressure",
+          "description": "Dedicated health-path view for gateway drops and durable queue pressure.",
           "config": {
             "show_legends": true,
             "legends_position": "bottom",
             "unit": "short",
             "unit_custom": null
           },
-          "queryType": "sql",
+          "queryType": "promql",
           "queries": [
             {
-              "query": "SELECT histogram(_timestamp) AS x_axis_1, SUM(dropped_records) AS y_axis_1 FROM \"ifritah_telemetry_health_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND (dropped_records > 0 OR parse_failures > 0 OR lag_ms > 60000 OR queue_depth > 1000) GROUP BY x_axis_1 ORDER BY x_axis_1 LIMIT 120",
+              "query": "sum(increase(ifritah_gateway_dropped_records_total[10m])) + sum(ifritah_gateway_queue_files)",
               "customQuery": true,
+              "vrlFunctionQuery": "",
               "fields": {
-                "stream": "ifritah_telemetry_health_v1",
-                "stream_type": "logs",
-                "x": [
-                  {
-                    "label": "x_axis_1",
-                    "alias": "x_axis_1",
-                    "column": "x_axis_1",
-                    "aggregationFunction": null
-                  }
-                ],
-                "y": [
-                  {
-                    "label": "y_axis_1",
-                    "alias": "y_axis_1",
-                    "column": "y_axis_1",
-                    "aggregationFunction": null
-                  }
-                ],
+                "stream": "ifritah_gateway_dropped_records_total",
+                "stream_type": "metrics",
+                "x": [],
+                "y": [],
                 "z": [],
                 "breakdown": [],
+                "promql_labels": [],
+                "promql_operations": [],
                 "filter": {
                   "filterType": "group",
                   "logicalOperator": "AND",
@@ -646,7 +635,9 @@
                 }
               },
               "config": {
-                "promql_legend": ""
+                "promql_legend": "",
+                "query_label": "",
+                "step_value": null
               }
             }
           ],
@@ -661,40 +652,29 @@
         {
           "id": "openobserve-health",
           "type": "table",
-          "title": "Collector and OpenObserve health",
-          "description": "Recent health events for the collector and OpenObserve service.",
+          "title": "Telemetry gateway health",
+          "description": "Dedicated health-path heartbeat for the private telemetry gateway.",
           "config": {
             "show_legends": false,
             "legends_position": null,
             "unit": null,
             "unit_custom": null
           },
-          "queryType": "sql",
+          "queryType": "promql",
           "queries": [
             {
-              "query": "SELECT event_time, component, service_name, event_type, operation, outcome, error_code, lag_ms, queue_depth FROM \"ifritah_telemetry_health_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND (component IN ('collector', 'openobserve') OR service_name = 'openobserve') ORDER BY _timestamp DESC LIMIT 100",
+              "query": "max by (signal) (ifritah_gateway_up)",
               "customQuery": true,
+              "vrlFunctionQuery": "",
               "fields": {
-                "stream": "ifritah_telemetry_health_v1",
-                "stream_type": "logs",
-                "x": [
-                  {
-                    "label": "event_time",
-                    "alias": "event_time",
-                    "column": "event_time",
-                    "aggregationFunction": null
-                  }
-                ],
-                "y": [
-                  {
-                    "label": "outcome",
-                    "alias": "outcome",
-                    "column": "outcome",
-                    "aggregationFunction": null
-                  }
-                ],
+                "stream": "ifritah_gateway_up",
+                "stream_type": "metrics",
+                "x": [],
+                "y": [],
                 "z": [],
                 "breakdown": [],
+                "promql_labels": [],
+                "promql_operations": [],
                 "filter": {
                   "filterType": "group",
                   "logicalOperator": "AND",
@@ -702,7 +682,9 @@
                 }
               },
               "config": {
-                "promql_legend": ""
+                "promql_legend": "",
+                "query_label": "",
+                "step_value": null
               }
             }
           ],

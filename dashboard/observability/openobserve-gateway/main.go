@@ -50,6 +50,9 @@ func signalByPath(path string) (signalConfig, bool) {
 }
 
 func forwardPath(signal signalConfig) string {
+	// Health is an isolated OTLP-metrics ingress and queue, but OpenObserve
+	// stores native metrics by metric family. It therefore shares the native
+	// metrics endpoint without a stream-name override.
 	if signal.name == "health" {
 		return "/v1/metrics"
 	}

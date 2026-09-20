@@ -276,7 +276,9 @@ without exposing payloads. Logs, metrics, and traces have separate queue
 directories and each is capped at `OBS_OPENOBSERVE_QUEUE_MAX_BYTES` (64 MiB by
 default). Retry backoff is capped at 30 seconds. Health metrics are accepted
 on the gateway's private `/v1/health` intake and forwarded to native
-per-metric OpenObserve streams.
+per-metric OpenObserve streams. The collector health scrape has its own
+receiver, sanitization, batch, exporter, and gateway queue; it is not also
+sent through the ordinary metrics exporter.
 
 If OpenObserve is unavailable, Alloy and the gateway retry within their
 bounds, then drop records after the configured caps. A `401`/`403` pauses
@@ -293,7 +295,7 @@ The provisioning bundle is deterministic and versioned in
 
 | Artifact | Purpose |
 |---|---|
-| `streams.json` | Three contract streams plus native metric-stream retention policy |
+| `streams.json` | Two contract streams plus the dedicated native health-metric policy |
 | `dashboards/ifritah-operator.json` | Operator dashboard import |
 | `saved-views.json` | Request/trace, error, deployment, resource, and pipeline searches |
 | `alerts.json` | Disabled SQL and PromQL alert templates with an external destination placeholder |
@@ -339,7 +341,7 @@ Use OpenObserve organization roles or the operator's reverse-proxy policy to
 keep the UI, saved views, dashboards, streams, and alerts operator-only. The
 deployment dashboard must not proxy these resources to tenant users.
 
-The default apply creates or updates the three contract streams, applies
+The default apply creates or updates the two contract streams, applies
 retention to discovered native metric streams, and updates the
 `Ifritah OpenObserve Operations` dashboard and saved views. Alert templates
 are skipped until an operator configures a destination outside this repository.
@@ -410,10 +412,10 @@ application SQL text, credentials, or arbitrary error strings.
 The dashboard and searches use record fields, not metric labels or stream
 partitions.
 
-The artifact retention defaults are 14 days for logs, 7 days for traces,
-15 days for native metric streams, and 14 days for telemetry health. Native
-metrics create one OpenObserve stream per metric family, so dashboards and
-alerts use PromQL instead of querying a synthetic aggregate stream. The
+The artifact retention defaults are 14 days for logs, 7 days for traces, and
+15 days for native metric streams, including the dedicated health signal.
+Native metrics create one OpenObserve stream per metric family, so dashboards
+and alerts use PromQL instead of querying a synthetic aggregate stream. The
 provisioning script applies 15-day retention to existing allow-listed metric
 streams (`ifritah_`, `node_`, `alloy_`, `otelcol_`, and `prometheus_`); rerun it
 after a new metric family first appears. Verify effective values in stream
@@ -509,10 +511,10 @@ operator UI or API:
 1. Delete `Ifritah OpenObserve Operations`.
 2. Delete the saved views whose names start with `Ifritah -`.
 3. Stop or reroute the collector before deleting any contract stream.
-4. Delete `ifritah_logs_v1`, `ifritah_traces_v1`, and
-   `ifritah_telemetry_health_v1` only when the resulting telemetry loss is
-   approved. Remove native metric streams matching the documented allow-list
-   only when metric history loss is approved.
+4. Delete `ifritah_logs_v1` and `ifritah_traces_v1` only when the resulting
+   telemetry loss is approved. Remove native metric streams matching the
+   documented allow-list, including health metrics, only when metric history
+   loss is approved.
 
 Do not delete the named `/data` volume for a UI rollback. Preserve the image
 digest, artifact version, and resource IDs in the change record. A service

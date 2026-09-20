@@ -586,7 +586,7 @@ func Catalog() []Script {
 					Help: "Only use this if the backend can boot without a DB, or if you provide DATABASE_URL/DB_* in Env vars."},
 				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
 				{Name: "envs", Label: "Env vars", Flag: "--env", Type: "kv",
-					Help: "One KEY=VALUE per line; each becomes a separate --env flag. Use this for DATABASE_URL or DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD when not provisioning MySQL from this script."},
+					Help: "One KEY=VALUE per line; each becomes a separate --env flag. Tenant application keys remain supported, including DATABASE_URL and DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD. Deployment-reserved control-plane, MYSQL_*, MIGRATION_*, Docker, and telemetry keys are rejected."},
 			},
 		},
 		{
@@ -698,7 +698,8 @@ func Catalog() []Script {
 				{Name: "frontend_image", Flag: "--frontend-image", Type: "hidden"},
 				{Name: "scale", Label: "Backend scale", Flag: "--scale", Type: "text", Placeholder: "1"},
 				{Name: "restart", Label: "Restart", Flag: "--restart", Type: "checkbox", Boolean: true},
-				{Name: "envs", Label: "Env vars", Flag: "--env", Type: "kv"},
+				{Name: "envs", Label: "Env vars", Flag: "--env", Type: "kv",
+					Help: "One tenant application KEY=VALUE per line. Deployment-reserved control-plane, MYSQL_*, MIGRATION_*, Docker, and telemetry keys are rejected."},
 			},
 		},
 		{

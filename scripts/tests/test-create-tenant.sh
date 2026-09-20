@@ -14,6 +14,53 @@ echo "=== syntax ==="
 bash -n scripts/create-tenant.sh && pass "syntax create-tenant.sh"
 
 echo ""
+echo "=== tenant operation logs redact secret env values ==="
+redaction_tmpdir="$REPO_DIR/.test-create-tenant-redaction.$$"
+mkdir -p "$redaction_tmpdir/logs"
+trap 'rm -rf "${tmpdir:-}" "$redaction_tmpdir"' EXIT
+cat > "$redaction_tmpdir/config.env" <<'EOF'
+BASE_DOMAIN=example.test
+PUBLIC_PROTOCOL=https
+EOF
+
+redaction_output="$(
+    LOG_DIR="$redaction_tmpdir/logs" \
+    bash scripts/create-tenant.sh redaction-test \
+        --dry-run \
+        --no-database \
+        --config "$redaction_tmpdir/config.env" \
+        --env "DB_PASSWORD=tenant-password-marker" \
+        --env "API_TOKEN=tenant-token-marker" \
+        --env "PARTNER_API_KEY=tenant-api-key-marker" \
+        --env "PUBLIC_SETTING=visible-value" \
+        --env "DATABASE_URL=mysql://user:database-url-marker@example.test/db" \
+        2>&1
+)"
+redaction_log="$(cat "$redaction_tmpdir"/logs/*.log)"
+combined_redaction_log="${redaction_output}
+${redaction_log}"
+for marker in \
+    tenant-password-marker \
+    tenant-token-marker \
+    tenant-api-key-marker \
+    database-url-marker; do
+    if printf '%s\n' "$combined_redaction_log" | grep -Fq "$marker"; then
+        fail "secret marker leaked into tenant operation logs: $marker"
+    fi
+done
+for redacted in \
+    'DB_PASSWORD=***' \
+    'API_TOKEN=***' \
+    'PARTNER_API_KEY=***' \
+    'DATABASE_URL=***'; do
+    printf '%s\n' "$combined_redaction_log" | grep -Fq "$redacted" \
+        || fail "missing redacted env diagnostic: $redacted"
+done
+printf '%s\n' "$combined_redaction_log" | grep -Fq 'PUBLIC_SETTING=visible-value' \
+    || fail "non-secret env diagnostic was removed"
+pass "tenant operation logs keep env keys and redact secret values"
+
+echo ""
 echo "=== ensure_storage_mount is idempotent ==="
 # Extract the ensure_storage_mount function and test it with a stubbed dokku.
 if grep -q "ensure_storage_mount" scripts/create-tenant.sh; then
@@ -29,8 +76,8 @@ else
 fi
 
 # Function-level test with stub dokku
-tmpdir=$(mktemp -d)
-trap 'rm -rf "$tmpdir"' EXIT
+tmpdir="$REPO_DIR/.test-create-tenant-dokku.$$"
+mkdir -p "$tmpdir"
 
 cat > "$tmpdir/dokku" <<'EOF'
 #!/usr/bin/env bash

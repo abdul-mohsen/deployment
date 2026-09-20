@@ -116,6 +116,31 @@ env_value() {
     return 0
 }
 
+redact_env_var() {
+    local entry="$1" key value normalized_key
+    if [[ "$entry" != *=* ]]; then
+        printf '%s' "$entry"
+        return 0
+    fi
+
+    key="${entry%%=*}"
+    value="${entry#*=}"
+    normalized_key="${key^^}"
+    case "$normalized_key" in
+        *PASSWORD*|*PASSWD*|*TOKEN*|*SECRET*|*KEY*|*CREDENTIAL*|*AUTH*|*COOKIE*|*SESSION*|*DSN*|*DATABASE_URL*)
+            # Keep the dashboard's existing *** redaction marker.
+            printf '%s=***' "$key"
+            ;;
+        *)
+            if [[ "$value" == *"://"*"@"* ]]; then
+                printf '%s=***' "$key"
+            else
+                printf '%s' "$entry"
+            fi
+            ;;
+    esac
+}
+
 validate_docker_network_name() {
     local network="$1"
     case "$network" in
@@ -508,7 +533,7 @@ if $GIT_ONLY; then
     info "  Deploy method:  git push (no image deploy now)"
 fi
 for ev in "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; do
-    info "  Env key:        ${ev%%=*}"
+    info "  Env var:        $(redact_env_var "$ev")"
 done
 echo ""
 

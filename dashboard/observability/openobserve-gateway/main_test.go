@@ -29,10 +29,13 @@ func TestSignalByPath(t *testing.T) {
 	}
 }
 
-func TestForwardPathMapsHealthToMetricsEndpoint(t *testing.T) {
+func TestHealthUsesDedicatedNativeMetricsIngress(t *testing.T) {
 	health, ok := signalByPath("/v1/health")
 	if !ok {
 		t.Fatal("health signal must be registered")
+	}
+	if health.stream != "" {
+		t.Fatalf("health signal must not set a stream-name override, got %q", health.stream)
 	}
 	if got := forwardPath(health); got != "/v1/metrics" {
 		t.Fatalf("forwardPath(health) = %q, want /v1/metrics", got)

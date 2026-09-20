@@ -60,7 +60,6 @@ for reference in (
 expected = {
     "ifritah_logs_v1": ("logs", 14),
     "ifritah_traces_v1": ("traces", 7),
-    "ifritah_telemetry_health_v1": ("logs", 14),
 }
 actual = {}
 for stream in stream_doc["streams"]:
@@ -78,6 +77,14 @@ for stream in stream_doc["streams"]:
         for key in stream["create"]["settings"]
     )
 assert actual == expected
+for document in (stream_doc, manifest):
+    health = document["health_signal"]
+    assert health["ingress_path"] == "/v1/health"
+    assert health["signal_type"] == "metrics"
+    assert health["query_mode"] == "promql"
+    assert health["retention_days"] == 15
+    assert "ifritah_gateway_" in health["metric_name_prefixes"]
+    assert "otelcol_" in health["metric_name_prefixes"]
 metric_policy = stream_doc["metric_stream_policy"]
 assert metric_policy["retention_days"] == 15
 assert metric_policy["max_query_range"] == 24
@@ -204,6 +211,7 @@ for name, counter in {
     assert counter in query
 
 all_json = json.dumps([manifest, stream_doc, dashboard, views, alerts, notifications])
+assert "ifritah_telemetry_health_v1" not in all_json
 terms = [
     "request_id",
     "trace_id",

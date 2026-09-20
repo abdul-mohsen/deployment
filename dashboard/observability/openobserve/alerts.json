@@ -113,35 +113,18 @@
       "enabled": false
     },
     {
-      "name": "Ifritah - Collector drops or lag",
-      "stream_type": "logs",
-      "stream_name": "ifritah_telemetry_health_v1",
-      "description": "Notify when collector drops, queue pressure, parse failures, or lag are observed.",
+      "name": "Ifritah - Collector drops or queue pressure",
+      "stream_type": "metrics",
+      "stream_name": "ifritah_gateway_dropped_records_total",
+      "description": "Notify when the dedicated health path reports dropped records or durable queue pressure.",
       "query_condition": {
-        "type": "sql",
-        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_telemetry_health_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND (dropped_records > 0 OR parse_failures > 0 OR lag_ms > 60000 OR queue_depth > 1000)"
-      },
-      "trigger_condition": {
-        "period": 10,
-        "operator": ">=",
-        "threshold": 1,
-        "frequency": 5,
-        "frequency_type": "minutes",
-        "silence": 30
-      },
-      "destinations": [
-        "${OPENOBSERVE_ALERT_DESTINATION_NAME}"
-      ],
-      "enabled": false
-    },
-    {
-      "name": "Ifritah - OpenObserve health degraded",
-      "stream_type": "logs",
-      "stream_name": "ifritah_telemetry_health_v1",
-      "description": "Notify when collector or OpenObserve health is degraded or failing.",
-      "query_condition": {
-        "type": "sql",
-        "sql": "SELECT COUNT(*) AS alert_count FROM \"ifritah_telemetry_health_v1\" WHERE _timestamp >= now() - INTERVAL '10 minutes' AND (component IN ('collector', 'openobserve') OR service_name = 'openobserve') AND outcome IN ('degraded', 'failure', 'dropped')"
+        "type": "promql",
+        "promql": "sum(increase(ifritah_gateway_dropped_records_total[10m])) + sum(ifritah_gateway_queue_files)",
+        "promql_condition": {
+          "column": "value",
+          "operator": ">=",
+          "value": 1
+        }
       },
       "trigger_condition": {
         "period": 10,

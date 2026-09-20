@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "provisioning_version": "2026-09-19",
+  "provisioning_version": "2026-09-20",
   "product": "openobserve",
   "tested_image": "public.ecr.aws/zinclabs/openobserve:v1.0.3",
   "access": {
@@ -35,13 +35,21 @@
       "name": "ifritah_traces_v1",
       "type": "traces",
       "retention_days": 7
-    },
-    {
-      "name": "ifritah_telemetry_health_v1",
-      "type": "logs",
-      "retention_days": 14
     }
   ],
+  "health_signal": {
+    "ingress_path": "/v1/health",
+    "signal_type": "metrics",
+    "query_mode": "promql",
+    "retention_days": 15,
+    "metric_name_prefixes": [
+      "ifritah_gateway_",
+      "alloy_",
+      "otelcol_",
+      "prometheus_"
+    ],
+    "note": "Health metrics use the dedicated Alloy health pipeline and gateway queue; OpenObserve stores them in native metric-family streams rather than a synthetic health log stream."
+  },
   "metric_stream_policy": {
     "retention_days": 15,
     "max_query_range": 24,

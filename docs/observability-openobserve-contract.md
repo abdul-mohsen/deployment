@@ -86,10 +86,12 @@ contract version and is not a tenant name:
 
 Native OpenObserve OTLP metrics are stored in one metrics stream per metric
 family, not in one arbitrary aggregate stream. Metric names are therefore
-queried through PromQL. The provisioning policy applies 15-day retention to
-allow-listed metric streams whose names start with `ifritah_`, `node_`,
-`alloy_`, `otelcol_`, or `prometheus_`; rerun provisioning after a new metric
-family first appears.
+queried through PromQL. The deployment defines one exact, finite
+`approved_metric_families` policy in `streams.json`, grouped by `backend`,
+`resource`, and `health`. The direct Prometheus-to-OTel routes reject every
+other family, and provisioning applies 15-day retention only to existing
+native streams whose names are exact members of that policy. Rerun
+provisioning after an approved metric family first appears.
 
 Pipeline health is a native metric signal, not a third log stream. Alloy
 scrapes only the allow-listed collector and gateway health endpoints through

@@ -152,6 +152,28 @@ grep -Fq 'forward_to = [otelcol.receiver.prometheus.direct.receiver]' "$alloy" \
 if grep -Fq 'prometheus.relabel "container_resources"' "$alloy"; then
     fail "resource metrics still use the incompatible relabel-to-OTel fan-in path"
 fi
+for source in backend resource health; do
+    grep -Fq "otelcol.processor.filter \"${source}_metrics\"" "$alloy" \
+        || fail "exact ${source} metric-family filter is missing"
+done
+if [ "$(grep -c 'error_mode = "propagate"' "$alloy")" -lt 3 ]; then
+    fail "metric-family filters do not fail closed on evaluation errors"
+fi
+grep -Fq 'metrics = [otelcol.processor.filter.backend_metrics.input]' "$alloy" \
+    || fail "backend receiver is not connected to its metric-family filter"
+grep -Fq 'metrics = [otelcol.processor.filter.resource_metrics.input]' "$alloy" \
+    || fail "resource receiver is not connected to its metric-family filter"
+grep -Fq 'metrics = [otelcol.processor.filter.health_metrics.input]' "$alloy" \
+    || fail "health receiver is not connected to its metric-family filter"
+grep -Fq 'not IsMatch(name, "^(ifritah_http_requests_total|' "$alloy" \
+    || fail "backend metric-family filter is not exact"
+grep -Fq 'not IsMatch(name, "^(node_cpu_seconds_total|' "$alloy" \
+    || fail "resource metric-family filter is not exact"
+grep -Fq 'not IsMatch(name, "^(alloy_build_info|' "$alloy" \
+    || fail "health metric-family filter is not exact"
+if grep -Fq 'allowed_name_prefixes' "$alloy"; then
+    fail "pipeline still contains broad metric-family prefix policy"
+fi
 grep -Fq 'type        = "Bearer"' "$alloy" \
     || fail "backend metrics scrape is not authenticated"
 grep -Fq 'OPENOBSERVE_TENANT_OTLP_TOKEN: ${OPENOBSERVE_TENANT_OTLP_TOKEN:?set OPENOBSERVE_TENANT_OTLP_TOKEN in observability/openobserve.env}' "$compose" \

@@ -222,11 +222,15 @@ value = json.loads(raw)
 if isinstance(value, str):
     value = json.loads(value)
 policy = json.loads(policy_raw)
-prefixes = tuple(policy.get("allowed_name_prefixes", []))
+approved = {
+    name
+    for families in policy.get("approved_metric_families", {}).values()
+    for name in families
+}
 items = value.get("list", value if isinstance(value, list) else [])
 for item in items:
     name = item.get("name", "") if isinstance(item, dict) else str(item)
-    if name.startswith(prefixes):
+    if name in approved:
         print(name)
 PY
 )

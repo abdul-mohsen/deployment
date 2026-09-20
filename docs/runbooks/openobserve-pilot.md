@@ -412,14 +412,15 @@ application SQL text, credentials, or arbitrary error strings.
 The dashboard and searches use record fields, not metric labels or stream
 partitions.
 
-The artifact retention defaults are 14 days for logs, 7 days for traces, and
-15 days for native metric streams, including the dedicated health signal.
-Native metrics create one OpenObserve stream per metric family, so dashboards
-and alerts use PromQL instead of querying a synthetic aggregate stream. The
-provisioning script applies 15-day retention to existing allow-listed metric
-streams (`ifritah_`, `node_`, `alloy_`, `otelcol_`, and `prometheus_`); rerun it
-after a new metric family first appears. Verify effective values in stream
-settings after applying them. The Compose profile's global retention value
+The artifact retention defaults are 14 days for logs, 7 days for traces,
+15 days for native metric streams, and 14 days for telemetry health. Native
+metrics create one OpenObserve stream per metric family, so dashboards and
+alerts use PromQL instead of querying a synthetic aggregate stream. The
+provisioning script applies 15-day retention to existing streams whose names
+are exact members of the `approved_metric_families` groups (`backend`,
+`resource`, and `health`) in `streams.json`; rerun it after a new approved
+metric family first appears. Verify effective values in stream settings after
+applying them. The Compose profile's global retention value
 remains unchanged by this workstream; the protected env setting above is what
 allows per-stream values to apply.
 If the pinned OpenObserve build still treats the global value as a shorter cap,
@@ -511,10 +512,10 @@ operator UI or API:
 1. Delete `Ifritah OpenObserve Operations`.
 2. Delete the saved views whose names start with `Ifritah -`.
 3. Stop or reroute the collector before deleting any contract stream.
-4. Delete `ifritah_logs_v1` and `ifritah_traces_v1` only when the resulting
-   telemetry loss is approved. Remove native metric streams matching the
-   documented allow-list, including health metrics, only when metric history
-   loss is approved.
+4. Delete `ifritah_logs_v1`, `ifritah_traces_v1`, and
+   `ifritah_telemetry_health_v1` only when the resulting telemetry loss is
+   approved. Remove native metric streams whose names exactly match the
+   `approved_metric_families` policy only when metric history loss is approved.
 
 Do not delete the named `/data` volume for a UI rollback. Preserve the image
 digest, artifact version, and resource IDs in the change record. A service

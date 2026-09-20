@@ -82,8 +82,8 @@ grep -Fq 'traces  = [otelcol.processor.memory_limiter.tenant.input]' "$alloy" \
     || fail "tenant OTLP traces are not isolated from internal scrapes"
 grep -Fq 'logs = [otelcol.processor.memory_limiter.main.input]' "$alloy" \
     || fail "Docker logs are not routed through the internal pipeline"
-if [ "$(grep -Fc 'metrics = [otelcol.processor.memory_limiter.main.input]' "$alloy")" -lt 3 ]; then
-    fail "internal resource, application, and health scrapes are not routed through the internal pipeline"
+if [ "$(grep -Fc 'metrics = [otelcol.processor.memory_limiter.main.input]' "$alloy")" -lt 2 ]; then
+    fail "internal resource and application scrapes are not routed through the internal pipeline"
 fi
 grep -Fq 'otelcol.processor.transform "tenant_identity"' "$alloy" \
     || fail "tenant OTLP identity processor is missing"
@@ -136,6 +136,16 @@ grep -Fq 'metrics_endpoint = "http://openobserve-gateway:4318/v1/health"' "$allo
     || fail "collector health does not use the dedicated exporter"
 if grep -Fq 'health_direct' "$alloy"; then
     fail "obsolete collector health receiver remains"
+fi
+grep -Fq 'OPENOBSERVE_USERNAME: ${ZO_ROOT_USER_EMAIL:?set ZO_ROOT_USER_EMAIL in observability/openobserve.env}' "$compose" \
+    || fail "gateway does not receive an explicit OpenObserve username"
+grep -Fq 'OPENOBSERVE_PASSWORD: ${ZO_ROOT_USER_PASSWORD:?set ZO_ROOT_USER_PASSWORD in observability/openobserve.env}' "$compose" \
+    || fail "gateway does not receive an explicit OpenObserve password"
+if grep -Eq 'ZO_ROOT_USER_(EMAIL|PASSWORD)' "$gateway"; then
+    fail "gateway source falls back to root credential environment names"
+fi
+if sed -n '/^  openobserve-gateway:/,/^  [a-z0-9-]*:/p' "$compose" | grep -Fq 'env_file:'; then
+    fail "gateway receives the full operator env file"
 fi
 pass "bounded queues, retries, and pipeline health signals are configured"
 

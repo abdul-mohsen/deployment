@@ -323,6 +323,14 @@ func newGateway() (*gateway, error) {
 	if err != nil {
 		return nil, err
 	}
+	username, err := requiredEnv("OPENOBSERVE_USERNAME")
+	if err != nil {
+		return nil, err
+	}
+	password, err := requiredEnv("OPENOBSERVE_PASSWORD")
+	if err != nil {
+		return nil, err
+	}
 
 	gateway := &gateway{
 		queueRoot:  queueRoot,
@@ -331,8 +339,8 @@ func newGateway() (*gateway, error) {
 		listenAddr: envOrDefault("LISTEN_ADDR", defaultListenAddr),
 		healthAddr: envOrDefault("HEALTH_ADDR", defaultHealthAddr),
 		baseURL:    strings.TrimRight(envOrDefault("OPENOBSERVE_BASE_URL", "http://openobserve:5080/api/default"), "/"),
-		username:   envOrDefault("OPENOBSERVE_USERNAME", os.Getenv("ZO_ROOT_USER_EMAIL")),
-		password:   envOrDefault("OPENOBSERVE_PASSWORD", os.Getenv("ZO_ROOT_USER_PASSWORD")),
+		username:   username,
+		password:   password,
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -631,6 +639,14 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func requiredEnv(name string) (string, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return "", fmt.Errorf("%s is required", name)
+	}
+	return value, nil
 }
 
 func envInt64(name string, fallback int64) (int64, error) {

@@ -166,10 +166,12 @@ services:
     build:
       context: ./observability/openobserve-gateway
     restart: unless-stopped
-    env_file:
-      - ${OBS_OPENOBSERVE_ENV_FILE:-observability/openobserve.env}
     environment:
       OPENOBSERVE_BASE_URL: http://openobserve:5080/api/default
+      # Do not pass the full operator env file to the gateway. It only needs
+      # the credentials used to forward signals to OpenObserve.
+      OPENOBSERVE_USERNAME: ${ZO_ROOT_USER_EMAIL:?set ZO_ROOT_USER_EMAIL in observability/openobserve.env}
+      OPENOBSERVE_PASSWORD: ${ZO_ROOT_USER_PASSWORD:?set ZO_ROOT_USER_PASSWORD in observability/openobserve.env}
       QUEUE_DIR: /var/lib/openobserve-gateway
       QUEUE_MAX_BYTES: ${OBS_OPENOBSERVE_QUEUE_MAX_BYTES:-67108864}
       MAX_BODY_BYTES: ${OBS_OPENOBSERVE_MAX_BODY_BYTES:-4194304}

@@ -115,8 +115,11 @@ pass "Health provisioning has one native metric contract"
 
 grep -Fq '/api/$ORG_PATH/streams?type=metrics' "$apply" \
     || fail "provisioning does not discover native metric streams"
-grep -Fq 'allowed_name_prefixes' "$apply" \
+grep -Fq 'approved_metric_families' "$apply" \
     || fail "provisioning does not bound health metric retention"
+if grep -Fq 'allowed_name_prefixes' "$apply"; then
+    fail "provisioning still uses prefix-based health metric retention"
+fi
 pass "Provisioning retains health metrics through the native metric policy"
 
 echo

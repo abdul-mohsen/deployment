@@ -66,6 +66,10 @@ jobs:
         shell: bash
         run: bash scripts/tests/test-openobserve-provisioning.sh
 
+      - name: Check OpenObserve provisioning fail-closed regressions
+        shell: bash
+        run: bash scripts/tests/test-openobserve-provisioning-fail-closed.sh
+
       - name: Check OpenObserve collector and resource contracts
         shell: bash
         run: bash scripts/tests/test-openobserve-pipeline.sh

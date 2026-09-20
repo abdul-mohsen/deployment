@@ -88,6 +88,7 @@ for text in \
     "/v1/traces" \
     "ifritah-tenant" \
     "existing saved views and alerts" \
+    "schema-invalid successful dashboard, saved-view," \
     "heartbeat"; do
     contains "$runbook" "$text" "runbook covers apply/import value: $text"
 done

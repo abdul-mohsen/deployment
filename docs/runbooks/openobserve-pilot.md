@@ -350,7 +350,9 @@ are updated by their API IDs rather than silently skipped. Existing alert
 enablement is preserved unless `OPENOBSERVE_ENABLE_ALERTS=true` and the alert
 name is explicitly selected; the configured destination is always required and
 never created by this script. Listing failures fail closed instead of creating
-duplicates. The apply is idempotent by default: it updates the dashboard found
+duplicates. Malformed JSON or schema-invalid successful dashboard, saved-view,
+or alert list responses also fail closed instead of being treated as empty.
+The apply is idempotent by default: it updates the dashboard found
 by title and does not delete an existing dashboard. Leave
 `OPENOBSERVE_REPLACE_DASHBOARD=false` for normal applies; set it to `true` only
 for an approved replacement that records the old dashboard ID and hash.

@@ -370,6 +370,18 @@ grep -Fq 'api_put "/api/$ORG_PATH/savedviews/$(urlencode "$view_id")"' "$apply" 
     || fail "apply script does not update existing saved views"
 grep -Fq 'api_put "/api/v2/$ORG_PATH/alerts/$(urlencode "$alert_id")"' "$apply" \
     || fail "apply script does not update existing alerts"
+grep -Fq 'discover_resource dashboard "$dashboard_title"' "$apply" \
+    || fail "apply script does not validate dashboard discovery responses"
+grep -Fq 'discover_resource saved_view "$view_name"' "$apply" \
+    || fail "apply script does not validate saved-view discovery responses"
+grep -Fq 'discover_resource alert "$alert_name"' "$apply" \
+    || fail "apply script does not validate alert discovery responses"
+grep -Fq 'could not validate OpenObserve dashboard list response' "$apply" \
+    || fail "apply script does not fail closed on malformed dashboard responses"
+grep -Fq 'could not validate OpenObserve saved view list response' "$apply" \
+    || fail "apply script does not fail closed on malformed saved-view responses"
+grep -Fq 'could not validate OpenObserve alert list response' "$apply" \
+    || fail "apply script does not fail closed on malformed alert responses"
 grep -Fq 'refusing to create duplicate state' "$apply" \
     || fail "apply script does not fail closed when existing-resource listing fails"
 if grep -Fq 'exists: $view_name' "$apply" || grep -Fq 'exists: $alert_name' "$apply"; then

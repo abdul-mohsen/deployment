@@ -141,6 +141,100 @@ api_delete() {
     curl "${AUTH[@]}" --fail --silent --show-error -X DELETE "$ENDPOINT$path"
 }
 
+discover_resource() {
+    local resource="$1"
+    local target_name="$2"
+    python3 -c '
+import json
+import sys
+
+resource, target_name = sys.argv[1:]
+if resource == "dashboard":
+    collection_keys = ("dashboards",)
+    name_key = "title"
+elif resource == "saved_view":
+    collection_keys = ("savedviews", "saved_views", "views", "data", "list")
+    name_key = "view_name"
+elif resource == "alert":
+    collection_keys = ("alerts", "data", "list")
+    name_key = "name"
+else:
+    print("unknown OpenObserve discovery resource", file=sys.stderr)
+    raise SystemExit(2)
+
+try:
+    value = json.load(sys.stdin)
+except (json.JSONDecodeError, UnicodeDecodeError):
+    print(f"invalid OpenObserve {resource} list JSON", file=sys.stderr)
+    raise SystemExit(2)
+
+def find_items(node):
+    if isinstance(node, list):
+        return node
+    if not isinstance(node, dict):
+        raise ValueError("response is not an object or list")
+    candidates = []
+    for key in collection_keys:
+        if key not in node:
+            continue
+        child = node[key]
+        if isinstance(child, list):
+            candidates.append(child)
+        elif isinstance(child, dict):
+            candidates.append(find_items(child))
+        else:
+            raise ValueError(f"{key} is not a list or collection object")
+    if len(candidates) != 1:
+        raise ValueError("response has no unambiguous resource collection")
+    return candidates[0]
+
+try:
+    items = find_items(value)
+except (TypeError, ValueError) as error:
+    print(f"invalid OpenObserve {resource} list shape: {error}", file=sys.stderr)
+    raise SystemExit(2)
+
+matches = []
+for index, item in enumerate(items):
+    if not isinstance(item, dict):
+        print(f"invalid OpenObserve {resource} list item at index {index}", file=sys.stderr)
+        raise SystemExit(2)
+    name = item.get(name_key)
+    if not isinstance(name, str):
+        print(f"invalid OpenObserve {resource} name at index {index}", file=sys.stderr)
+        raise SystemExit(2)
+    if name == target_name:
+        matches.append(item)
+
+if len(matches) > 1:
+    print(f"multiple OpenObserve {resource} resources matched the target name", file=sys.stderr)
+    raise SystemExit(2)
+
+if not matches:
+    print("\t" if resource == "dashboard" else "")
+    raise SystemExit(0)
+
+item = matches[0]
+if resource == "dashboard":
+    resource_id = item.get("dashboard_id")
+    resource_hash = item.get("hash")
+    if not isinstance(resource_id, str) or not resource_id or not isinstance(resource_hash, str) or not resource_hash:
+        print("matching OpenObserve dashboard has no update ID or hash", file=sys.stderr)
+        raise SystemExit(2)
+    print(f"{resource_id}\t{resource_hash}")
+else:
+    if resource == "saved_view":
+        resource_id = item.get("view_id") or item.get("id") or item.get("uuid")
+    else:
+        resource_id = item.get("id") or item.get("alert_id") or item.get("alertId")
+    if not isinstance(resource_id, str) or not resource_id:
+        print(f"matching OpenObserve {resource} has no update ID", file=sys.stderr)
+        print("__MISSING_ID__")
+        raise SystemExit(0)
+    print(resource_id)
+' "$resource" "$target_name"
+}
+
 wait_for_status() {
     local method="$1"
     local path="$2"
@@ -275,33 +369,15 @@ PY
 )"
 dashboard_payload="$(cat "$DASHBOARD_FILE")"
 dashboard_query_title="$(urlencode "$dashboard_title")"
-dashboard_list="$(api_get "/api/$ORG_PATH/dashboards?folder=default&title=$dashboard_query_title" || true)"
-dashboard_id="$(printf '%s' "$dashboard_list" | python3 -c '
-import json, sys
-title = sys.argv[1]
-try:
-    value = json.load(sys.stdin)
-except Exception:
-    value = {}
-items = value.get("dashboards", value if isinstance(value, list) else [])
-for item in items:
-    if item.get("title") == title:
-        print(item.get("dashboard_id", ""))
-        break
-' "$dashboard_title")"
-dashboard_hash="$(printf '%s' "$dashboard_list" | python3 -c '
-import json, sys
-title = sys.argv[1]
-try:
-    value = json.load(sys.stdin)
-except Exception:
-    value = {}
-items = value.get("dashboards", value if isinstance(value, list) else [])
-for item in items:
-    if item.get("title") == title:
-        print(item.get("hash", ""))
-        break
-' "$dashboard_title")"
+if ! dashboard_list="$(api_get "/api/$ORG_PATH/dashboards?folder=default&title=$dashboard_query_title")"; then
+    echo "could not list OpenObserve dashboards; refusing to create duplicate state" >&2
+    exit 1
+fi
+if ! dashboard_match="$(printf '%s' "$dashboard_list" | discover_resource dashboard "$dashboard_title")"; then
+    echo "could not validate OpenObserve dashboard list response; refusing to create duplicate state" >&2
+    exit 1
+fi
+IFS=$'\t' read -r dashboard_id dashboard_hash <<<"$dashboard_match"
 
 if [[ -n "$dashboard_id" && "$REPLACE_DASHBOARD" == "true" ]]; then
     api_delete "/api/$ORG_PATH/dashboards/$(urlencode "$dashboard_id")?folder=default" >/dev/null
@@ -325,29 +401,10 @@ fi
 echo "provisioning saved views"
 while IFS= read -r view_body; do
     view_name="$(printf '%s' "$view_body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_name"])')"
-    view_id="$(printf '%s' "$saved_views" | python3 -c '
-import json, sys
-name = sys.argv[1]
-try:
-    value = json.load(sys.stdin)
-except Exception:
-    value = {}
-def walk(item):
-    if isinstance(item, dict):
-        if item.get("view_name") == name:
-            return item.get("view_id") or item.get("id") or item.get("uuid") or "__MISSING_ID__"
-        for child in item.values():
-            found = walk(child)
-            if found:
-                return found
-    if isinstance(item, list):
-        for child in item:
-            found = walk(child)
-            if found:
-                return found
-    return ""
-print(walk(value))
-' "$view_name")"
+    if ! view_id="$(printf '%s' "$saved_views" | discover_resource saved_view "$view_name")"; then
+        echo "could not validate OpenObserve saved view list response; refusing to create duplicate state" >&2
+        exit 1
+    fi
     if [[ "$view_id" == "__MISSING_ID__" ]]; then
         echo "saved view '$view_name' exists but has no update ID" >&2
         exit 1
@@ -440,13 +497,18 @@ if [[ "$APPLY_ALERTS" == "true" && -n "$DESTINATION" ]]; then
     fi
     while IFS= read -r alert_body; do
         alert_name="$(printf '%s' "$alert_body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')"
+        if ! alert_id="$(printf '%s' "$existing_alerts" | discover_resource alert "$alert_name")"; then
+            echo "could not validate OpenObserve alert list response; refusing to create duplicate state" >&2
+            exit 1
+        fi
+        if [[ "$alert_id" == "__MISSING_ID__" ]]; then
+            echo "alert '$alert_name' exists but has no update ID" >&2
+            exit 1
+        fi
         alert_result="$(printf '%s' "$existing_alerts" | python3 -c '
 import json, sys
 name, template, destination, enable_alerts, selected_names = sys.argv[1:]
-try:
-    value = json.load(sys.stdin)
-except Exception:
-    value = {}
+value = json.load(sys.stdin)
 selected = {item.strip() for item in selected_names.split(",") if item.strip()}
 def walk(item):
     if isinstance(item, dict):
@@ -487,10 +549,6 @@ else:
             payload[key] = existing[key]
 print(json.dumps({"id": alert_id, "body": payload}, separators=(",", ":")))
 ' "$alert_name" "$alert_body" "$DESTINATION" "$ENABLE_ALERTS" "$ALERT_NAMES")"
-        if [[ "$alert_result" == "__MISSING_ID__" ]]; then
-            echo "alert '$alert_name' exists but has no update ID" >&2
-            exit 1
-        fi
         alert_id="$(printf '%s' "$alert_result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
         alert_body="$(printf '%s' "$alert_result" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["body"], separators=(",", ":")))')"
         if [[ -n "$alert_id" ]]; then

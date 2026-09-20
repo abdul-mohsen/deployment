@@ -74,6 +74,26 @@ grep -Fq 'auth                  = otelcol.auth.basic.tenant.handler' "$alloy" \
     || fail "OTLP HTTP receiver is not protected by the deployment token"
 grep -Fq 'set(attributes["service.name"], "ifritah-tenant")' "$alloy" \
     || fail "shared OTLP receiver does not overwrite caller service identity"
+grep -Fq 'metrics = [otelcol.processor.memory_limiter.tenant.input]' "$alloy" \
+    || fail "tenant OTLP metrics are not isolated from internal scrapes"
+grep -Fq 'logs    = [otelcol.processor.memory_limiter.tenant.input]' "$alloy" \
+    || fail "tenant OTLP logs are not isolated from internal scrapes"
+grep -Fq 'traces  = [otelcol.processor.memory_limiter.tenant.input]' "$alloy" \
+    || fail "tenant OTLP traces are not isolated from internal scrapes"
+grep -Fq 'logs = [otelcol.processor.memory_limiter.main.input]' "$alloy" \
+    || fail "Docker logs are not routed through the internal pipeline"
+if [ "$(grep -Fc 'metrics = [otelcol.processor.memory_limiter.main.input]' "$alloy")" -lt 3 ]; then
+    fail "internal resource, application, and health scrapes are not routed through the internal pipeline"
+fi
+grep -Fq 'otelcol.processor.transform "tenant_identity"' "$alloy" \
+    || fail "tenant OTLP identity processor is missing"
+grep -Fq 'set(attributes["service_name"], "ifritah-tenant")' "$alloy" \
+    || fail "tenant metric service identity is not bounded"
+grep -Fq 'set(attributes["service.name"], attributes["service_name"])' "$alloy" \
+    || fail "internal service attribution is not retained from trusted metadata"
+if grep -Fq 'set(attributes["service.name"], "ifritah-tenant") where not IsMatch' "$alloy"; then
+    fail "shared sanitizer still allows a caller-selected service allow-list"
+fi
 if grep -Fq 'set(attributes["tenant_id"], attributes["tenant.id"])' "$alloy"; then
     fail "shared OTLP receiver trusts caller-supplied tenant.id"
 fi

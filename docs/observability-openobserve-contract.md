@@ -296,7 +296,10 @@ the bounded `ifritah-tenant` identity and MUST remove caller-provided
 `service.name`, `tenant.id`, or equivalent span/resource attribute MUST NOT
 select another tenant or service. Tenant identity in Docker logs is derived
 from the collector's allow-listed Dokku container metadata; it is not taken
-from an arbitrary OTLP payload. The receiver's overwrite is intentional:
+from an arbitrary OTLP payload. Tenant OTLP is routed through a dedicated
+identity processor before the common sanitizer; Docker logs and Prometheus
+resource/health scrapes use the internal pipeline and retain their
+allow-listed service attribution. The receiver's overwrite is intentional:
 OTLP application identity is authenticated but not used as a tenant-directory
 lookup.
 
@@ -506,7 +509,7 @@ OTLP resources MAY carry only these dimensions:
 
 | Attribute | Allowed values |
 |---|---|
-| `service.name` | `ifritah-backend`, `ifritah-frontend`, `ifritah-dashboard`, `ifritah-deploy-script`, `otel-collector`, `openobserve` |
+| `service.name` | `ifritah-backend`, `ifritah-frontend`, `ifritah-dashboard`, `ifritah-deploy-script`, `ifritah-tenant`, `ifritah-alloy`, `ifritah-openobserve-gateway`, `ifritah-resource-exporter`, `ifritah-node-exporter`, `otel-collector`, `openobserve` |
 | `service.version` | current approved release/build |
 | `deployment.environment.name` | `dev`, `qa`, `prod`, `unknown` |
 | `component` | reviewed bounded component name |

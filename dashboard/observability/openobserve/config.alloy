@@ -1405,9 +1405,9 @@ otelcol.receiver.otlp "private" {
 	}
 
 	output {
-		metrics = [otelcol.processor.memory_limiter.main.input]
-		logs    = [otelcol.processor.memory_limiter.main.input]
-		traces  = [otelcol.processor.memory_limiter.main.input]
+		metrics = [otelcol.processor.memory_limiter.tenant.input]
+		logs    = [otelcol.processor.memory_limiter.tenant.input]
+		traces  = [otelcol.processor.memory_limiter.tenant.input]
 	}
 }
 
@@ -1420,6 +1420,18 @@ otelcol.processor.memory_limiter "main" {
 		metrics = [otelcol.processor.filter.unsafe.input]
 		logs    = [otelcol.processor.filter.unsafe.input]
 		traces  = [otelcol.processor.filter.unsafe.input]
+	}
+}
+
+otelcol.processor.memory_limiter "tenant" {
+	check_interval = "1s"
+	limit          = "96MiB"
+	spike_limit    = "16MiB"
+
+	output {
+		metrics = [otelcol.processor.filter.tenant_unsafe.input]
+		logs    = [otelcol.processor.filter.tenant_unsafe.input]
+		traces  = [otelcol.processor.filter.tenant_unsafe.input]
 	}
 }
 
@@ -1440,6 +1452,70 @@ otelcol.processor.filter "unsafe" {
 	}
 }
 
+otelcol.processor.filter "tenant_unsafe" {
+	error_mode = "ignore"
+
+	logs {
+		log_record = [
+			`IsString(body) and IsMatch(body, "(?i)(\"?(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw)\"?[[:space:]]*[:=])")`,
+			`IsString(body) and Len(body) > 65536`,
+		]
+	}
+
+	output {
+		metrics = [otelcol.processor.transform.tenant_identity.input]
+		logs    = [otelcol.processor.transform.tenant_identity.input]
+		traces  = [otelcol.processor.transform.tenant_identity.input]
+	}
+}
+
+// Tenant OTLP has an authenticated but shared credential, so its caller
+// identity is deliberately replaced before the common sanitizer runs.
+otelcol.processor.transform "tenant_identity" {
+	error_mode = "ignore"
+
+	trace_statements {
+		context    = "resource"
+		statements = [
+			`set(attributes["service.name"], "ifritah-tenant")`,
+		]
+	}
+
+	metric_statements {
+		context    = "resource"
+		statements = [
+			`set(attributes["service.name"], "ifritah-tenant")`,
+		]
+	}
+
+	metric_statements {
+		context    = "datapoint"
+		statements = [
+			`set(attributes["service_name"], "ifritah-tenant")`,
+		]
+	}
+
+	log_statements {
+		context    = "resource"
+		statements = [
+			`set(attributes["service.name"], "ifritah-tenant")`,
+		]
+	}
+
+	log_statements {
+		context    = "log"
+		statements = [
+			`set(attributes["service_name"], "ifritah-tenant")`,
+		]
+	}
+
+	output {
+		metrics = [otelcol.processor.transform.sanitize.input]
+		logs    = [otelcol.processor.transform.sanitize.input]
+		traces  = [otelcol.processor.transform.sanitize.input]
+	}
+}
+
 otelcol.processor.transform "sanitize" {
 	error_mode = "ignore"
 
@@ -1447,7 +1523,8 @@ otelcol.processor.transform "sanitize" {
 		context    = "resource"
 		statements = [
 			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
-			`set(attributes["service.name"], "ifritah-tenant") where not IsMatch(attributes["service.name"], "^ifritah-(backend|frontend)$")`,
+			`set(attributes["service.name"], attributes["service_name"]) where attributes["service.name"] == nil and attributes["service_name"] != nil`,
+			`set(attributes["service.name"], "otel-collector") where attributes["service.name"] == nil`,
 			`keep_keys(attributes, ["service.name", "service.version", "deployment.environment.name", "component", "cluster", "host.role", "container.role", "image.channel"])`,
 			`truncate_all(attributes, 128)`,
 		]
@@ -1478,7 +1555,8 @@ otelcol.processor.transform "sanitize" {
 		context    = "resource"
 		statements = [
 			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
-			`set(attributes["service.name"], "ifritah-tenant") where attributes["service.name"] == nil`,
+			`set(attributes["service.name"], attributes["service_name"]) where attributes["service.name"] == nil and attributes["service_name"] != nil`,
+			`set(attributes["service.name"], "otel-collector") where attributes["service.name"] == nil`,
 			`keep_keys(attributes, ["service.name", "service.version", "deployment.environment.name", "component", "cluster", "host.role", "container.role", "image.channel"])`,
 			`truncate_all(attributes, 64)`,
 		]
@@ -1498,7 +1576,8 @@ otelcol.processor.transform "sanitize" {
 		context    = "resource"
 		statements = [
 			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
-			`set(attributes["service.name"], "ifritah-tenant")`,
+			`set(attributes["service.name"], attributes["service_name"]) where attributes["service.name"] == nil and attributes["service_name"] != nil`,
+			`set(attributes["service.name"], "otel-collector") where attributes["service.name"] == nil`,
 			`keep_keys(attributes, ["service.name", "service.version", "deployment.environment.name", "component", "cluster", "host.role", "container.role", "service_name"])`,
 			`truncate_all(attributes, 128)`,
 		]

@@ -68,7 +68,37 @@ fi
 
 ENDPOINT="${ENDPOINT%/}"
 ORG_PATH="$(python3 -c 'from urllib.parse import quote; import sys; print(quote(sys.argv[1], safe=""))' "$ORG")"
-AUTH=(-u "$USER_NAME:$PASSWORD")
+AUTH_CONFIG=""
+cleanup_auth_config() {
+    if [[ -n "$AUTH_CONFIG" ]]; then
+        rm -f -- "$AUTH_CONFIG"
+    fi
+}
+trap cleanup_auth_config EXIT
+
+AUTH_CONFIG="$(mktemp "$SCRIPT_DIR/.openobserve-curl-auth.XXXXXX")"
+chmod 600 "$AUTH_CONFIG"
+printf '%s' "$PASSWORD" | python3 -c '
+import sys
+
+config_path, user_name = sys.argv[1:]
+password = sys.stdin.read()
+
+def curl_quote(value):
+    return (
+        "\""
+        + value.replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+        + "\""
+    )
+
+credential = user_name + ":" + password
+with open(config_path, "w", encoding="utf-8") as handle:
+    handle.write("user = " + curl_quote(credential) + "\n")
+' "$AUTH_CONFIG" "$USER_NAME"
+AUTH=(--config "$AUTH_CONFIG")
 STREAMS_FILE="$SCRIPT_DIR/streams.json"
 DASHBOARD_FILE="$SCRIPT_DIR/dashboards/ifritah-operator.json"
 SAVED_VIEWS_FILE="$SCRIPT_DIR/saved-views.json"

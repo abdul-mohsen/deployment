@@ -260,12 +260,14 @@ node-exporter/resources ──┘       └─> private health metrics
 ```
 
 Only the OpenObserve Alloy instance reads the filtered Docker API. It accepts
-dashboard containers carrying `com.ifritah.observability=dashboard` and tenant
-containers named `<tenant>-backend` or `<tenant>-frontend`; arbitrary
-containers are rejected. The Docker socket is mounted only into the
-read-only socket proxy, followed by an Nginx method/path filter. The resource
-exporter aggregates by `container_role` and never emits container, tenant,
-request, trace, or resource IDs as metric labels.
+dashboard containers carrying `com.ifritah.observability=dashboard` and Dokku
+web containers whose `com.dokku.app-name` label is
+`<tenant>-backend` or `<tenant>-frontend`; arbitrary containers are rejected.
+The collector uses Dokku app labels instead of container names because Dokku
+container-name formats vary by version. The Docker socket is mounted only into
+the read-only socket proxy, followed by an Nginx method/path filter. The
+resource exporter aggregates by `container_role` and never emits container,
+tenant, request, trace, or resource IDs as metric labels.
 
 Check the private services and bounded health metrics from inside the profile
 network (do not publish these ports for convenience):

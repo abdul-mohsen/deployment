@@ -67,6 +67,14 @@
       "query": "SELECT service_name, AVG(duration_ms) AS avg_duration_ms, COUNT(*) AS request_count FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND event_type = 'http.request.completed' AND tenant_id = 'TENANT_ID_VALUE' GROUP BY service_name ORDER BY avg_duration_ms DESC LIMIT 64"
     },
     {
+      "view_name": "Ifritah - Backend logs by tenant",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "24h",
+      "description": "Replace TENANT_ID_VALUE with the tenant identifier derived from the backend container name.",
+      "query": "SELECT _timestamp, event_time, severity, event_type, operation, route, status_code, duration_ms, outcome, error_code, request_id, trace_id, service_version, build_commit FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND service_name = 'ifritah-backend' AND tenant_id = 'TENANT_ID_VALUE' ORDER BY _timestamp DESC LIMIT 200"
+    },
+    {
       "view_name": "Ifritah - Collector drops and queue pressure",
       "stream": "ifritah_gateway_dropped_records_total",
       "stream_type": "metrics",

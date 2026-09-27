@@ -13,8 +13,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/lib.sh"
 
+CONFIG_FILE="$PROJECT_DIR/config.env"
 TENANT=""
 APP_TYPE=""
 GREP_PATTERN=""
@@ -27,11 +29,15 @@ while [[ $# -gt 0 ]]; do
         --type)   APP_TYPE="$2"; shift 2 ;;
         --grep)   GREP_PATTERN="$2"; shift 2 ;;
         --since)  SINCE="$2"; FOLLOW=false; shift 2 ;;
+        --config) CONFIG_FILE="$2"; shift 2 ;;
         -h|--help)
             sed -n '2,12p' "$0"; exit 0 ;;
         *) echo "Unknown: $1"; exit 1 ;;
     esac
 done
+
+[ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+[ -n "$TENANT" ] && TENANT="$(tenant_full_name "$TENANT")"
 
 # Get matching apps
 if [ -n "$TENANT" ] && [ -n "$APP_TYPE" ]; then
@@ -42,6 +48,13 @@ elif [ -n "$APP_TYPE" ]; then
     APPS=$(dokku apps:list 2>/dev/null | tail -n +2 | grep -- "-${APP_TYPE}$" || true)
 else
     APPS=$(dokku apps:list 2>/dev/null | tail -n +2 || true)
+fi
+
+if [ -n "$(tenant_name_prefix)" ]; then
+    APPS=$(while IFS= read -r app; do
+        tenant="$(tenant_from_app_name "$app")"
+        tenant_in_scope "$tenant" && printf '%s\n' "$app"
+    done <<< "$APPS")
 fi
 
 if [ -z "$APPS" ]; then

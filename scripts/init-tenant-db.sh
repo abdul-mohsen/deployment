@@ -11,6 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/lib.sh"
+deployment_init_logging
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -18,10 +19,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-log()   { echo -e "${GREEN}[+]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-error() { echo -e "${RED}[x]${NC} $*" >&2; }
-info()  { echo -e "${BLUE}[i]${NC} $*"; }
+log()   { deployment_log INFO "$*"; echo -e "${GREEN}[+]${NC} $*"; }
+warn()  { deployment_log WARN "$*"; echo -e "${YELLOW}[!]${NC} $*"; }
+error() { deployment_log ERROR "$*"; echo -e "${RED}[x]${NC} $*" >&2; }
+info()  { deployment_log INFO "$*"; echo -e "${BLUE}[i]${NC} $*"; }
 
 usage() {
     cat <<EOF
@@ -33,6 +34,7 @@ Options:
                           MANAGER_USER, MANAGER_PASSWORD, COMPANY_NAME
   --schema-only           Apply schema/migrations only
   --seed-only             Seed users/company only
+  --status                Report migration status without applying changes
   --dry-run               Show planned work without executing
   --config <path>         Path to config.env file (default: ../config.env)
 
@@ -50,6 +52,7 @@ TENANT_NAME=""
 BACKEND_IMAGE="${BACKEND_IMAGE:-}"
 SCHEMA_ONLY=false
 SEED_ONLY=false
+STATUS_ONLY=false
 DRY_RUN=false
 declare -a ENV_VARS=()
 
@@ -59,6 +62,7 @@ while [[ $# -gt 0 ]]; do
         --env)           ENV_VARS+=("$2"); shift 2 ;;
         --schema-only)   SCHEMA_ONLY=true; shift ;;
         --seed-only)     SEED_ONLY=true; shift ;;
+        --status)        STATUS_ONLY=true; shift ;;
         --dry-run)       DRY_RUN=true; shift ;;
         --config)        CONFIG_FILE="$2"; shift 2 ;;
         --help|-h)       usage; exit 0 ;;
@@ -77,18 +81,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 if $SCHEMA_ONLY && $SEED_ONLY; then
-    error "Use only one of --schema-only or --seed-only."
+    error "Use only one of --schema-only, --seed-only, or --status."
+    exit 1
+fi
+if $STATUS_ONLY && $SCHEMA_ONLY; then
+    error "Use only one of --schema-only, --seed-only, or --status."
+    exit 1
+fi
+if $STATUS_ONLY && $SEED_ONLY; then
+    error "Use only one of --schema-only, --seed-only, or --status."
     exit 1
 fi
 
 if [ -z "$TENANT_NAME" ]; then
     usage
-    exit 1
-fi
-
-TENANT_NAME="$(echo "$TENANT_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/^-//;s/-$//')"
-if [ -z "$TENANT_NAME" ] || [ ${#TENANT_NAME} -gt 63 ]; then
-    error "Invalid tenant name (must be 1-63 chars, lowercase alphanumeric + hyphens)."
     exit 1
 fi
 
@@ -100,18 +106,15 @@ else
     exit 1
 fi
 
+TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
+deployment_set_tenant "$TENANT_NAME"
+
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"
 DOKKU_PORT="${DOKKU_PORT:-8080}"
-MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
 TENANT_SCHEMA_IMAGE_PATH="${TENANT_SCHEMA_IMAGE_PATH:-/app/db/schema/schema.sql}"
 TENANT_MIGRATIONS_IMAGE_DIR="${TENANT_MIGRATIONS_IMAGE_DIR:-/app/db/migrations}"
 TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"
 TENANT_IGNORED_SCHEMA_FILES="${TENANT_IGNORED_SCHEMA_FILES:-car_part.sql}"
-
-if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
-    error "MYSQL_ROOT_PASSWORD is not configured; cannot initialize tenant DB."
-    exit 1
-fi
 
 BACKEND_APP="${TENANT_NAME}-backend"
 TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
@@ -150,7 +153,15 @@ tenant_table_count() {
         echo 0
         return 0
     fi
-    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE();" | awk 'NF { print $1; exit }'
+    local count
+    count="$(run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE();")" || return 1
+    count="$(printf '%s\n' "$count" | awk 'NF { print $1; exit }')"
+    [[ "$count" =~ ^[0-9]+$ ]] || {
+        error "Could not read tenant table count from ${TENANT_DB_NAME}."
+        return 1
+    }
+    printf '%s\n' "$count"
 }
 
 tenant_required_table_count() {
@@ -158,12 +169,24 @@ tenant_required_table_count() {
         echo 0
         return 0
     fi
-    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name IN ('company','branches','store','user');" | awk 'NF { print $1; exit }'
+    local count
+    count="$(run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name IN ('company','branches','store','user');")" \
+        || return 1
+    count="$(printf '%s\n' "$count" | awk 'NF { print $1; exit }')"
+    [[ "$count" =~ ^[0-9]+$ ]] || {
+        error "Could not read required tenant table count from ${TENANT_DB_NAME}."
+        return 1
+    }
+    printf '%s\n' "$count"
 }
 
 tenant_missing_required_tables() {
-    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT required.name FROM (SELECT 'company' AS name UNION ALL SELECT 'branches' UNION ALL SELECT 'store' UNION ALL SELECT 'user') required LEFT JOIN information_schema.tables existing ON existing.table_schema=DATABASE() AND existing.table_name=required.name WHERE existing.table_name IS NULL;" \
-        | paste -sd ',' -
+    local missing
+    missing="$(run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT required.name FROM (SELECT 'company' AS name UNION ALL SELECT 'branches' UNION ALL SELECT 'store' UNION ALL SELECT 'user') required LEFT JOIN information_schema.tables existing ON existing.table_schema=DATABASE() AND existing.table_name=required.name WHERE existing.table_name IS NULL;")" \
+        || return 1
+    printf '%s\n' "$missing" | paste -sd ',' -
 }
 
 validate_tenant_schema() {
@@ -183,6 +206,20 @@ ensure_tenant_database() {
     if $DRY_RUN; then
         info "Would ensure database exists: $TENANT_DB_NAME"
         return 0
+    fi
+
+    # Existing tenants can replay schema with a dedicated migration account,
+    # the deployment account, or the application account as a legacy fallback.
+    if run_migration_mysql "$TENANT_DB_NAME" -N -B -e "SELECT 1" >/dev/null 2>&1; then
+        info "Tenant database is reachable for schema migration: $TENANT_DB_NAME"
+        return 0
+    fi
+
+    if ! mysql_admin_configured; then
+        error "Tenant database '$TENANT_DB_NAME' is not reachable with migration or application DB credentials."
+        error "Configure MIGRATION_DB_USER/MIGRATION_DB_PASSWORD or DB_USER/DB_PASSWORD and retry."
+        error "MYSQL_ADMIN_USER/MYSQL_ADMIN_PASSWORD is required when the database itself is missing."
+        exit 1
     fi
 
     run_mysql <<SQLEOF
@@ -309,6 +346,13 @@ tenant_db_setting() {
     printf '%s' "$fallback"
 }
 
+tenant_db_credentials_configured() {
+    local password
+    password="$(tenant_db_setting DB_PASSWORD "")"
+    [ -n "$password" ] || password="$(tenant_db_setting PASSWORD "")"
+    [ -n "$password" ]
+}
+
 tenant_db_host() {
     local host
     host="$(tenant_db_setting DB_HOST "")"
@@ -333,11 +377,23 @@ tenant_db_port() {
 
 resolve_mysql_host_for_client() {
     local host="$1"
-    if [ "$_MYSQL_VIA" = "host" ] && [ "$host" = "host.docker.internal" ]; then
-        echo "127.0.0.1"
-    else
-        echo "$host"
-    fi
+    case "$host" in
+        localhost|127.0.0.1|::1)
+            if [ "$_MYSQL_VIA" = "docker" ]; then
+                echo "host.docker.internal"
+            else
+                echo "127.0.0.1"
+            fi
+            ;;
+        host.docker.internal)
+            if [ "$_MYSQL_VIA" = "host" ]; then
+                echo "127.0.0.1"
+            else
+                echo "host.docker.internal"
+            fi
+            ;;
+        *) echo "$host" ;;
+    esac
 }
 
 run_tenant_mysql() {
@@ -354,18 +410,209 @@ run_tenant_mysql() {
 
     if [ -z "$password" ]; then
         error "Tenant DB password is missing from ${BACKEND_APP} config; cannot import schema as tenant user."
-        exit 1
+        return 1
     fi
 
     if [ "$_MYSQL_VIA" = "host" ]; then
-        MYSQL_PWD="$password" mysql -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" "$db" "$@"
+        MYSQL_PWD="$password" mysql --protocol=TCP -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" "$db" "$@"
     else
         docker run --rm -i \
             --add-host=host.docker.internal:host-gateway \
             -e "MYSQL_PWD=$password" \
             mysql:8.0 \
-            mysql -h "$host" -P "$port" -u "$user" "$db" "$@"
+            mysql --protocol=TCP -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" "$db" "$@"
     fi
+}
+
+# Schema changes must use a control-plane or dedicated migration account.
+# Existing tenants may have application users created before DDL privileges
+# were required. Keep the application account as a compatibility fallback
+# when no migration account is configured.
+run_migration_mysql() {
+    if [ -n "${MIGRATION_DB_USER:-}" ] || [ -n "${MIGRATION_DB_PASSWORD:-}" ]; then
+        if [ -z "${MIGRATION_DB_USER:-}" ] || [ -z "${MIGRATION_DB_PASSWORD:-}" ]; then
+            error "MIGRATION_DB_USER and MIGRATION_DB_PASSWORD must be configured together."
+            return 1
+        fi
+        MYSQL_ADMIN_USER="$MIGRATION_DB_USER" \
+            MYSQL_ADMIN_PASSWORD="$MIGRATION_DB_PASSWORD" \
+            run_mysql "$@"
+        return
+    fi
+
+    if mysql_admin_configured; then
+        run_mysql "$@"
+        return
+    fi
+
+    run_tenant_mysql "$@"
+}
+
+MIGRATION_LEDGER_TABLE="deployment_schema_migrations"
+
+ensure_migration_ledger() {
+    if ! run_migration_mysql "$TENANT_DB_NAME" <<SQL
+CREATE TABLE IF NOT EXISTS \`${MIGRATION_LEDGER_TABLE}\` (
+    migration_id VARCHAR(255) NOT NULL,
+    checksum CHAR(64) NOT NULL,
+    image_ref VARCHAR(512) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    started_at DATETIME(6) NOT NULL,
+    applied_at DATETIME(6) NULL,
+    error_message TEXT NULL,
+    PRIMARY KEY (migration_id)
+) ENGINE=InnoDB;
+SQL
+    then
+        error "Could not create migration ledger table '${MIGRATION_LEDGER_TABLE}' in ${TENANT_DB_NAME}."
+        error "Configure MIGRATION_DB_USER/MIGRATION_DB_PASSWORD with DDL access to the tenant database."
+        return 1
+    fi
+
+    local exists
+    if ! exists="$(migration_ledger_exists)"; then
+        error "Could not verify migration ledger table '${MIGRATION_LEDGER_TABLE}' in ${TENANT_DB_NAME}."
+        return 1
+    fi
+    if [ "$exists" != "1" ]; then
+        error "Migration ledger table '${MIGRATION_LEDGER_TABLE}' was not created in ${TENANT_DB_NAME}."
+        return 1
+    fi
+    info "Migration ledger ready: ${TENANT_DB_NAME}.${MIGRATION_LEDGER_TABLE}"
+}
+
+migration_ledger_exists() {
+    run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='${MIGRATION_LEDGER_TABLE}';" \
+        </dev/null
+}
+
+hash_stream() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    else
+        error "sha256sum or shasum is required to track migration checksums."
+        return 1
+    fi
+}
+
+migration_checksum() {
+    local image="$1" path="$2"
+    docker run --rm --entrypoint sh "$image" -c "cat $(shell_quote "$path")" | hash_stream
+}
+
+migration_ledger_row() {
+    local migration_id="$1"
+    local migration_id_sql
+    migration_id_sql="$(sql_escape "$migration_id")"
+    run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT status, checksum FROM \`${MIGRATION_LEDGER_TABLE}\` WHERE migration_id='${migration_id_sql}' LIMIT 1;" \
+        </dev/null
+}
+
+record_migration_started() {
+    local migration_id="$1" checksum="$2" image="$3"
+    local migration_id_sql checksum_sql image_sql
+    migration_id_sql="$(sql_escape "$migration_id")"
+    checksum_sql="$(sql_escape "$checksum")"
+    image_sql="$(sql_escape "$image")"
+    run_migration_mysql "$TENANT_DB_NAME" -e "
+INSERT INTO \`${MIGRATION_LEDGER_TABLE}\`
+    (migration_id, checksum, image_ref, status, started_at, applied_at, error_message)
+VALUES
+    ('${migration_id_sql}', '${checksum_sql}', '${image_sql}', 'running', NOW(6), NULL, NULL)
+ON DUPLICATE KEY UPDATE
+    checksum=VALUES(checksum),
+    image_ref=VALUES(image_ref),
+    status='running',
+    started_at=VALUES(started_at),
+    applied_at=NULL,
+    error_message=NULL;" </dev/null
+}
+
+record_migration_applied() {
+    local migration_id="$1" checksum="$2" image="$3"
+    local migration_id_sql checksum_sql image_sql
+    migration_id_sql="$(sql_escape "$migration_id")"
+    checksum_sql="$(sql_escape "$checksum")"
+    image_sql="$(sql_escape "$image")"
+    run_migration_mysql "$TENANT_DB_NAME" -e "
+UPDATE \`${MIGRATION_LEDGER_TABLE}\`
+SET checksum='${checksum_sql}',
+    image_ref='${image_sql}',
+    status='applied',
+    applied_at=NOW(6),
+    error_message=NULL
+WHERE migration_id='${migration_id_sql}';" </dev/null
+}
+
+record_migration_failed() {
+    local migration_id="$1" checksum="$2" image="$3" exit_code="$4"
+    local migration_id_sql checksum_sql image_sql error_sql
+    migration_id_sql="$(sql_escape "$migration_id")"
+    checksum_sql="$(sql_escape "$checksum")"
+    image_sql="$(sql_escape "$image")"
+    error_sql="$(sql_escape "migration command exited with status ${exit_code}")"
+    run_migration_mysql "$TENANT_DB_NAME" -e "
+UPDATE \`${MIGRATION_LEDGER_TABLE}\`
+SET checksum='${checksum_sql}',
+    image_ref='${image_sql}',
+    status='failed',
+    applied_at=NULL,
+    error_message='${error_sql}'
+WHERE migration_id='${migration_id_sql}';" </dev/null
+}
+
+apply_image_migration() {
+    local image="$1" path="$2"
+    local migration_id checksum row previous_status previous_checksum rc
+    migration_id="$(basename "$path")"
+
+    checksum="$(migration_checksum "$image" "$path")" || {
+        error "Could not checksum migration ${migration_id} from ${image}."
+        return 1
+    }
+
+    row="$(migration_ledger_row "$migration_id")" || {
+        error "Could not read migration ledger for ${migration_id}."
+        return 1
+    }
+    if [ -n "$row" ]; then
+        IFS=$'\t' read -r previous_status previous_checksum <<< "$row"
+        if [ "$previous_checksum" != "$checksum" ]; then
+            error "Migration ${migration_id} changed after it was recorded; refusing to continue."
+            return 1
+        fi
+        if [ "$previous_status" = "applied" ]; then
+            log "Migration already applied: ${migration_id}"
+            return 0
+        fi
+    fi
+
+    record_migration_started "$migration_id" "$checksum" "$image" || {
+        error "Could not record migration start: ${migration_id}."
+        return 1
+    }
+
+    if apply_image_sql_file "$image" "$path" "migration ${migration_id}"; then
+        record_migration_applied "$migration_id" "$checksum" "$image" || {
+            error "Migration applied but could not be recorded: ${migration_id}."
+            return 1
+        }
+        log "Migration applied: ${migration_id}"
+        return 0
+    else
+        rc=$?
+    fi
+
+    if ! record_migration_failed "$migration_id" "$checksum" "$image" "$rc"; then
+        error "Could not record failed migration: ${migration_id}; schema status is unknown."
+        return 1
+    fi
+    error "Migration failed: ${migration_id} (exit ${rc})."
+    return "$rc"
 }
 
 find_image_dir() {
@@ -391,8 +638,10 @@ apply_image_sql_file() {
         info "Would stream ${image}:${path} into ${TENANT_DB_NAME}"
         return 0
     fi
+    # Import with the tenant DB user so schema setup uses the same scoped
+    # permissions as the app runtime connection.
     docker run --rm --entrypoint sh "$image" -c "cat $(shell_quote "$path")" \
-        | run_tenant_mysql "$TENANT_DB_NAME"
+    | run_migration_mysql "$TENANT_DB_NAME"
 }
 
 list_image_migrations() {
@@ -429,34 +678,114 @@ apply_schema() {
         apply_image_sql_file "$image" "$schema_path" "base schema"
     fi
 
-    migrations_dir="$(find_image_dir "$image" \
+    ensure_migration_ledger
+
+    if ! migrations_dir="$(find_image_dir "$image" \
         "$TENANT_MIGRATIONS_IMAGE_DIR" \
         /app/pkg/db/migrations \
-        /app/migrations)" || true
-    if [ -z "$migrations_dir" ]; then
-        warn "Backend image has no migrations directory; skipping migrations."
-        validate_tenant_schema
-        return 0
+        /app/migrations)"; then
+        error "Backend image has no readable migrations directory; refusing to skip migration replay."
+        error "Expected ${TENANT_MIGRATIONS_IMAGE_DIR}, /app/pkg/db/migrations, or /app/migrations."
+        return 1
     fi
 
-    migrations_found=false
     if $DRY_RUN; then
         log "Applying migrations from ${image}:${migrations_dir}"
         info "Would apply all *.sql files in sorted order"
         return 0
     fi
 
-    while IFS= read -r migration; do
-        [ -n "$migration" ] || continue
-        migrations_found=true
-        apply_image_sql_file "$image" "$migration" "migration $(basename "$migration")"
-    done < <(list_image_migrations "$image" "$migrations_dir")
-
-    if ! $migrations_found; then
+    local migration_paths
+    if ! migration_paths="$(list_image_migrations "$image" "$migrations_dir")"; then
+        error "Could not list migrations from ${image}:${migrations_dir}."
+        return 1
+    fi
+    if [ -n "$migration_paths" ]; then
+        while IFS= read -r migration; do
+            [ -n "$migration" ] || continue
+            apply_image_migration "$image" "$migration"
+        done <<< "$migration_paths"
+    else
         warn "No *.sql migrations found in ${image}:${migrations_dir}."
     fi
 
     validate_tenant_schema
+}
+
+show_migration_status() {
+    local image migrations_dir migration_paths migration
+    local ledger_exists status pending_count failed_count row previous_status previous_checksum checksum
+    image="$(resolve_backend_image)"
+    ensure_backend_image_available "$image"
+
+    migrations_dir="$(find_image_dir "$image" \
+        "$TENANT_MIGRATIONS_IMAGE_DIR" \
+        /app/pkg/db/migrations \
+        /app/migrations)" || {
+        printf 'tenant=%s\nimage=%s\nschema_status=unknown\n' "$TENANT_NAME" "$image"
+        error "Backend image has no migration directory."
+        return 1
+    }
+
+    printf 'tenant=%s\nimage=%s\n' "$TENANT_NAME" "$image"
+    if ! ledger_exists="$(migration_ledger_exists)"; then
+        echo "schema_status=ledger_unreachable"
+        error "Could not query migration ledger with the configured migration account."
+        return 1
+    fi
+    if [ "$ledger_exists" != "1" ]; then
+        echo "schema_status=ledger_missing"
+        echo "pending_migrations=unknown"
+        error "Migration ledger table '${MIGRATION_LEDGER_TABLE}' is missing from ${TENANT_DB_NAME}."
+        return 1
+    fi
+
+    if ! migration_paths="$(list_image_migrations "$image" "$migrations_dir")"; then
+        echo "schema_status=unknown"
+        error "Could not list migrations from ${image}:${migrations_dir}."
+        return 1
+    fi
+
+    status="up_to_date"
+    pending_count=0
+    failed_count=0
+    while IFS= read -r migration; do
+        [ -n "$migration" ] || continue
+        local migration_id
+        migration_id="$(basename "$migration")"
+        checksum="$(migration_checksum "$image" "$migration")" || {
+            echo "schema_status=unknown"
+            error "Could not checksum migration ${migration_id}."
+            return 1
+        }
+        row="$(migration_ledger_row "$migration_id")" || {
+            echo "schema_status=unknown"
+            error "Could not read migration ledger for ${migration_id}."
+            return 1
+        }
+        if [ -z "$row" ]; then
+            echo "pending_migration=${migration_id}"
+            status="pending"
+            pending_count=$((pending_count + 1))
+            continue
+        fi
+
+        IFS=$'\t' read -r previous_status previous_checksum <<< "$row"
+        if [ "$previous_status" = "applied" ] && [ "$previous_checksum" = "$checksum" ]; then
+            echo "applied_migration=${migration_id}"
+            continue
+        fi
+
+        echo "failed_migration=${migration_id} status=${previous_status}"
+        status="failed"
+        failed_count=$((failed_count + 1))
+    done <<< "$migration_paths"
+
+    if [ "$pending_count" -gt 0 ] && [ "$failed_count" -eq 0 ]; then
+        status="pending"
+    fi
+    echo "schema_status=${status}"
+    [ "$status" = "up_to_date" ]
 }
 
 seed_company_defaults() {
@@ -489,19 +818,31 @@ SQLEOF
 
 http_post_register() {
     local payload="$1"
-    local url="http://127.0.0.1:${DOKKU_PORT}/api/register"
-    local -a args=(-sS -w $'\n%{http_code}' -H "Host: ${TENANT_DOMAIN}" -H "Content-Type: application/json" --data "$payload" "$url")
+    # Backend routes are mounted under BASEURL (default /api/v2 — set by
+    # create-tenant.sh). Use the same prefix so this matches the deployed backend.
+    local basepath="${BASEURL:-/api/v2}"
+    # Hit the backend container DIRECTLY via the tenant docker network,
+    # bypassing Dokku's nginx + the frontend Go proxy. The frontend enforces
+    # a session-based CSRF token check on /api/* that the seed sidecar cannot
+    # satisfy (no browser session, no prior GET to obtain the token). The
+    # backend itself puts /register on nonAuthGroup with no CSRF middleware,
+    # so a direct hit succeeds.
+    local network="${TENANT_APP_NETWORK:-${TENANT_NETWORK:-web}}"
+    local backend_port="${BACKEND_PORT:-8090}"
+    local url="http://${BACKEND_APP}.web:${backend_port}${basepath}/register"
+    if [ "${DASHBOARD_ENV:-}" = "dev" ]; then
+        info "[dev-diag] http_post_register url=${url} network=${network}"
+    fi
+    local -a args=(-sS -w $'\n%{http_code}' -H "Content-Type: application/json" --data "$payload" "$url")
 
-    if command -v curl >/dev/null 2>&1; then
-        curl "${args[@]}"
-        return $?
+    if ! command -v docker >/dev/null 2>&1; then
+        error "docker is required to register seed users via the tenant network."
+        return 1
     fi
-    if command -v docker >/dev/null 2>&1; then
-        docker run --rm --network host curlimages/curl:8.10.1 "${args[@]}"
-        return $?
-    fi
-    error "Neither curl nor docker is available to register seed users."
-    return 1
+    docker run --rm --network "$network" \
+        curlimages/curl:8.10.1 \
+        "${args[@]}"
+    return $?
 }
 
 set_user_role() {
@@ -556,13 +897,20 @@ register_seed_user() {
         return 0
     fi
 
+    # Backend requires password >= 8 characters. Pad short passwords with a suffix
+    # so the seed doesn't fail silently with HTTP 400.
+    if [ "${#password}" -lt 8 ]; then
+        warn "Password for '${username}' is shorter than 8 characters (required by backend). Appending suffix."
+        password="${password}Pass1!"
+    fi
+
     local email payload response status body attempt
     email="${username}@${TENANT_DOMAIN}"
     payload="{\"username\":\"$(json_escape "$username")\",\"email\":\"$(json_escape "$email")\",\"password\":\"$(json_escape "$password")\",\"full_name\":\"$(json_escape "$full_name")\",\"phone\":\"\"}"
 
     log "Registering ${role} seed user: $username"
     if $DRY_RUN; then
-        info "Would POST /api/register for '$username' on $TENANT_DOMAIN"
+        info "Would POST ${BASEURL:-/api/v2}/register for '$username' on $TENANT_DOMAIN"
         return 0
     fi
 
@@ -570,6 +918,9 @@ register_seed_user() {
         response="$(http_post_register "$payload" 2>&1 || true)"
         status="${response##*$'\n'}"
         body="${response%$'\n'$status}"
+        if [ "${DASHBOARD_ENV:-}" = "dev" ]; then
+            info "[dev-diag] register attempt=${attempt} status='${status}' body_len=${#body}"
+        fi
 
         if [ "$status" = "201" ] || [ "$status" = "200" ] || [ "$status" = "409" ]; then
             [ "$status" = "409" ] && warn "User '$username' already exists; updating role and permissions."
@@ -582,7 +933,7 @@ register_seed_user() {
             continue
         fi
 
-        error "Failed to register user '$username' (HTTP $status): $body"
+        error "Failed to register user '$username' (HTTP $status, response_bytes=${#body})"
         exit 1
     done
 
@@ -604,6 +955,11 @@ seed_users() {
     register_seed_user "$admin_user" "$admin_password" "admin" "${company_name} Admin"
     register_seed_user "$manager_user" "$manager_password" "manager" "${company_name} Manager"
 }
+
+if $STATUS_ONLY; then
+    show_migration_status
+    exit $?
+fi
 
 info "Tenant DB init target: $TENANT_NAME ($TENANT_DB_NAME)"
 if ! $SEED_ONLY; then

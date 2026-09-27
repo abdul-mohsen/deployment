@@ -7,13 +7,13 @@
 #      /home/dokku/<frontend>/nginx.conf.d/api-proxy.conf inside the dokku
 #      container. These reference <backend>-web:<port> which doesn't resolve
 #      from Dokku's nginx context and break `nginx:validate-config`.
-#   2. For every tenant pair (<name>-backend / <name>-frontend), creates
-#      tenant-<name> docker network (if missing) and attaches both apps.
+#   2. For every tenant pair (<name>-backend / <name>-frontend), attaches
+#      both apps to one shared tenant docker network.
 #   3. Removes the public domain/proxy from backend apps. Only frontend apps
 #      should own <tenant>.$BASE_DOMAIN; otherwise Dokku generates duplicate
 #      nginx server_name blocks.
-#   4. Sets BACKEND_URL / PORT / APP_DOMAIN on the frontend, BASEURL on the
-#      backend, then `ps:rebuild`s both apps so the new wiring is applied.
+#   4. Sets BACKEND_URL / PORT / APP_DOMAIN / API_URL on the frontend, BASEURL
+#      on the backend, then `ps:rebuild`s both apps so the new wiring is applied.
 #   5. Validates Dokku nginx config and rebuilds proxy config.
 #
 # Usage:
@@ -21,7 +21,8 @@
 #   sudo bash scripts/post-merge-cleanup.sh qa-7k4m foo     # specific tenants
 #
 # Env overrides: DOKKU_CONTAINER (default: dokku), BACKEND_PORT (8090),
-#                FRONTEND_PORT (8000), BASEURL (/api/v2), BASE_DOMAIN, DRY_RUN=1
+#                TENANT_APP_NETWORK (web), FRONTEND_PORT (8000),
+#                BASEURL (/api/v2), BASE_DOMAIN, DRY_RUN=1
 # =============================================================================
 
 set -euo pipefail
@@ -30,15 +31,27 @@ DOKKU_CONTAINER="${DOKKU_CONTAINER:-dokku}"
 BACKEND_PORT="${BACKEND_PORT:-8090}"
 FRONTEND_PORT="${FRONTEND_PORT:-8000}"
 BASEURL="${BASEURL:-/api/v2}"
+TENANT_NETWORK="${TENANT_APP_NETWORK:-web}"
 DRY_RUN="${DRY_RUN:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+source "$SCRIPT_DIR/lib.sh"
 
-# Try to source config.env for BASE_DOMAIN if not provided
-if [ -z "${BASE_DOMAIN:-}" ] && [ -f "$PROJECT_DIR/config.env" ]; then
-    # shellcheck disable=SC1091
-    source "$PROJECT_DIR/config.env"
+# Load config.env when it supplies BASE_DOMAIN or the optional telemetry flag.
+# Preserve an explicitly supplied BASE_DOMAIN while still allowing operators
+# to migrate existing tenants with OpenObserve enabled from config.env.
+if [ -f "$PROJECT_DIR/config.env" ]; then
+    if [ -z "${BASE_DOMAIN:-}" ] ||
+        [ -z "${OPENOBSERVE_TENANT_TELEMETRY_ENABLED+x}" ]; then
+        _base_domain_override="${BASE_DOMAIN:-}"
+        # shellcheck disable=SC1091
+        source "$PROJECT_DIR/config.env"
+        if [ -n "$_base_domain_override" ]; then
+            BASE_DOMAIN="$_base_domain_override"
+        fi
+        unset _base_domain_override
+    fi
 fi
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set (in env or $PROJECT_DIR/config.env)}"
 
@@ -66,6 +79,76 @@ dk() {
 
 dk_dokku() { dk dokku "$@"; }
 
+# lib.sh uses the normal Dokku command name. This repair script runs from the
+# host, where Dokku is inside the container, so route those calls through the
+# same wrapper used by the rest of this script.
+dokku() { dk_dokku "$@"; }
+
+validate_docker_network_name() {
+    local network="$1"
+    case "$network" in
+        *[!A-Za-z0-9_.-]*)
+            error "Invalid Docker network name: $network"
+            exit 1
+            ;;
+    esac
+}
+
+find_existing_tenant_network() {
+    dk bash -lc "docker network ls --format '{{.Name}}' | awk '\$1 == \"web\" || /^tenant-/ { print; exit }'"
+}
+
+ensure_tenant_network() {
+    local network="$1"
+    local create_error=""
+    local fallback_network=""
+    validate_docker_network_name "$network"
+    TENANT_NETWORK="$network"
+
+    if dk bash -lc "docker network inspect $network >/dev/null 2>&1"; then
+        info "Network $network already exists"
+        return 0
+    fi
+
+    log "Creating shared tenant docker network: $network"
+    if ! dk_dokku network:create "$network"; then
+        warn "dokku network:create did not create $network; verifying Docker network state."
+    fi
+
+    if dk bash -lc "docker network inspect $network >/dev/null 2>&1"; then
+        info "Network $network is ready"
+        return 0
+    fi
+
+    warn "Creating Docker network directly: $network"
+    if dk bash -lc "docker network create $network >/dev/null"; then
+        if ! dk bash -lc "docker network inspect $network >/dev/null 2>&1"; then
+            error "Docker network was not created: $network"
+            exit 1
+        fi
+        info "Network $network is ready"
+        return 0
+    fi
+
+    create_error="$(dk bash -lc "docker network create $network" 2>&1 || true)"
+    if [ -n "$create_error" ]; then
+        warn "docker network create failed for $network: $create_error"
+    fi
+
+    fallback_network="$(find_existing_tenant_network 2>/dev/null || true)"
+    if [ -n "$fallback_network" ]; then
+        validate_docker_network_name "$fallback_network"
+        if dk bash -lc "docker network inspect $fallback_network >/dev/null 2>&1"; then
+            warn "Docker cannot allocate a new network; reusing existing tenant network: $fallback_network"
+            TENANT_NETWORK="$fallback_network"
+            return 0
+        fi
+    fi
+
+    error "Failed to create Docker network: $network"
+    exit 1
+}
+
 # Tenant list: from CLI args, else derive from `dokku apps:list`
 declare -a TENANTS=()
 if [ $# -gt 0 ]; then
@@ -85,6 +168,7 @@ if [ ${#TENANTS[@]} -eq 0 ]; then
 fi
 
 log "Tenants to process: ${TENANTS[*]}"
+ensure_tenant_network "$TENANT_NETWORK"
 
 # ---------------------------------------------------------------------------
 # 1. Remove broken /api nginx snippets across every frontend app
@@ -104,8 +188,12 @@ done
 # ---------------------------------------------------------------------------
 for t in "${TENANTS[@]}"; do
     be="${t}-backend"; fe="${t}-frontend"
-    net="tenant-${t}"
+    net="$TENANT_NETWORK"
     domain="${t}.${BASE_DOMAIN}"
+    public_url="$(public_tenant_url "$t")" || {
+        error "  invalid public URL for tenant $t; skipping"
+        continue
+    }
 
     log "=== ${t} ==="
 
@@ -119,8 +207,16 @@ for t in "${TENANTS[@]}"; do
         continue
     fi
 
+    if [ "$DRY_RUN" = "1" ]; then
+        info "  [dry-run] would reconcile optional OpenObserve telemetry wiring"
+    else
+        # The shared helper validates the fixed internal network, persists the
+        # Dokku hook, and connects live containers without making telemetry a
+        # deployment prerequisite.
+        openobserve_reconcile_tenant_apps "$t" "$be" "$fe" || true
+    fi
+
     info "  network: $net"
-    dk_dokku network:create "$net" >/dev/null 2>&1 || true
     # Use only attach-post-create: Dokku rejects setting both attach-post-create
     # and attach-post-deploy to the same network on the same app.
     dk_dokku network:set "$be" attach-post-create "$net" >/dev/null || true
@@ -139,7 +235,8 @@ for t in "${TENANTS[@]}"; do
     dk_dokku config:set --no-restart "$fe" \
         BACKEND_URL="http://${be}.web:${BACKEND_PORT}" \
         PORT="$FRONTEND_PORT" \
-        APP_DOMAIN="$domain" >/dev/null
+        APP_DOMAIN="$domain" \
+        API_URL="${public_url}/api" >/dev/null
 
     info "  rebuild: $be, $fe"
     dk_dokku ps:rebuild "$be" || warn "  $be rebuild failed (deploy not yet done?)"
@@ -159,5 +256,9 @@ dk_dokku proxy:build-config --all >/dev/null || warn "proxy:build-config failed"
 
 log "Done. Verify next:"
 for t in "${TENANTS[@]}"; do
-    echo "  curl -I http://${t}.${BASE_DOMAIN}/"
+    if site_url="$(public_tenant_url "$t")"; then
+        echo "  curl -I ${site_url}/"
+    else
+        echo "  (invalid public URL for ${t})"
+    fi
 done

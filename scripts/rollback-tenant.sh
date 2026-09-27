@@ -13,9 +13,9 @@
 #
 # Examples:
 #   ./scripts/rollback-tenant.sh acme --list
-#   ./scripts/rollback-tenant.sh acme --to myuser/api:abc1234
-#   ./scripts/rollback-tenant.sh acme --type frontend --to myuser/web:prev
-#   ./scripts/rollback-tenant.sh --all --to myuser/api:abc1234
+#   ./scripts/rollback-tenant.sh acme --to myuser/ifritah-api:abc1234
+#   ./scripts/rollback-tenant.sh acme --type frontend --to myuser/ifritah-web:prev
+#   ./scripts/rollback-tenant.sh --all --to myuser/ifritah-api:abc1234
 # =============================================================================
 
 set -euo pipefail
@@ -60,6 +60,10 @@ if [ -z "$TENANT_NAME" ] && ! $ALL_TENANTS; then
     echo "Usage: $0 <tenant-name> [--type backend|frontend] [--to <image:tag>] [--list]"
     echo "       $0 --all --to <image:tag> [--type backend|frontend]"
     exit 1
+fi
+
+if [ -n "$TENANT_NAME" ]; then
+    TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
 fi
 
 APP_SUFFIX="-${APP_TYPE}"
@@ -116,7 +120,7 @@ rollback_app() {
     info "  From: $current_image"
     info "  To:   $image"
 
-    if dokku git:from-image "$app" "$image"; then
+    if dokku_git_from_image "$app" "$image"; then
         log "$app rolled back successfully ✓"
     else
         error "$app rollback FAILED"
@@ -127,6 +131,12 @@ rollback_app() {
 if $ALL_TENANTS; then
     # Rollback all tenants of this type
     APPS=$(dokku apps:list 2>/dev/null | tail -n +2 | grep -- "${APP_SUFFIX}$" || true)
+    if [ -n "$(tenant_name_prefix)" ]; then
+        APPS=$(while IFS= read -r app; do
+            tenant="${app%${APP_SUFFIX}}"
+            tenant_in_scope "$tenant" && printf '%s\n' "$app"
+        done <<< "$APPS")
+    fi
 
     if [ -z "$APPS" ]; then
         error "No ${APP_TYPE} apps found."
@@ -139,6 +149,9 @@ if $ALL_TENANTS; then
 
     FAILED=0
     while IFS= read -r app; do
+        tenant="${app%${APP_SUFFIX}}"
+        log "Synchronizing tenant routing: ${tenant}.${BASE_DOMAIN:-<unset>}"
+        reconcile_tenant_routing "$tenant"
         if ! rollback_app "$app" "$ROLLBACK_IMAGE"; then
             FAILED=$((FAILED + 1))
         fi
@@ -154,6 +167,8 @@ if $ALL_TENANTS; then
 else
     # Rollback single tenant
     APP_NAME="${TENANT_NAME}${APP_SUFFIX}"
+    log "Synchronizing tenant routing: ${TENANT_NAME}.${BASE_DOMAIN:-<unset>}"
+    reconcile_tenant_routing "$TENANT_NAME"
     echo ""
     rollback_app "$APP_NAME" "$ROLLBACK_IMAGE"
     echo ""

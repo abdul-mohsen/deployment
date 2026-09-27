@@ -22,12 +22,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib.sh"
+deployment_init_logging
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
-log()   { echo -e "${GREEN}[+]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-error() { echo -e "${RED}[x]${NC} $*" >&2; }
-info()  { echo -e "${BLUE}[i]${NC} $*"; }
+log()   { deployment_log INFO "$*"; echo -e "${GREEN}[+]${NC} $*"; }
+warn()  { deployment_log WARN "$*"; echo -e "${YELLOW}[!]${NC} $*"; }
+error() { deployment_log ERROR "$*"; echo -e "${RED}[x]${NC} $*" >&2; }
+info()  { deployment_log INFO "$*"; echo -e "${BLUE}[i]${NC} $*"; }
 
 ENV_NAME="dev"
 DOKKU_ONLY=false
@@ -127,9 +128,16 @@ start_dashboard_env() {
 
     log "Starting Dashboard (${env_name})..."
     if [ "$env_name" = "dev" ] && [ -x "${REPO_DIR}/dashboard/dev-up.sh" ]; then
-        info "  using dev-up.sh (rebuilds binary + image)"
-        if ! (cd "${REPO_DIR}/dashboard" && bash ./dev-up.sh); then
+        info "  using dev-up.sh (builds image from source, no cache)"
+        if ! bash "${REPO_DIR}/dashboard/dev-up.sh"; then
             error "  dev-up.sh failed. Last 200 log lines from $container:"
+            dump_logs "$container"
+            exit 1
+        fi
+    elif [ "$env_name" = "prod" ] && [ -x "${REPO_DIR}/dashboard/prod-up.sh" ]; then
+        info "  using prod-up.sh (pulls latest image from Docker Hub)"
+        if ! bash "${REPO_DIR}/dashboard/prod-up.sh"; then
+            error "  prod-up.sh failed. Last 200 log lines from $container:"
             dump_logs "$container"
             exit 1
         fi
@@ -253,6 +261,11 @@ load_stack_env
 
 if ! $DOKKU_ONLY; then
     while IFS= read -r env_name; do
+        # prod-up.sh validates the pulled image against the mounted checkout
+        # before it stops the old container. Do not preempt that stop-safe path.
+        if [ "$env_name" = "prod" ] && [ -x "${REPO_DIR}/dashboard/prod-up.sh" ]; then
+            continue
+        fi
         stop_dashboard_env "$env_name"
     done < <(dashboard_envs)
 fi

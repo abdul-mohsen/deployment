@@ -19,6 +19,17 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/lib.sh"
 
 CONFIG_FILE="${CONFIG_FILE:-$PROJECT_DIR/config.env}"
+for i in $(seq 1 $#); do
+    if [ "${!i}" = "--config" ]; then
+        j=$((i+1))
+        if [ "$j" -gt "$#" ]; then
+            echo "--config requires a path" >&2
+            exit 1
+        fi
+        CONFIG_FILE="${!j}"
+        break
+    fi
+done
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
 
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
@@ -47,8 +58,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 if $LIST; then
-    run_mysql -t "$MYSQL_MASTER_DB" -e \
-        "SELECT name, backend_image, frontend_image, enabled FROM tenant ORDER BY name;"
+    prefix="$(tenant_name_prefix)"
+    if [ -n "$prefix" ]; then
+        run_mysql -t "$MYSQL_MASTER_DB" -e \
+            "SELECT name, backend_image, frontend_image, enabled FROM tenant WHERE name LIKE '${prefix}%' ORDER BY name;"
+    else
+        run_mysql -t "$MYSQL_MASTER_DB" -e \
+            "SELECT name, backend_image, frontend_image, enabled FROM tenant ORDER BY name;"
+    fi
     exit 0
 fi
 
@@ -57,6 +74,8 @@ if [ -z "$TENANT" ]; then
     echo "       $0 --list"
     exit 1
 fi
+
+TENANT="$(tenant_full_name "$TENANT")" || exit 1
 
 if $UNPIN; then
     log "Unpinning ${TENANT} (will follow global image)"

@@ -11,7 +11,7 @@ PASS() { echo "PASS: $*"; }
 FAIL() { echo "FAIL: $*"; exit 1; }
 
 echo "=== 1. bash -n on changed scripts ==="
-for f in scripts/lib.sh scripts/setup-dokku.sh scripts/setup.sh scripts/restart-stack.sh scripts/create-tenant.sh scripts/init-tenant-db.sh scripts/list-tenants.sh scripts/tail-logs.sh scripts/update-tenant.sh scripts/rollback-tenant.sh scripts/post-merge-cleanup.sh; do
+for f in scripts/lib.sh scripts/setup-dokku.sh scripts/setup.sh scripts/restart-stack.sh scripts/create-tenant.sh scripts/init-tenant-db.sh scripts/verify-mysql.sh scripts/list-tenants.sh scripts/tail-logs.sh scripts/update-tenant.sh scripts/rollback-tenant.sh scripts/remove-tenant.sh scripts/cleanup-broken-tenant.sh scripts/backup-tenant.sh scripts/deploy-all.sh scripts/set-tenant-image.sh scripts/setup-dev-tenant.sh scripts/auto-pull.sh scripts/post-merge-cleanup.sh; do
     bash -n "$f" && PASS "syntax $f" || FAIL "syntax $f"
 done
 
@@ -83,8 +83,56 @@ grep -q 'proxy:disable "$BACKEND_APP"' scripts/create-tenant.sh \
     || FAIL "create-tenant must disable backend proxy"
 grep -q 'domains:clear "$be"' scripts/post-merge-cleanup.sh \
     && grep -q 'proxy:disable "$be"' scripts/post-merge-cleanup.sh \
-    && PASS "cleanup removes existing backend public proxy" \
+    && grep -q 'API_URL="\${public_url}/api"' scripts/post-merge-cleanup.sh \
+    && PASS "cleanup removes existing backend public proxy and refreshes frontend URL" \
     || FAIL "cleanup must remove existing backend public proxy"
+grep -q 'BASE_DOMAIN="\${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"' scripts/update-tenant.sh \
+    && grep -q 'reconcile_tenant_routing "\$TENANT_NAME"' scripts/update-tenant.sh \
+    && grep -q 'domains:clear "\$backend_app"' scripts/lib.sh \
+    && grep -q 'APP_DOMAIN="\$tenant_domain"' scripts/lib.sh \
+    && grep -q 'API_URL="\${public_url_value}/api"' scripts/lib.sh \
+    && PASS "tenant update reconciles persisted routing values" \
+    || FAIL "tenant update must reconcile persisted routing values"
+grep -q 'reconcile_tenant_routing "\$tenant"' scripts/deploy-all.sh \
+    && grep -q 'routing-only' dashboard/internal/web/web.go \
+    && PASS "fleet and lifecycle actions reconcile routing before deploy" \
+    || FAIL "fleet and lifecycle actions must reconcile routing before deploy"
+grep -q 'ensure_tenant_network "$TENANT_NETWORK"' scripts/create-tenant.sh \
+    && grep -q 'docker network inspect \$network' scripts/create-tenant.sh \
+    && grep -q 'docker network create \$network' scripts/create-tenant.sh \
+    && grep -q 'TENANT_NETWORK="${TENANT_APP_NETWORK:-web}"' scripts/create-tenant.sh \
+    && grep -q 'find_existing_tenant_network' scripts/create-tenant.sh \
+    && ! grep -q 'TENANT_NETWORK="tenant-${TENANT_NAME}"' scripts/create-tenant.sh \
+    && ! grep -q 'network:create "\$TENANT_NETWORK" 2>/dev/null || info "Network \$TENANT_NETWORK already exists"' scripts/create-tenant.sh \
+    && PASS "create-tenant uses a reusable tenant Docker network" \
+    || FAIL "create-tenant must use one reusable Docker network and handle pool exhaustion"
+OUT="$({
+    awk '/^validate_docker_network_name\(\)/ {printing=1} /^while \[\[/ {exit} printing {print}' scripts/create-tenant.sh
+    cat <<'STUB'
+log() { echo "[+] $*"; }
+warn() { echo "[!] $*"; }
+info() { echo "[i] $*"; }
+error() { echo "[x] $*" >&2; }
+dokku() { [ "$1" = "network:create" ] && return 1; return 1; }
+dokku_shell() {
+    case "$*" in
+        *"docker network inspect tenant-smoke"*) return 1 ;;
+        *"docker network create tenant-smoke"*) echo "Error response from daemon: all predefined address pools have been fully subnetted" >&2; return 1 ;;
+        *"docker network ls"*) echo "web"; return 0 ;;
+        *"docker network inspect web"*) return 0 ;;
+        *) echo "unexpected dokku_shell: $*" >&2; return 1 ;;
+    esac
+}
+TENANT_NETWORK=tenant-smoke
+ensure_tenant_network "$TENANT_NETWORK"
+echo "TENANT_NETWORK=$TENANT_NETWORK"
+STUB
+} | bash 2>&1)"
+echo "$OUT" | grep -q 'all predefined address pools have been fully subnetted' \
+    && echo "$OUT" | grep -q 'TENANT_NETWORK=web' \
+    && PASS "create-tenant reuses an existing tenant network when Docker pools are exhausted" \
+    || { echo "$OUT"; FAIL "create-tenant must locally reproduce and handle Docker address-pool exhaustion"; }
+
 
 echo
 echo "=== 6. restart-stack.sh --help prints usage ==="
@@ -253,9 +301,25 @@ grep -q 'TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"' scripts
     && grep -q 'docker pull "\$image"' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db refreshes backend image before schema read" \
     || FAIL "init-tenant-db must pull backend image before reading schema"
-grep -q 'run_tenant_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
-    && PASS "init-tenant-db imports schema as tenant DB user" \
-    || FAIL "init-tenant-db must import schema as tenant DB user"
+grep -q '| run_tenant_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
+    && ! grep -q '| run_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
+    && PASS "init-tenant-db imports default schema paths as tenant DB user" \
+    || FAIL "init-tenant-db must import default schema paths as tenant DB user"
+if grep -q 'TENANT_ADMIN_MIGRATION_FILES\|migration_requires_admin\|apply_image_sql_file_as_admin\|verify_admin_trigger_privilege' scripts/init-tenant-db.sh; then
+    FAIL "init-tenant-db must not special-case privileged trigger migrations"
+else
+    PASS "init-tenant-db applies migrations as tenant DB user only"
+fi
+if grep -R -n -E 'log_bin_trust_function_creators|GRANT[[:space:]]+SUPER' scripts/init-tenant-db.sh scripts/create-tenant.sh; then
+    FAIL "tenant trigger fix must not enable log_bin_trust_function_creators or grant SUPER"
+else
+    PASS "tenant trigger fix avoids unsafe binlog trust and SUPER grants"
+fi
+if grep -R -n 'SET_USER_ID' install.env.example REQUIREMENTS.md scripts/init-tenant-db.sh scripts/verify-mysql.sh; then
+    FAIL "deployment must not require global SET_USER_ID when backend migrations avoid triggers"
+else
+    PASS "deployment no longer requires SET_USER_ID"
+fi
 grep -q 'validate_tenant_schema' scripts/init-tenant-db.sh \
     && grep -q 'tenant_missing_required_tables' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db verifies required base schema tables" \
@@ -266,8 +330,10 @@ grep -q 'TENANT_IGNORED_SCHEMA_FILES="${TENANT_IGNORED_SCHEMA_FILES:-car_part.sq
     || FAIL "init-tenant-db must ignore car_part schema"
 grep -q 'IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"' scripts/deploy-all.sh \
     && grep -q 'docker pull "\$image"' scripts/deploy-all.sh \
-    && PASS "deploy-all refreshes image before deploy" \
-    || FAIL "deploy-all must pull image before dokku git:from-image"
+    && grep -q 'dokku_git_from_image "\$app" "\$image"' scripts/deploy-all.sh \
+    && grep -q 'No changes detected' scripts/lib.sh \
+    && PASS "deploy-all refreshes image and rebuilds same-ref deploys" \
+    || FAIL "deploy-all must pull image and handle same-ref git:from-image deploys"
 grep -q 'init-tenant-db.sh" "\$TENANT_NAME"' scripts/create-tenant.sh \
     && grep -q -- '--backend-image "\$BACKEND_IMAGE"' scripts/create-tenant.sh \
     && grep -q -- '--env "DB_USER=\$TENANT_DB_USER"' scripts/create-tenant.sh \
@@ -292,6 +358,33 @@ grep -q 'TENANT_SCHEMA_IMAGE_PATH=' config.env.example \
     && grep -q 'TENANT_MIGRATIONS_IMAGE_DIR=' config.env.example \
     && PASS "config example points at backend image schema paths" \
     || FAIL "config example must document backend image schema paths"
+
+echo
+echo "=== 13. tenant prefixes isolate shared dev/prod targets ==="
+OUT="$(TENANT_NAME_PREFIX=dev bash -c 'source scripts/lib.sh; tenant_full_name acme; echo; tenant_full_name dev-acme; echo; tenant_in_scope dev-acme && echo scoped; tenant_in_scope prod-acme || echo isolated; TENANT_NAME_PREFIX=---; [ -z "$(tenant_name_prefix)" ] && echo empty-prefix; TENANT_NAME_PREFIX=prod; TENANT_NAME_PREFIX_OVERRIDE=dev; printf override:; tenant_full_name acme; echo')"
+echo "$OUT" | grep -q '^dev-acme$' \
+    && [ "$(echo "$OUT" | grep -c '^dev-acme$')" -eq 2 ] \
+    && echo "$OUT" | grep -q '^scoped$' \
+    && echo "$OUT" | grep -q '^isolated$' \
+    && echo "$OUT" | grep -q '^empty-prefix$' \
+    && echo "$OUT" | grep -q '^override:dev-acme$' \
+    && PASS "tenant prefix helper prefixes once and filters other environments" \
+    || { echo "$OUT"; FAIL "tenant prefix helper must prefix once and isolate scopes"; }
+for f in scripts/create-tenant.sh scripts/init-tenant-db.sh scripts/update-tenant.sh scripts/remove-tenant.sh scripts/cleanup-broken-tenant.sh scripts/setup-dev-tenant.sh scripts/auto-pull.sh scripts/backup-tenant.sh scripts/set-tenant-image.sh; do
+    grep -q 'tenant_full_name' "$f" \
+        && PASS "$f applies tenant_full_name" \
+        || FAIL "$f must apply TENANT_NAME_PREFIX to explicit tenant names"
+done
+for f in scripts/deploy-all.sh scripts/rollback-tenant.sh scripts/list-tenants.sh scripts/status.sh scripts/tail-logs.sh scripts/backup-tenant.sh scripts/set-tenant-image.sh; do
+    grep -q 'tenant_in_scope\|tenant_name_prefix' "$f" \
+        && PASS "$f scopes bulk/list operations" \
+        || FAIL "$f must scope bulk/list operations by TENANT_NAME_PREFIX"
+done
+grep -q 'TENANT_NAME_PREFIX=' dashboard/internal/scripts/scripts.go \
+    && grep -q 'filterAppNames' dashboard/internal/web/web.go \
+    && grep -q 'TENANT_NAME_PREFIX' dashboard/README.md \
+    && PASS "dashboard passes, filters, and documents tenant prefix" \
+    || FAIL "dashboard must pass/filter/document TENANT_NAME_PREFIX"
 
 echo
 echo "ALL TESTS PASSED"

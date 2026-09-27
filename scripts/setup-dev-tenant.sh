@@ -3,16 +3,15 @@
 # setup-dev-tenant.sh — Provision the single dev tenant
 # =============================================================================
 # Creates exactly one dev tenant whose backend (and optionally frontend) tracks
-# the `:dev` image tag. Pushes to the `dev` branch in your backend repo will
-# build a `:dev` image; auto-pull.sh then deploys it only to this tenant.
+# DEV_TAG. App repo CI should build the branch tag; webhook deploys are preferred.
 #
 # Idempotent: re-running just refreshes the image pins.
 #
 # Usage:
 #   bash scripts/setup-dev-tenant.sh                 # use config.env defaults
 #   bash scripts/setup-dev-tenant.sh --name dev      # override tenant name
-#   bash scripts/setup-dev-tenant.sh --tag dev       # override dev tag
-#   bash scripts/setup-dev-tenant.sh --frontend      # also pin frontend to :dev
+#   bash scripts/setup-dev-tenant.sh --tag v1.2.3    # override dev tag
+#   bash scripts/setup-dev-tenant.sh --frontend      # also pin frontend to DEV_TAG
 # =============================================================================
 
 set -euo pipefail
@@ -29,6 +28,7 @@ info()  { echo -e "${BLUE}[i]${NC} $*"; }
 
 CONFIG_FILE="${CONFIG_FILE:-$PROJECT_DIR/config.env}"
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+BASE_DOMAIN="${BASE_DOMAIN:-app.example.com}"
 
 NAME="${DEV_TENANT:-dev}"
 TAG="${DEV_TAG:-dev}"
@@ -45,14 +45,16 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+NAME="$(tenant_full_name "$NAME")" || exit 1
+
 DOCKERHUB_USERNAME="${DOCKERHUB_USERNAME:-}"
 if [ -z "$DOCKERHUB_USERNAME" ]; then
     error "DOCKERHUB_USERNAME not set in $CONFIG_FILE"
     exit 1
 fi
 
-BACKEND_IMG="${BACKEND_IMAGE:-${DOCKERHUB_USERNAME}/api}:${TAG}"
-FRONTEND_IMG="${FRONTEND_IMAGE:-${DOCKERHUB_USERNAME}/web}:${TAG}"
+BACKEND_IMG="${BACKEND_IMAGE:-${DOCKERHUB_USERNAME}/ifritah-api}:${TAG}"
+FRONTEND_IMG="${FRONTEND_IMAGE:-${DOCKERHUB_USERNAME}/ifritah-web}:${TAG}"
 
 log "Dev tenant setup"
 info "  Name:           ${NAME}"
@@ -68,7 +70,7 @@ else
     bash "$SCRIPT_DIR/create-tenant.sh" "$NAME" --git-only --config "$CONFIG_FILE"
 fi
 
-# 2) Pin backend to :dev tag in the master DB so global deploys skip it
+# 2) Pin backend to DEV_TAG in the master DB so global deploys skip it
 log "Pinning ${NAME} backend → ${BACKEND_IMG}"
 bash "$SCRIPT_DIR/set-tenant-image.sh" "$NAME" --backend "$BACKEND_IMG" --config "$CONFIG_FILE"
 
@@ -77,7 +79,7 @@ if $PIN_FRONTEND; then
     bash "$SCRIPT_DIR/set-tenant-image.sh" "$NAME" --frontend "$FRONTEND_IMG" --config "$CONFIG_FILE"
 fi
 
-# 3) Trigger an initial pull+deploy if the :dev image already exists on Docker Hub
+# 3) Trigger an initial pull+deploy if the DEV_TAG image already exists on Docker Hub
 log "Triggering initial deploy from ${BACKEND_IMG}..."
 if bash "$SCRIPT_DIR/deploy-all.sh" "$BACKEND_IMG" --type backend --tenant "$NAME" --skip-canary; then
     log "Initial backend deploy ✓"
@@ -95,9 +97,7 @@ fi
 
 echo ""
 log "Dev tenant ready."
-DEV_SCHEME="http"
-[ "${ENABLE_SSL:-false}" = "true" ] && DEV_SCHEME="https"
-info "URL:           ${DEV_SCHEME}://${NAME}.${BASE_DOMAIN:-app.example.com}"
+info "URL:           $(public_tenant_url "$NAME")"
 info "Auto-deploy:   pushes to the 'dev' branch → CI builds ${BACKEND_IMG} → auto-pull.sh deploys here every 2 min"
 info "Manual deploy: bash scripts/deploy-all.sh ${BACKEND_IMG} --tenant ${NAME}"
 info "Logs:          bash scripts/tail-logs.sh ${APP_BACKEND}"

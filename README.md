@@ -2,23 +2,51 @@
 
 Server-side automation for a Dokku-based multi-tenant platform.
 
+The primary operator entrypoint is now one git-style command:
+
+```bash
+sudo ./scripts/deployctl.sh <area> <command> [args]
+```
+
+Use `--plan` to see the underlying script before running it:
+
+```bash
+./scripts/deployctl.sh --plan tenant update acme --restart
+# bash scripts/update-tenant.sh acme --restart
+```
+
+After changing `BASE_DOMAIN`, tenant **Sync**, **Rebuild**, and fleet deployment
+rewrite persisted Dokku domain/URL values before image work starts. Repair all
+existing tenants in one pass with:
+
+```bash
+sudo ./scripts/post-merge-cleanup.sh
+```
+
+For one tenant without changing its images:
+
+```bash
+sudo ./scripts/deployctl.sh tenant update hockun2 --routing-only
+```
+
 **Two repos own their own build:**
 
 ```
 backend repo  →  push to dev  ──────────┐
+frontend repo →  push to dev  ──────────┤       Docker Hub
                  push to main ────┐     │
-                                  │     │       Docker Hub
                                   ▼     ▼
-                            myuser/api:latest    myuser/api:dev
+        myuser/ifritah-api:<tag>  myuser/ifritah-web:<tag>
                                   │                   │
-                                  │ manual            │ auto every 2 min
+              │ manual            │ webhook/dev deploy
                                   ▼                   ▼
-                          deploy-all.sh         auto-pull.sh
+          deployctl fleet sync   deployctl tenant update
                                   │                   │
                               prod tenants       dev tenant
 ```
 
-- **Dev**: a single tenant; `auto-pull.sh` polls `:dev` every 2 min and redeploys.
+- **Dev**: a single tenant; the `dev` branch publishes the shared `:dev` tag
+  and webhook deployment can also pull the exact `VERSION` tag.
 - **Prod**: ops runs `deploy-all.sh <image> --tenant <client>` per client when promoting a build.
 - **App repos own**: Dockerfile, docker-compose for local dev, `.env.example`, and the GitHub Actions workflow that builds + pushes the image.
 - **This repo owns**: server provisioning, tenant lifecycle, image polling, manual rollouts, backups, rollbacks.
@@ -30,13 +58,14 @@ backend repo  →  push to dev  ──────────┐
 config.env.example          # copy to config.env on each server
 README.md
 scripts/                    # ops automation (run on the server)
+  deployctl.sh              # one command: tenant/fleet/stack/setup/db/dokku/webhook
   setup.sh                  # one-time install: Dokku, MySQL wiring, cron, webhook
-  setup-dev-tenant.sh       # creates the single dev tenant pinned to :dev
+  setup-dev-tenant.sh       # creates the single dev tenant pinned to DEV_TAG
   create-tenant.sh          # provision a new prod tenant
   remove-tenant.sh
   update-tenant.sh
   deploy-all.sh             # MANUAL prod deploy (per-client or all)
-  auto-pull.sh              # cron: dev-only auto-deploy from :dev tag
+  auto-pull.sh              # verified cron: dev-only auto-deploy from DEV_TAG
   rollback-tenant.sh
   set-tenant-image.sh       # pin a tenant to a specific image
   list-tenants.sh
@@ -72,6 +101,37 @@ templates/                  # COPY these into your backend / frontend repos
 - MySQL on the host (or reachable via `host.docker.internal`)
 - Wildcard DNS: `*.app.example.com → server IP`
 
+## Deployment logging and observability
+
+The dashboard emits JSON `log/slog` events by default. Configure
+`DASHBOARD_LOG_LEVEL` (`debug`, `info`, `warn`, or `error`) and
+`DASHBOARD_LOG_FORMAT` (`json` or `text`) in `config.env`. Request access
+events are correlated with Chi request IDs and contain only a route pattern,
+status, duration, and normalized client IP; headers, cookies, query values,
+and bodies are intentionally excluded. Recovered handler panics return a
+generic 500 and log only panic type/request ID, never panic values or stacks.
+The optional collector uses a pinned read-only Docker socket proxy behind a
+pinned path-filter proxy; Alloy does not mount or directly reach the host
+socket. Shell file logging is bounded and disables itself visibly if rotation
+or writing fails.
+
+Shell entrypoints add UTC operation fields and bounded failure diagnostics.
+See [`docs/observability.md`](docs/observability.md) for the optional,
+operator-only Alloy/Loki/Prometheus/Grafana profile, retention defaults, and
+resource sizing. The profile collects only explicitly labelled dashboard
+containers, not raw tenant application logs. Provisioned dashboards and
+alert-triage/startup/uptime runbooks are linked from that document; alert
+delivery remains opt-in and requires an operator-approved egress path.
+
+The separate OpenObserve deployment-only pilot is documented in
+[`docs/runbooks/openobserve-pilot.md`](docs/runbooks/openobserve-pilot.md).
+It uses its own Compose file/profile, private loopback publication, persistent
+storage, and native credentials file. Tenant application trace wiring remains
+off by default and is enabled only with
+`OPENOBSERVE_TENANT_TELEMETRY_ENABLED=true`; the scripts attach apps to the
+fixed internal network and configure private OTLP traces without copying
+OpenObserve credentials into tenant apps.
+
 ## Initial setup
 
 ```bash
@@ -81,21 +141,58 @@ cp config.env.example config.env
 $EDITOR config.env
 
 sudo ./scripts/setup.sh
-sudo ./scripts/setup-dev-tenant.sh        # creates the one dev tenant
+sudo ./scripts/deployctl.sh setup dev-tenant        # creates the one dev tenant
 ```
 
 ## Day-2 operations
 
 | Task | Command |
 |---|---|
-| Create prod tenant | `sudo ./scripts/create-tenant.sh acme` |
-| Manual prod deploy (one client) | `sudo ./scripts/deploy-all.sh myuser/api:latest --tenant acme` |
-| Manual prod deploy (all clients) | `sudo ./scripts/deploy-all.sh myuser/api:latest` |
-| Pin a tenant to a fixed image | `sudo ./scripts/set-tenant-image.sh acme --backend myuser/api:v1.4` |
-| Rollback | `sudo ./scripts/rollback-tenant.sh acme --to myuser/api:abc1234` |
-| List tenants | `sudo ./scripts/list-tenants.sh` |
-| Tail logs | `sudo ./scripts/tail-logs.sh acme-backend` |
-| Backup | `sudo ./scripts/backup-tenant.sh --all` |
+| Create prod tenant | `sudo ./scripts/deployctl.sh tenant create acme` |
+| Manual prod deploy (one client) | `sudo ./scripts/deployctl.sh fleet sync myuser/ifritah-api:v0.0.1 --tenant acme` |
+| Manual prod deploy (all clients) | `sudo ./scripts/deployctl.sh fleet sync myuser/ifritah-api:v0.0.1` |
+| Pin a tenant to a fixed image | `sudo ./scripts/deployctl.sh tenant pin acme --backend myuser/ifritah-api:v0.0.1` |
+| Rollback | `sudo ./scripts/deployctl.sh tenant rollback acme --to myuser/ifritah-api:abc1234` |
+| List tenants | `sudo ./scripts/deployctl.sh tenant list` |
+| Tenant status | `sudo ./scripts/deployctl.sh tenant status acme` |
+| Tail logs | `sudo ./scripts/deployctl.sh tenant logs acme --type backend` |
+| Backup | `sudo ./scripts/deployctl.sh fleet backup` |
+| Backup (user, protected) | `sudo ./scripts/deployctl.sh tenant backup acme --origin user --owner alice` |
+| List backups | `sudo ./scripts/deployctl.sh tenant backups list acme` |
+| Delete own backup | `sudo ./scripts/deployctl.sh tenant backups delete acme_20250101_120000 --owner alice` |
+| Prune by policy | `sudo ./scripts/deployctl.sh fleet backups prune` |
+| Restore / rollback | `sudo ./scripts/deployctl.sh tenant restore acme --from acme_20250101_120000` |
+| Restart platform | `sudo ./scripts/deployctl.sh stack restart --env all` |
+
+The old `scripts/*.sh` files remain as readable implementation units and compatibility entrypoints. New operations should be exposed through `deployctl.sh` first.
+
+## Backups, restore & rollback
+
+Every backup is a *set*: a manifest sidecar `<tenant>_<timestamp>.meta.json`
+plus its `.tar.gz` (files) and `.sql.gz` (database) artifacts in `BACKUP_DIR`.
+The manifest records the **origin**, **owner**, optional user **label**, and
+whether the artifacts passed integrity verification (`gzip -t`, `tar -tzf`,
+non-empty dump).
+
+- **User backups** (`--origin user`) are protected: the retention policy never
+  deletes them. Only the owner (or an operator with `--force`) can delete one.
+- **Automatic backups** (`--origin auto`, the default) are retained for
+  `BACKUP_RETENTION_DAYS` (default 30) and then pruned by policy.
+- **Automatic deploys create a verified backup first.** `auto-pull.sh` takes a
+  `--require-verified` backup before redeploying; if it can't be verified the
+  deploy is skipped and retried next cycle. Opt out with
+  `AUTO_BACKUP_BEFORE_REDEPLOY=0` (not recommended).
+- **Auto-redeploy can be disabled per environment/tenant** by listing tenant
+  names in `AUTO_REDEPLOY_DISABLED` or by unchecking the dashboard toggle.
+  The dashboard writes `${TENANT_STATE_DIR:-/opt/tenant-state}/<tenant>.json`;
+  this directory must be shared with the host poller.
+- **Restore/rollback to any version** with `tenant restore <name> --from <id>`.
+  It refuses corrupt backups and, by default, takes a fresh verified safety
+  backup of the current state first so the restore itself is reversible.
+
+Backups are managed only through the allow-listed `manage-backups.sh` /
+`restore-tenant.sh` scripts (surfaced in the dashboard Scripts page). There is
+no arbitrary shell surface.
 
 ## Bootstrapping the app repos
 
@@ -108,10 +205,47 @@ docker compose up          # local dev stack
 # In the frontend repo: same with templates/frontend
 ```
 
-Each app repo CI builds:
-- `:dev` on push to `dev` → server's `auto-pull.sh` deploys it within ~2 min.
-- `:latest` on push to `main` → **not auto-deployed**. Ops promotes manually with `deploy-all.sh`.
-- `:<sha>` on every push → used for rollbacks.
+Each app repo CI reads `VERSION`, validates strict `vMAJOR.MINOR.PATCH`, and builds:
+- `:vX.X.X` from `VERSION` → primary deploy tag. Re-running CI with the same version overwrites that tag.
+- `:<sha>` on every push → immutable reference for rollbacks/debugging.
+
+Backend and frontend releases are component-independent. A release catalog records
+the selected image, immutable digest, semantic version, source repository/commit,
+and workflow run for each component. When only one component changes, the
+unchanged component reuses its previous known-good digest. The dashboard release
+picker deploys the exact recorded component refs; CI fails if a component
+`VERSION` is lower than its latest GitHub Release tag, while equal is allowed for
+overwrite builds.
+
+Release pairs may use the same `VERSION` value when published together, but
+tenant deployments do not require backend and frontend versions to match:
+component-only updates are supported. CI fails if `VERSION` is lower than the
+latest GitHub Release tag; equal is allowed for overwrite builds.
+
+Each app repo also ships a **PR branch-image workflow**
+(`.github/workflows/qa-branch-image.yml`, templated in
+`templates/{backend,frontend}/.github/workflows/qa-branch-image.yml`). On every
+same-repository pull request it builds and pushes two tags to the configured
+Docker Hub repo:
+
+- `:pr-<branch-name>` — a safe, branch-derived mutable tag (always the latest
+  build for that branch), and
+- `:pr-<branch-name>-<shortsha>` — an immutable per-commit reference.
+
+The dashboard's searchable image selector lists these tags straight from Docker
+Hub for the configured account, showing only tags present in **both** the
+backend and frontend repos so a branch build is only offered when both apps
+have a matching image.
+
+The regular deploy workflow also publishes the mutable `:dev` alias whenever
+the source branch is `dev`, alongside the immutable commit-SHA tag. This keeps
+the poller and dashboard's default development selection aligned across both
+app repositories.
+
+Dashboard images embed a non-secret build version and commit identity. The
+published image exposes it through `/version`, the dashboard footer, and
+`/healthz` response headers; its embedded web-bundle digest covers templates and
+static assets so mixed UI bundles can be detected before publication.
 
 ## GitHub secrets to set in each app repo
 
@@ -123,3 +257,50 @@ Each app repo CI builds:
 | `WEBHOOK_SECRET` | optional | must match `WEBHOOK_SECRET` in `config.env` |
 
 Polling (cron + `auto-pull.sh`) is the safety net and works without any webhook.
+`setup.sh` installs and verifies the cron entry when Docker Hub is configured;
+`status.sh` reports `active`, `absent`, or `error` with an actionable
+diagnostic. Webhook and polling share the canonical
+`/var/lib/auto-pull/<type>-<tag>.digest` state. A targeted webhook records only
+the targeted tenant/component marker, so polling other tenants still compares
+against the previous global digest. An all-tenant webhook records the global
+marker only when `deploy-all.sh` reports every eligible tenant successful.
+State updates are locked and written atomically only after deployment succeeds;
+duplicate webhook deliveries are therefore safe to retry. Legacy
+`<type>.digest` files remain readable for the configured `DEV_TAG`.
+
+## Tenant image provenance and migration safety
+
+`update-tenant.sh` and `deploy-all.sh` resolve every requested tag to a full
+OCI repository digest before changing Dokku. The canonical runtime contract is:
+
+`APP_IMAGE_VERSION`, `APP_IMAGE_COMMIT`, `APP_IMAGE_CHANNEL`, `APP_IMAGE_REF`,
+`APP_IMAGE_DIGEST`, `APP_WORKFLOW_RUN_ID`, `APP_WORKFLOW_RUN_URL` (optional),
+and `APP_BUILT_AT`. `APP_IMAGE_REF` is always the full repository plus tag;
+`APP_IMAGE_DIGEST` is the independently observed immutable `sha256` digest.
+`APP_DEPLOYED_AT` is deployment metadata, not build identity. Legacy aliases
+(`APP_VERSION`, `APP_COMMIT`, `APP_BUILD_CHANNEL`, `APP_WORKFLOW_RUN`,
+`APP_CREATED`, and related names) are written and read only for migration.
+
+BuildIdentity uses the standard OCI labels
+`org.opencontainers.image.version`, `org.opencontainers.image.revision`,
+`org.opencontainers.image.source`, and `org.opencontainers.image.created`,
+plus canonical custom labels `com.ifritah.build.channel`,
+`com.ifritah.build.image_ref`, `com.ifritah.build.workflow_run_id`, and
+`com.ifritah.build.workflow_run_url`. Workflow run IDs are numeric; the URL is
+optional. Deployment verifies the image's RepoDigest explicitly and release
+readiness uses the same identity validator. Older label aliases are accepted
+only as a migration path.
+
+After the swap, the app's `/version` response must report the same identity.
+The last verified identity is stored per component in `zatca_master.tenant`;
+failed attempts are recorded in `tenant_deployment_audit` without replacing
+the last-known-good fields. Backend updates replay the migrations bundled in
+the target image before the Dokku swap. A migration or verification failure
+therefore cannot be reported as a successful deployment, and a later
+component failure restores earlier components where a prior image exists.
+
+The checks require a running Docker daemon, a reachable Dokku container,
+`curl` or `wget` inside the Dokku container, and MySQL access for the master
+database. These checks are intentionally not exercised as live deployments by
+the repository tests. `TENANT_PROVENANCE_OVERRIDE=1` is accepted only with a
+non-production `DEPLOY_ENV` and is intended for local/test images only.

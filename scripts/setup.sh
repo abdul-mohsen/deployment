@@ -118,6 +118,8 @@ if [ -f "$CONFIG_FILE" ]; then
     fi
 fi
 
+PUBLIC_PROTOCOL="${PUBLIC_PROTOCOL:-https}"
+
 if $NEED_CONFIG; then
     echo ""
     info "I'll ask a few questions to generate your config.env."
@@ -144,13 +146,13 @@ if $NEED_CONFIG; then
     info "MySQL connection (your existing MySQL server on this machine)."
     MYSQL_HOST=$(prompt_val "MySQL host (use host.docker.internal to reach host)" "host.docker.internal")
     MYSQL_PORT=$(prompt_val "MySQL port" "3306")
-    MYSQL_ROOT_USER=$(prompt_val "MySQL root user" "root")
+    MYSQL_ADMIN_USER=$(prompt_val "MySQL deployment account" "dokku_admin")
 
-    MYSQL_ROOT_PASSWORD=""
-    while [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; do
-        MYSQL_ROOT_PASSWORD=$(prompt_val "MySQL root password")
-        if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
-            warn "Please enter your real MySQL root password."
+    MYSQL_ADMIN_PASSWORD=""
+    while [ -z "$MYSQL_ADMIN_PASSWORD" ] || [ "$MYSQL_ADMIN_PASSWORD" = "changeme" ]; do
+        MYSQL_ADMIN_PASSWORD=$(prompt_val "MySQL deployment account password")
+        if [ -z "$MYSQL_ADMIN_PASSWORD" ] || [ "$MYSQL_ADMIN_PASSWORD" = "changeme" ]; then
+            warn "Please enter the password for the deployment account."
         fi
     done
 
@@ -186,6 +188,8 @@ if $NEED_CONFIG; then
     # ---- Storage ----
     STORAGE_ROOT=$(prompt_val "Tenant data directory" "/opt/tenant-data")
     BACKUP_DIR=$(prompt_val "Backup directory" "/opt/tenant-backups")
+    TENANT_STATE_DIR="/opt/tenant-state"
+    LOG_DIR="/opt/dashboard-logs"
     NGINX_CONF_DIR="/etc/nginx/dokku-tenants"
 
     # ---- Write config.env ----
@@ -197,6 +201,7 @@ if $NEED_CONFIG; then
 # =============================================================================
 
 BASE_DOMAIN=${BASE_DOMAIN}
+PUBLIC_PROTOCOL=${PUBLIC_PROTOCOL}
 ACME_EMAIL=${ACME_EMAIL}
 NGINX_MODE=${NGINX_MODE}
 DOKKU_PORT=${DOKKU_PORT}
@@ -204,17 +209,19 @@ DOKKU_HOSTNAME=${DOKKU_HOSTNAME}
 NGINX_CONF_DIR=${NGINX_CONF_DIR}
 STORAGE_ROOT=${STORAGE_ROOT}
 BACKUP_DIR=${BACKUP_DIR}
+TENANT_STATE_DIR=${TENANT_STATE_DIR}
+LOG_DIR=${LOG_DIR}
 
 # External MySQL
 MYSQL_HOST=${MYSQL_HOST}
 MYSQL_PORT=${MYSQL_PORT}
-MYSQL_ROOT_USER=${MYSQL_ROOT_USER}
-MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+MYSQL_ADMIN_USER=${MYSQL_ADMIN_USER}
+MYSQL_ADMIN_PASSWORD=${MYSQL_ADMIN_PASSWORD}
 MYSQL_MASTER_DB=${MYSQL_MASTER_DB}
 
 # Docker Hub
 DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME}
-PULL_TAG=latest
+PULL_TAG=dev
 ENVFILE
 
     # Optional sections
@@ -241,6 +248,7 @@ fi
 
 # Re-read all config values with defaults
 BASE_DOMAIN="${BASE_DOMAIN:?}"
+PUBLIC_PROTOCOL="${PUBLIC_PROTOCOL:-https}"
 ACME_EMAIL="${ACME_EMAIL:-}"
 NGINX_MODE="${NGINX_MODE:-behind-nginx}"
 if [ "$NGINX_MODE" = "behind-nginx-shared" ]; then
@@ -255,10 +263,20 @@ DOKKU_HOSTNAME="${DOKKU_HOSTNAME:-$BASE_DOMAIN}"
 NGINX_CONF_DIR="${NGINX_CONF_DIR:-/etc/nginx/dokku-tenants}"
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
 BACKUP_DIR="${BACKUP_DIR:-/opt/tenant-backups}"
+TENANT_STATE_DIR="${TENANT_STATE_DIR:-/opt/tenant-state}"
+LOG_DIR="${LOG_DIR:-/opt/dashboard-logs}"
 MYSQL_HOST="${MYSQL_HOST:-host.docker.internal}"
 MYSQL_PORT="${MYSQL_PORT:-3306}"
-MYSQL_ROOT_USER="${MYSQL_ROOT_USER:-root}"
-MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
+if [ -z "${MYSQL_ADMIN_USER:-}" ]; then
+    if [ -n "${MYSQL_ROOT_USER:-}" ]; then
+        MYSQL_ADMIN_USER="$MYSQL_ROOT_USER"
+    elif [ -n "${MYSQL_ROOT_PASSWORD:-}" ] && [ -z "${MYSQL_ADMIN_PASSWORD:-}" ]; then
+        MYSQL_ADMIN_USER="root"
+    else
+        MYSQL_ADMIN_USER="dokku_admin"
+    fi
+fi
+MYSQL_ADMIN_PASSWORD="${MYSQL_ADMIN_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}"
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
 DOCKERHUB_USERNAME="${DOCKERHUB_USERNAME:-}"
 WEBHOOK_SECRET="${WEBHOOK_SECRET:-}"
@@ -269,6 +287,7 @@ echo "==========================================="
 echo "  Configuration"
 echo "==========================================="
 echo "  Domain:     *.${BASE_DOMAIN}"
+echo "  Public URL: ${PUBLIC_PROTOCOL}://${BASE_DOMAIN}"
 echo "  Email:      ${ACME_EMAIL:-not set}"
 echo "  Nginx:      ${NGINX_MODE}"
 echo "  Dokku:      ${DOKKU_HOSTNAME}:${DOKKU_PORT}"
@@ -351,9 +370,11 @@ log "Skipping Dokku TLS plugins — TLS is handled by the operator's host nginx.
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
 log "Creating storage root: ${STORAGE_ROOT}"
 mkdir -p "${STORAGE_ROOT}"
+log "Creating backup/state/log directories"
+mkdir -p "${BACKUP_DIR}" "${TENANT_STATE_DIR}" "${LOG_DIR}"
 
 # ---- Step 5b: External MySQL — master database ----
-if [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" != "changeme" ]; then
+if mysql_admin_configured; then
     log "Setting up master database: ${MYSQL_MASTER_DB}"
 
     run_mysql <<SQLEOF
@@ -368,17 +389,62 @@ CREATE TABLE IF NOT EXISTS tenant (
     enabled         TINYINT(1)    NOT NULL DEFAULT 1 COMMENT '0 = paused',
     backend_image   VARCHAR(255)  NOT NULL DEFAULT '' COMMENT 'Per-tenant override (empty = use global latest)',
     frontend_image  VARCHAR(255)  NOT NULL DEFAULT '' COMMENT 'Per-tenant override (empty = use global latest)',
+    backend_image_ref VARCHAR(512) NOT NULL DEFAULT '',
+    frontend_image_ref VARCHAR(512) NOT NULL DEFAULT '',
+    backend_image_digest VARCHAR(255) NOT NULL DEFAULT '',
+    frontend_image_digest VARCHAR(255) NOT NULL DEFAULT '',
+    backend_channel VARCHAR(64) NOT NULL DEFAULT '',
+    frontend_channel VARCHAR(64) NOT NULL DEFAULT '',
+    backend_version VARCHAR(128) NOT NULL DEFAULT '',
+    frontend_version VARCHAR(128) NOT NULL DEFAULT '',
+    backend_commit VARCHAR(128) NOT NULL DEFAULT '',
+    frontend_commit VARCHAR(128) NOT NULL DEFAULT '',
+    backend_commit_short VARCHAR(32) NOT NULL DEFAULT '',
+    frontend_commit_short VARCHAR(32) NOT NULL DEFAULT '',
+    backend_workflow_run VARCHAR(128) NOT NULL DEFAULT '',
+    frontend_workflow_run VARCHAR(128) NOT NULL DEFAULT '',
+    backend_built_at VARCHAR(64) NOT NULL DEFAULT '',
+    frontend_built_at VARCHAR(64) NOT NULL DEFAULT '',
+    backend_deployed_at TIMESTAMP NULL DEFAULT NULL,
+    frontend_deployed_at TIMESTAMP NULL DEFAULT NULL,
+    backend_deployment_status VARCHAR(32) NOT NULL DEFAULT 'unknown',
+    frontend_deployment_status VARCHAR(32) NOT NULL DEFAULT 'unknown',
+    backend_deployment_error TEXT NULL,
+    frontend_deployment_error TEXT NULL,
     created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_enabled (enabled)
 ) ENGINE=InnoDB;
--- Add columns if upgrading from older schema
-ALTER TABLE tenant ADD COLUMN IF NOT EXISTS backend_image  VARCHAR(255) NOT NULL DEFAULT '';
-ALTER TABLE tenant ADD COLUMN IF NOT EXISTS frontend_image VARCHAR(255) NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS tenant_deployment_audit (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    tenant_name VARCHAR(100) NOT NULL,
+    app_type VARCHAR(16) NOT NULL,
+    requested_image_ref VARCHAR(512) NOT NULL DEFAULT '',
+    resolved_image_ref VARCHAR(512) NOT NULL DEFAULT '',
+    image_digest VARCHAR(255) NOT NULL DEFAULT '',
+    channel VARCHAR(64) NOT NULL DEFAULT '',
+    semantic_version VARCHAR(128) NOT NULL DEFAULT '',
+    commit_sha VARCHAR(128) NOT NULL DEFAULT '',
+    commit_short VARCHAR(32) NOT NULL DEFAULT '',
+    workflow_run VARCHAR(128) NOT NULL DEFAULT '',
+    built_at VARCHAR(64) NOT NULL DEFAULT '',
+    previous_image_ref VARCHAR(512) NOT NULL DEFAULT '',
+    previous_image_digest VARCHAR(255) NOT NULL DEFAULT '',
+    backup_id VARCHAR(255) NOT NULL DEFAULT '',
+    backup_db_artifact VARCHAR(512) NOT NULL DEFAULT '',
+    status VARCHAR(32) NOT NULL,
+    error_message TEXT NULL,
+    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP NULL DEFAULT NULL,
+    INDEX idx_tenant_deployment_audit_tenant (tenant_name, started_at),
+    INDEX idx_tenant_deployment_audit_status (status, started_at)
+) ENGINE=InnoDB;
 SQLEOF
 
+    ensure_tenant_provenance_columns "$MYSQL_MASTER_DB"
+    ensure_tenant_audit_columns "$MYSQL_MASTER_DB"
     log "Master database ready: ${MYSQL_MASTER_DB}.tenant"
 else
-    warn "MYSQL_ROOT_PASSWORD not configured. Skipping master DB setup."
+    warn "MYSQL_ADMIN_PASSWORD not configured. Skipping master DB setup."
     warn "Edit config.env and re-run setup.sh to create master database."
 fi
 
@@ -428,14 +494,14 @@ if [ -n "$DOCKERHUB_USERNAME" ]; then
     log "Setting up auto-deploy from Docker Hub..."
 
     # ---- 8a: Polling cron (safety net, checks every 2 min) ----
-    CRON_LINE="*/2 * * * * $SCRIPT_DIR/auto-pull.sh --config $CONFIG_FILE >> /var/log/auto-pull.log 2>&1"
-    if crontab -l 2>/dev/null | grep -qF "auto-pull.sh"; then
-        log "Auto-pull cron already installed."
+    mkdir -p "$(auto_pull_state_dir)"
+    if ensure_auto_pull_schedule "$SCRIPT_DIR/auto-pull.sh" "$CONFIG_FILE"; then
+        log "Auto-pull cron installed and verified (checks Docker Hub every 2 min)."
     else
-        (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
-        log "Auto-pull cron installed (checks Docker Hub every 2 min)."
+        error "Auto-pull cron could not be installed or verified."
+        error "Run: sudo bash $SCRIPT_DIR/setup.sh --config $CONFIG_FILE"
+        exit 1
     fi
-    mkdir -p /var/lib/auto-pull
 
     # ---- 8c: Daily backup cron (3am) ----
     BACKUP_CRON="0 3 * * * $SCRIPT_DIR/backup-tenant.sh --all --config $CONFIG_FILE >> /var/log/tenant-backup.log 2>&1"
@@ -482,8 +548,9 @@ if prompt_yn "Create your first tenant now?" "y"; then
         TENANT_CMD="$SCRIPT_DIR/create-tenant.sh $TENANT_NAME --config $CONFIG_FILE"
 
         if [ -n "$DOCKERHUB_USERNAME" ]; then
-            BACKEND_IMG="${DOCKERHUB_USERNAME}/api:latest"
-            FRONTEND_IMG="${DOCKERHUB_USERNAME}/web:latest"
+            RELEASE_TAG="${APP_IMAGE_VERSION_DEFAULT:-${PULL_TAG:-dev}}"
+            BACKEND_IMG="${BACKEND_IMAGE:-${DOCKERHUB_USERNAME}/ifritah-api}:${RELEASE_TAG}"
+            FRONTEND_IMG="${FRONTEND_IMAGE:-${DOCKERHUB_USERNAME}/ifritah-web}:${RELEASE_TAG}"
 
             info "Will deploy from: $BACKEND_IMG + $FRONTEND_IMG"
             if prompt_yn "Are images already pushed to Docker Hub?" "n"; then
@@ -517,7 +584,7 @@ log "  Dokku: running as Docker container"
 log "  Config: $CONFIG_FILE"
 log ""
 if [ -n "$DOCKERHUB_USERNAME" ]; then
-    log "  Auto-deploy: cron polling every 2 min ✓"
+    log "  Auto-deploy: webhook/cron can pull exact VERSION tags ✓"
     if [ -n "$WEBHOOK_SECRET" ]; then
         log "  Webhook: port 9999 ✓"
         log ""
@@ -525,9 +592,9 @@ if [ -n "$DOCKERHUB_USERNAME" ]; then
         log "  DOCKERHUB_USERNAME = $DOCKERHUB_USERNAME"
         log "  DOCKERHUB_TOKEN    = <your Docker Hub access token>"
         log "  WEBHOOK_SECRET     = $WEBHOOK_SECRET"
-        SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "<server-ip>")
-        log "  WEBHOOK_URL_DEV    = http://${SERVER_IP}:9999/deploy"
-        log "  WEBHOOK_URL_PROD   = http://${SERVER_IP}:9999/deploy"
+        WEBHOOK_URL="$(public_url "deploy.${BASE_DOMAIN}")/deploy"
+        log "  WEBHOOK_URL_DEV    = ${WEBHOOK_URL}"
+        log "  WEBHOOK_URL_PROD   = ${WEBHOOK_URL}"
     fi
     log ""
     log "  ── CI workflow files ──"
@@ -536,7 +603,7 @@ if [ -n "$DOCKERHUB_USERNAME" ]; then
 fi
 log ""
 log "  Create more tenants:"
-log "    sudo ./scripts/create-tenant.sh <name> --backend-image ${DOCKERHUB_USERNAME:-youruser}/api:latest --frontend-image ${DOCKERHUB_USERNAME:-youruser}/web:latest"
+log "    sudo ./scripts/create-tenant.sh <name> --backend-image ${BACKEND_IMAGE:-${DOCKERHUB_USERNAME:-youruser}/ifritah-api}:${APP_IMAGE_VERSION_DEFAULT:-dev} --frontend-image ${FRONTEND_IMAGE:-${DOCKERHUB_USERNAME:-youruser}/ifritah-web}:${APP_IMAGE_VERSION_DEFAULT:-dev}"
 log ""
 log "==========================================="
 echo ""

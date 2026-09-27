@@ -23,12 +23,16 @@ done
 
 BASE_DOMAIN="${BASE_DOMAIN:-<not set>}"
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
+public_protocol >/dev/null || exit 1
 
 echo ""
 echo "=============================="
 echo "  Dokku Tenant Status Report"
 echo "=============================="
 echo "  Domain: *.${BASE_DOMAIN}"
+if [ -n "$(tenant_name_prefix)" ]; then
+    echo "  Tenant prefix: $(tenant_name_prefix)"
+fi
 echo ""
 
 # Get all dokku apps, find tenant pairs (name-backend / name-frontend)
@@ -45,9 +49,11 @@ declare -A TENANTS
 while IFS= read -r app; do
     if [[ "$app" == *-backend ]]; then
         tenant="${app%-backend}"
+        tenant_in_scope "$tenant" || continue
         TENANTS["$tenant"]=1
     elif [[ "$app" == *-frontend ]]; then
         tenant="${app%-frontend}"
+        tenant_in_scope "$tenant" || continue
         TENANTS["$tenant"]=1
     fi
 done <<< "$ALL_APPS"
@@ -62,7 +68,7 @@ printf "  %-18s %-30s %-10s %-10s %-8s\n" "TENANT" "URL" "BACKEND" "FRONTEND" "S
 printf "  %-18s %-30s %-10s %-10s %-8s\n" "------" "---" "-------" "--------" "-------"
 
 for tenant in $(echo "${!TENANTS[@]}" | tr ' ' '\n' | sort); do
-    url="https://${tenant}.${BASE_DOMAIN}"
+    url="$(public_tenant_url "$tenant")" || url="(invalid public URL)"
     backend_app="${tenant}-backend"
     frontend_app="${tenant}-frontend"
 

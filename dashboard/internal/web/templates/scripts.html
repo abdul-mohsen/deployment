@@ -1,22 +1,55 @@
 {{define "content"}}
-<section class="mb-6">
-  <h1 class="text-2xl font-semibold tracking-tight">Scripts</h1>
-  <p class="text-sm text-zinc-400">Every orchestration script under <code>scripts/</code>. Click to open a form, fill in args, watch live output.</p>
-</section>
-
-<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-  {{range .Scripts}}
-  <a href="/scripts/{{.Slug}}" class="group block rounded-xl bg-zinc-900/60 ring-1 ring-zinc-800 hover:ring-emerald-500/40 transition p-5">
-    <div class="flex items-center gap-2">
-      <h3 class="font-semibold truncate">{{.Title}}</h3>
-      {{if .Danger}}<span class="text-[10px] px-1.5 py-0.5 rounded ring-1 ring-rose-500/30 text-rose-300 uppercase tracking-widest">danger</span>{{end}}
-    </div>
-    <p class="text-xs text-zinc-400 mt-1">{{.Summary}}</p>
-    <code class="text-[11px] text-zinc-500 mt-3 block truncate">scripts/{{.Name}}</code>
-    <span class="text-[11px] text-emerald-400 mt-3 inline-block opacity-0 group-hover:opacity-100 transition">open →</span>
-  </a>
-  {{end}}
+<div class="page-header">
+  <div class="page-header-left">
+    <h1 class="page-title">Deployment Commands</h1>
+    <span class="page-subtitle">Every action maps to <code>scripts/deployctl.sh</code>. Choose a group, then review the impact cue before running.</span>
+  </div>
+  <div class="page-header-right">
+    <a href="/releases" class="btn btn-secondary">Releases</a>
+    <a href="/scripts/status" class="btn btn-primary">Run status</a>
+  </div>
 </div>
+
+<div class="command-index-guide" aria-label="Command impact legend">
+  <span class="command-index-guide-label">Impact</span>
+  <span class="impact-key impact-key-read-only">Read-only</span>
+  <span class="impact-key impact-key-state-changing">Changes state</span>
+  <span class="impact-key impact-key-high-impact">High impact</span>
+  <span class="impact-key impact-key-destructive">Destructive</span>
+  <span class="command-index-guide-note">High-impact and destructive commands ask for confirmation.</span>
+</div>
+
+{{range .CommandGroups}}
+<section class="command-group" data-command-group="{{.ID}}">
+  <header class="command-group-header">
+    <div>
+      <div class="command-group-kicker">Command group</div>
+      <h2 class="command-group-title">{{.Title}}</h2>
+      <p class="command-group-desc">{{.Description}}</p>
+    </div>
+    <span class="command-group-count">{{len .Scripts}} commands</span>
+  </header>
+  <div class="command-grid">
+    {{range .Scripts}}
+    <a href="/scripts/{{.Slug}}" class="command-card{{if .Danger}} command-card-danger{{end}}"
+       data-script="{{.Slug}}" data-impact="{{.ImpactClass}}" data-danger="{{.Danger}}"
+       aria-label="{{.Title}} — {{.ImpactLabel}}{{if .Danger}} — danger; confirmation required{{end}}"
+       title="{{.ImpactDescription}}">
+      <div class="cc-top">
+        <span class="cc-group">{{.Group}}</span>
+        <div class="cc-badges">
+          <span class="cc-impact cc-impact-{{.ImpactClass}}">{{.ImpactLabel}}</span>
+          {{if .Danger}}<span class="cc-danger">⚠ Danger · Confirm before running</span>{{end}}
+        </div>
+      </div>
+      <div class="cc-title">{{.Title}}</div>
+      <div class="cc-desc">{{.Summary}}</div>
+      <code class="cc-cmd">deployctl {{.ControlCommand}}</code>
+    </a>
+    {{end}}
+  </div>
+</section>
+{{end}}
 {{end}}
 
 {{define "scripts.html"}}{{template "_layout.html" .}}{{end}}

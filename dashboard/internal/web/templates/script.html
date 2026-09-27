@@ -1,183 +1,376 @@
 {{define "content"}}
 {{with .Script}}
-<a href="/scripts" class="text-xs text-zinc-400 hover:text-zinc-100">&larr; back</a>
-<div class="mt-3 flex items-center justify-between gap-3">
-  <div>
-    <h1 class="text-2xl font-semibold tracking-tight">{{.Title}}</h1>
-    <p class="text-sm text-zinc-400">{{.Summary}}</p>
-    <code class="text-xs text-zinc-500 block mt-1">scripts/{{.Name}}</code>
+<div class="breadcrumb"><a href="/scripts">Commands</a> <span class="bc-sep">›</span> <span>{{.Title}}</span></div>
+
+<div class="page-header">
+  <div class="page-header-left">
+    <h1 class="page-title">{{.Title}}</h1>
+    <span class="page-subtitle">{{.Summary}}</span>
   </div>
-  {{if .Danger}}<span class="text-[10px] px-2 py-0.5 rounded ring-1 ring-rose-500/30 text-rose-300 uppercase tracking-widest">danger</span>{{end}}
+  {{if .Danger}}<span class="badge badge-danger badge-lg">danger</span>{{end}}
 </div>
 
+<code class="cmd-hint">scripts/deployctl.sh {{.ControlCommand}}</code>
+
 {{if not $.RunnerConfigured}}
-<div class="mt-4 p-3 rounded-lg ring-1 ring-amber-500/30 bg-amber-500/5 text-amber-300 text-xs">
-  <code>SCRIPTS_HOST_PATH</code> is not set on the dashboard. Scripts can be staged from this form,
-  but execution will fail until the deployment scripts directory is mounted on the host (see
-  <code>docker-compose.dev.yml</code> / <code>docker-compose.prod.yml</code>).
+<div class="alert alert-warn" style="margin-top:1rem">
+  <code>SCRIPTS_HOST_PATH</code> is not set. Scripts can be staged but will not execute until the deployment directory is mounted.
 </div>
 {{end}}
 
-<form id="run-form" class="mt-6 space-y-4 max-w-2xl" autocomplete="on">
-  {{range .Fields}}
-  {{if eq .Type "hidden"}}
-    <input type="hidden" name="{{.Name}}" value="{{.Default}}">
-  {{else}}
-  <label class="block">
-    <div class="flex items-baseline justify-between">
-      <span class="text-xs uppercase tracking-widest text-zinc-400">
-        {{.Label}}{{if .Required}} <span class="text-rose-400">*</span>{{end}}
-      </span>
-      {{if .Flag}}<code class="text-[10px] text-zinc-600">{{.Flag}}</code>{{end}}
-    </div>
-    {{if eq .Type "checkbox"}}
-      <label class="mt-1 inline-flex items-center gap-2 text-sm">
-        <input type="checkbox" name="{{.Name}}" value="1" class="accent-emerald-500"> Enabled
-      </label>
-    {{else if eq .Type "select"}}
-      <select name="{{.Name}}" class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 outline-none focus:border-emerald-500">
-        <option value=""></option>
-        {{range .Options}}<option>{{.}}</option>{{end}}
-      </select>
-    {{else if eq .Type "kv"}}
-      <textarea name="{{.Name}}" rows="3"
-        placeholder="KEY=value&#10;OTHER=value"
-        class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-sm outline-none focus:border-emerald-500"></textarea>
-    {{else if eq .Type "password"}}
-      <input type="password" name="{{.Name}}" placeholder="{{.Placeholder}}"
-        autocomplete="new-password"
-        {{if .Required}}required{{end}}
-        class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-sm outline-none focus:border-emerald-500">
+<div class="panel" style="max-width:52rem">
+  <div class="panel-title">Parameters</div>
+  <form id="run-form" class="script-form" autocomplete="on">
+    {{range .Fields}}
+    {{if eq .Type "hidden"}}
+      <input type="hidden" name="{{.Name}}" value="{{.Default}}">
     {{else}}
-      <input type="text" name="{{.Name}}" placeholder="{{.Placeholder}}"
-        value="{{.Default}}"
-        autocomplete="on"
-        {{if .Suggest}}list="dl-{{.Name}}"{{end}}
-        {{if .Required}}required{{end}}
-        class="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 font-mono text-sm outline-none focus:border-emerald-500">
-      {{if .Suggest}}
-      <datalist id="dl-{{.Name}}">
-        {{range .Suggest}}<option value="{{.}}">{{end}}
-      </datalist>
+    <div class="field-row">
+      <label class="field-label">
+        {{.Label}}{{if .Required}} <span class="req">*</span>{{end}}
+        {{if .Flag}}<code class="field-flag">{{.Flag}}</code>{{end}}
+      </label>
+      {{if eq .Type "checkbox"}}
+        <label class="checkbox-label">
+          <input type="checkbox" name="{{.Name}}" value="1"> Enabled
+        </label>
+      {{else if eq .Type "select"}}
+        {{$default := .Default}}
+        <select name="{{.Name}}" class="form-select">
+          {{if not .Required}}<option value=""></option>{{end}}
+          {{range .Options}}<option value="{{.}}" {{if eq . $default}}selected{{end}}>{{.}}</option>{{end}}
+        </select>
+        {{if eq .Name "image_version"}}
+        <div class="version-hint" data-version-hint hidden>
+          <div class="vh-row">
+            <span data-version-title class="vh-tag"></span>
+            <span data-version-status></span>
+          </div>
+          <p data-version-notes class="vh-notes"></p>
+          <a href="/releases" class="vh-link">Open release notes</a>
+        </div>
+        {{end}}
+      {{else if eq .Type "kv"}}
+        <textarea name="{{.Name}}" rows="3" placeholder="KEY=value&#10;OTHER=value" class="form-textarea"></textarea>
+      {{else if eq .Type "password"}}
+        <input type="password" name="{{.Name}}" placeholder="{{.Placeholder}}"
+          autocomplete="new-password" {{if .Required}}required{{end}} class="form-input">
+      {{else}}
+        {{if or (eq .Name "image_version") (eq .Name "backend_image_version") (eq .Name "frontend_image_version") .ImageScope}}
+        <div style="position:relative">
+          <input type="text" name="{{.Name}}" placeholder="{{.Placeholder}}"
+            value="{{if .ImageScope}}{{$.DefaultVersion}}{{else}}{{.Default}}{{end}}" autocomplete="off"
+            id="input-{{.Name}}" data-tag-search
+            {{if .ImageScope}}data-image-scope="{{.ImageScope}}"{{end}}
+            {{if .Required}}required{{end}} class="form-input">
+          <datalist id="dl-{{.Name}}">
+            {{range .Suggest}}<option value="{{.}}">{{end}}
+          </datalist>
+          <p data-image-compatibility class="field-help image-compatibility" hidden></p>
+        </div>
+        {{else}}
+        <input type="text" name="{{.Name}}" placeholder="{{.Placeholder}}"
+          value="{{.Default}}" autocomplete="off"
+          list="dl-{{.Name}}"
+          {{if .Required}}required{{end}} class="form-input">
+        <datalist id="dl-{{.Name}}">
+          {{range .Suggest}}<option value="{{.}}">{{end}}
+        </datalist>
+        {{end}}
       {{end}}
+      {{if .Help}}<p class="field-help">{{.Help}}</p>{{end}}
+    </div>
     {{end}}
-    {{if .Help}}<p class="mt-1 text-[11px] text-zinc-500">{{.Help}}</p>{{end}}
-  </label>
-  {{end}}
-  {{end}}
-  <div class="flex items-center gap-2">
-    <button class="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold text-sm transition">Run</button>
-    <button type="button" id="clear-out" class="px-3 py-2 rounded-lg ring-1 ring-zinc-700 hover:ring-zinc-500 text-sm">Clear</button>
-    {{if .Danger}}<span class="text-xs text-rose-300 ml-2">Confirmation will be requested.</span>{{end}}
+    {{end}}
+    <div id="run-controls" class="form-footer">
+      <button type="submit" class="btn btn-primary" aria-controls="out" aria-busy="false">▶ Run</button>
+      <button type="button" id="clear-out" class="btn btn-secondary" aria-controls="out">Clear output</button>
+      {{if .Danger}}<span class="danger-note">Confirmation will be requested before execution.</span>{{end}}
+    </div>
+  </form>
+</div>
+
+<div id="command-output" class="panel operation-panel" data-state="idle" data-operation-state="idle" aria-busy="false">
+  <div class="panel-toolbar operation-toolbar">
+    <span id="command-output-title" class="panel-title">Output</span>
+    <span id="out-status" class="operation-status operation-status-idle" data-operation-status="idle">Idle</span>
   </div>
-</form>
+  <div id="out-status-detail" class="operation-detail" data-operation-detail role="status" aria-live="polite">
+    Ready — run this command to see output.
+  </div>
+  <div id="out" class="terminal" role="log" aria-live="polite" aria-atomic="false"
+       aria-relevant="additions" aria-busy="false" aria-labelledby="command-output-title" tabindex="0">
+    <div id="out-empty" class="terminal-empty">No command output yet. Run this command to see results.</div>
+  </div>
+</div>
+<div id="run-status" class="alert" role="status" aria-live="polite" hidden></div>
 
-<section class="mt-8">
-  <h2 class="text-xs uppercase tracking-widest text-zinc-400 mb-2">Output</h2>
-  <div id="out" class="bg-zinc-950 ring-1 ring-zinc-800 rounded-xl p-4 h-[28rem] overflow-y-auto text-xs leading-5 whitespace-pre-wrap font-mono"></div>
-</section>
-
+<script src="/static/command-run.js"></script>
 <script>
 (function () {
   const form = document.getElementById('run-form');
   const out = document.getElementById('out');
-  document.getElementById('clear-out').onclick = () => out.innerHTML = '';
+  const status = document.getElementById('run-status');
+  const runControls = document.getElementById('run-controls');
+  const runButtons = runControls ? runControls.querySelectorAll('button') : [];
+  let runInProgress = false;
+
+  function setRunControlsBusy(busy) {
+    form.setAttribute('aria-busy', String(busy));
+    if (runControls) {
+      runControls.setAttribute('aria-busy', String(busy));
+      runControls.setAttribute('aria-disabled', String(busy));
+    }
+    runButtons.forEach(button => {
+      button.disabled = busy;
+      button.setAttribute('aria-busy', String(busy));
+    });
+  }
   const danger = {{.Danger}};
   const slug = '{{.Slug}}';
   const STORE_KEY = 'script-form:' + slug;
+  const outputPanel = document.getElementById('command-output');
+  const outputStore = window.DashboardOperation.createStore('dashboard:script-output:' + slug);
+  const releases = {{json $.Releases}};
+  let outputLines = [];
+  let outputState = 'idle';
+  let activityDirty = false;
 
-  // ---- Auto-fill from last successful submission (localStorage) ----
-  // Restores previously entered text/select/textarea values per script.
-  // Password inputs are intentionally excluded for security.
+  function emptyMarkup() {
+    return '<div id="out-empty" class="terminal-empty">No command output yet. Run this command to see results.</div>';
+  }
+
+  function persistOutput() {
+    outputStore.save(outputLines, outputState);
+  }
+
+  function setOutputState(state, detail) {
+    outputState = window.DashboardOperation.setState(outputPanel, state, detail);
+    persistOutput();
+  }
+
+  function appendLine(line, persist = true, announce = true) {
+    const value = window.stripTerminalControls(String(line));
+    outputLines.push(value);
+    outputLines = outputLines.slice(-window.DashboardOperation.maxEntries);
+    out.querySelector('.terminal-empty')?.remove();
+    const lineEl = document.createElement('span');
+    lineEl.className = 'terminal-line';
+    lineEl.innerHTML = linkifyLine(value);
+    if (!announce) lineEl.setAttribute('aria-hidden', 'true');
+    out.append(lineEl, document.createTextNode('\n'));
+    if (persist) persistOutput();
+  }
+
+  function clearOutput() {
+    outputLines = [];
+    out.innerHTML = emptyMarkup();
+    outputStore.clear();
+    setOutputState('idle', 'Ready — run this command to see output.');
+  }
+
+  function restoreOutput() {
+    const saved = outputStore.load();
+    outputLines = saved.entries.slice(-window.DashboardOperation.maxEntries);
+    out.innerHTML = '';
+    outputLines.forEach(line => appendLine(line, false));
+    if (outputLines.length === 0) out.innerHTML = emptyMarkup();
+    const recovered = window.DashboardOperation.recoveredState(outputState = saved.state, outputLines.length > 0);
+    const detail = saved.state === 'running'
+      ? 'Previous run did not finish; review the saved output.'
+      : undefined;
+    setOutputState(recovered, detail);
+  }
+
+  document.getElementById('clear-out').onclick = clearOutput;
+
+  function setStatus(message, kind) {
+    if (!status) return;
+    status.hidden = !message;
+    status.textContent = message;
+    status.className = 'alert ' + (kind === 'failure' ? 'badge-danger' :
+      kind === 'success' ? 'badge-success' : 'alert-warn');
+  }
+
   function restoreSaved() {
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || '{}'); } catch (_) {}
     for (const el of form.elements) {
-      if (!el.name) continue;
-      if (el.type === 'password' || el.type === 'hidden') continue;
+      if (!el.name || el.type === 'password' || el.type === 'hidden') continue;
       if (!(el.name in saved)) continue;
-      if (el.type === 'checkbox') {
-        el.checked = !!saved[el.name];
-      } else if (el.value === '' || el.value === el.defaultValue) {
-        // Don't clobber server-provided defaults that the user hasn't touched.
-        el.value = saved[el.name];
-      }
+      if (el.type === 'checkbox') el.checked = !!saved[el.name];
+      else if (el.value === '' || el.value === el.defaultValue) el.value = saved[el.name];
     }
   }
 
   function persistOnSubmit() {
     const data = {};
     for (const el of form.elements) {
-      if (!el.name) continue;
-      if (el.type === 'password' || el.type === 'hidden') continue;
-      if (el.type === 'checkbox') {
-        data[el.name] = el.checked;
-      } else {
-        data[el.name] = el.value;
-      }
+      if (!el.name || el.type === 'password' || el.type === 'hidden') continue;
+      data[el.name] = el.type === 'checkbox' ? el.checked : el.value;
     }
     try { localStorage.setItem(STORE_KEY, JSON.stringify(data)); } catch (_) {}
   }
 
   restoreSaved();
 
+  function applyQueryPrefill() {
+    const params = new URLSearchParams(window.location.search);
+    const aliases = new Map([['tenant', ['_pos_name', 'tenant', 'name']]]);
+    params.forEach((value, key) => {
+      for (const name of (aliases.get(key) || [key])) {
+        const el = form.elements[name];
+        if (!el || el.type === 'hidden') continue;
+        if (el.type === 'checkbox') el.checked = value === '1' || value === 'true';
+        else el.value = value;
+      }
+      if (key === 'image_version') {
+        for (const name of ['backend_image_version', 'frontend_image_version']) {
+          if (!params.has(name) && form.elements[name]) form.elements[name].value = value;
+        }
+      }
+    });
+  }
+  applyQueryPrefill();
+
+  // Populate every component selector from Docker Hub live tags. The legacy
+  // image_version field remains supported for callers that select one pair.
+  fetch('/api/image-tags')
+    .then(r => r.ok ? r.json() : null)
+    .then(data => {
+      if (!data?.tags?.length) return;
+      document.querySelectorAll('[data-tag-search]').forEach(input => {
+        const dl = document.getElementById('dl-' + input.name);
+        if (!dl) return;
+        dl.innerHTML = '';
+        data.tags.forEach(t => {
+          const o = document.createElement('option');
+          o.value = t;
+          dl.appendChild(o);
+        });
+      });
+    })
+    .catch(() => {});
+
+  function selectedRelease() {
+    const select = form.elements.image_version;
+    if (!select || !select.value) return null;
+    return releases.find(r => r.Tag === select.value) || null;
+  }
+
+  function renderVersionHint() {
+    const hint = document.querySelector('[data-version-hint]');
+    if (!hint) return;
+    const release = selectedRelease();
+    if (!release) { hint.hidden = true; return; }
+    hint.hidden = false;
+    hint.classList.toggle('broken', !!release.Broken);
+    hint.querySelector('[data-version-title]').textContent = release.Tag + (release.Title && release.Title !== release.Tag ? ' — ' + release.Title : '');
+    const statusEl = hint.querySelector('[data-version-status]');
+    const ready = !!release.Ready && !release.Broken;
+    statusEl.textContent = release.Broken ? 'broken' : (ready ? (release.Status || 'ready') : 'not-ready');
+    statusEl.className = 'badge ' + (release.Broken || !ready ? 'badge-danger' : 'badge-success');
+    const reasons = (release.ValidationErrors || []).slice(0, 3).join(' ');
+    hint.querySelector('[data-version-notes]').textContent = reasons || (release.Notes || []).slice(0, 2).join(' ') || 'No release notes for this version.';
+  }
+
+  form.elements.image_version?.addEventListener('change', renderVersionHint);
+  renderVersionHint();
+
   function escapeHtml(s) {
-    return s
-      .replaceAll('&', '&amp;')
-      .replaceAll('<', '&lt;')
-      .replaceAll('>', '&gt;')
-      .replaceAll('"', '&quot;')
-      .replaceAll("'", '&#39;');
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
   function linkifyLine(s) {
-    const esc = escapeHtml(s);
-    return esc.replace(/(https?:\/\/[^\s<>"]+)/g, (u) => {
-      return '<a href="' + u + '" target="_blank" rel="noopener" class="text-sky-400 hover:text-sky-300 underline">' + u + '</a>';
-    });
+    return escapeHtml(s).replace(/(https?:\/\/[^\s<>"]+)/g, u =>
+      `<a href="${u}" target="_blank" rel="noopener" class="log-link">${u}</a>`);
   }
 
-  function appendLine(line) {
-    out.insertAdjacentHTML('beforeend', linkifyLine(line) + '<br>');
+  restoreOutput();
+
+  fetch('/api/scripts/{{.Slug}}/activity')
+    .then(response => response.ok ? response.json() : null)
+    .then(data => {
+      if (!data || activityDirty || outputLines.length > 0) return;
+      const entries = data.entries || [];
+      entries.forEach(entry => {
+        const at = entry.at ? String(entry.at).replace('T', ' ').replace(/\.\d+Z$/, 'Z') + ' ' : '';
+        appendLine(at + (entry.line || ''), false, false);
+      });
+      if (entries.length > 0) {
+        setOutputState('success', 'Loaded saved command activity.');
+      }
+      out.scrollTop = out.scrollHeight;
+    })
+    .catch(() => {});
+
+  async function runCommand() {
+    if (runInProgress) return;
+    runInProgress = true;
+    setRunControlsBusy(true);
+    try {
+      if (danger && !confirm('This script may modify or delete data. Continue?')) return;
+      const release = selectedRelease();
+      if (release?.Broken && !confirm('Version ' + release.Tag + ' is marked broken. Continue?')) return;
+
+      persistOnSubmit();
+      const fd = new FormData(form);
+      activityDirty = true;
+      setOutputState('running', 'Running — streaming command output…');
+      appendLine('', true, false);
+      appendLine('--- run ' + new Date().toISOString() + ' ---', true, false);
+      setStatus('Running command…', 'running');
+
+      let streamError = '';
+      const result = await window.commandRun.execute('/scripts/{{.Slug}}/run', {
+        method: 'POST',
+        body: new URLSearchParams(fd),
+      }, {
+        onEvent: event => {
+          if (event.type === 'error') {
+            streamError = event.data || 'The command reported a failure.';
+            appendLine('✖ ' + streamError);
+          } else if (event.type === 'done') {
+            appendLine('');
+          } else if (event.data) {
+            appendLine(event.data);
+          }
+          out.scrollTop = out.scrollHeight;
+        },
+      });
+
+      if (result.failed) {
+        const message = result.error || streamError || 'The command reported a failure.';
+        setOutputState('failure', 'Failed — ' + message);
+        setStatus('Command failed: ' + message, 'failure');
+      } else {
+        setOutputState('success', 'Success — command completed.');
+        setStatus('Command completed.', 'success');
+      }
+    } catch (err) {
+      const message = err && err.message ? err.message : 'Command failed unexpectedly. Please try again.';
+      appendLine('✖ ' + message);
+      setOutputState('failure', 'Failed — ' + message);
+      setStatus(message, 'failure');
+    } finally {
+      setRunControlsBusy(false);
+      runInProgress = false;
+    }
   }
 
-  form.addEventListener('submit', async (ev) => {
+  form.addEventListener('submit', (ev) => {
     ev.preventDefault();
-    if (danger && !confirm('This script may modify or delete data. Continue?')) return;
-    persistOnSubmit();
-    const fd = new FormData(form);
-    appendLine('');
-    appendLine('--- run ' + new Date().toISOString() + ' ---');
-    const res = await fetch('/scripts/{{.Slug}}/run', { method: 'POST', body: new URLSearchParams(fd) });
-    if (!res.ok) {
-      appendLine('✖ ' + res.status + ' ' + (await res.text()));
+    const imageInput = form.querySelector('[data-tag-search]');
+    if (imageInput && !imageInput.checkValidity()) {
+      imageInput.reportValidity();
       return;
     }
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    let linePrefix = '';
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf('\n\n')) >= 0) {
-        const block = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        for (const ln of block.split('\n')) {
-          if (ln.startsWith('data: ')) {
-            appendLine(linePrefix + ln.slice(6));
-            linePrefix = '';
-          } else if (ln.startsWith('event: error')) {
-            linePrefix = '✖ ';
-          } else if (ln.startsWith('event: done')) {
-            appendLine('');
-          }
-        }
-        out.scrollTop = out.scrollHeight;
-      }
-    }
+    if (danger && !confirm('This script may modify or delete data. Continue?')) return;
+    const release = selectedRelease();
+    if (release?.Broken && !confirm('Version ' + release.Tag + ' is marked broken. Continue?')) return;
+    if (release && !release.Ready && !confirm('Version ' + release.Tag + ' is not validated. Continue anyway?')) return;
+    persistOnSubmit();
+    void runCommand();
   });
 })();
 </script>

@@ -417,11 +417,13 @@ OPENOBSERVE_PASSWORD="$ZO_ROOT_USER_PASSWORD" \
   observability/openobserve/apply-openobserve.sh
 ```
 
-The request, trace, and tenant-latency saved views intentionally contain
-bounded replacement values (`REQUEST_ID_VALUE`, `TRACE_ID_VALUE`, and
+The request, trace, tenant-latency, and backend-log saved views intentionally
+contain bounded replacement values (`REQUEST_ID_VALUE`, `TRACE_ID_VALUE`, and
 `TENANT_ID_VALUE`). Replace those values in the OpenObserve query editor with
 validated incident identifiers; do not add request bodies, raw URLs, raw
-application SQL text, credentials, or arbitrary error strings.
+application SQL text, credentials, or arbitrary error strings. The backend-log
+view is named `Ifritah - Backend logs by tenant` and filters the shared
+`ifritah_logs_v1` stream to `service_name = 'ifritah-backend'`.
 The dashboard and searches use record fields, not metric labels or stream
 partitions.
 

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "destination_name": "REPLACE_WITH_OPERATOR_DESTINATION_NAME",
+  "destination_type": "REPLACE_WITH_EXTERNAL_DESTINATION_TYPE",
+  "endpoint_reference": "REPLACE_WITH_EXTERNAL_SECRET_STORE_REFERENCE",
+  "template_name": "ifritah-operator-alert",
+  "secret_policy": "Store webhook, SMTP, PagerDuty, or relay credentials in OpenObserve's operator-managed destination or an external notification relay. Do not put them in this repository.",
+  "alert_binding": "Set OPENOBSERVE_ALERT_DESTINATION_NAME to destination_name only after the destination exists."
+}

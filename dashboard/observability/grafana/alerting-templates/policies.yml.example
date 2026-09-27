@@ -1,0 +1,15 @@
+apiVersion: 1
+
+# Copy this file to:
+#   dashboard/observability/grafana/provisioning/alerting/policies.yml
+# only after contact-points.yml has been installed with at least one receiver.
+policies:
+  - orgId: 1
+    receiver: ifritah-ops
+    group_by:
+      - alertname
+      - component
+      - severity
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

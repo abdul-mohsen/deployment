@@ -1,0 +1,1896 @@
+// OpenObserve-only collector. The existing Loki/Grafana Alloy profile is
+// intentionally separate and remains unchanged.
+logging {
+	level  = "info"
+	format = "json"
+}
+
+// Docker discovery is split by source so the service and container-role
+// identity is bounded before the log line is normalized. No arbitrary
+// container is accepted by the relabel rules below.
+discovery.docker "dashboard" {
+	host             = "http://docker-api-filter-openobserve:2375"
+	refresh_interval = "30s"
+
+	filter {
+		name   = "label"
+		values = ["com.ifritah.observability=dashboard"]
+	}
+}
+
+discovery.docker "backend" {
+	host             = "http://docker-api-filter-openobserve:2375"
+	refresh_interval = "30s"
+
+	filter {
+		name = "name"
+		// Docker's name filter is substring-based; the relabel rule below
+		// performs the strict tenant-app match before logs are tailed.
+		values = ["-backend"]
+	}
+}
+
+discovery.docker "frontend" {
+	host             = "http://docker-api-filter-openobserve:2375"
+	refresh_interval = "30s"
+
+	filter {
+		name   = "name"
+		values = ["-frontend"]
+	}
+}
+
+discovery.relabel "dashboard_allowlist" {
+	targets = discovery.docker.dashboard.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_ifritah_observability"]
+		regex         = "dashboard"
+		action        = "keep"
+	}
+
+	rule {
+		target_label = "container_role"
+		replacement  = "dashboard"
+	}
+
+	rule {
+		target_label = "service_name"
+		replacement  = "ifritah-dashboard"
+	}
+}
+
+discovery.relabel "backend_allowlist" {
+	targets = discovery.docker.backend.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "^/?[a-z0-9][a-z0-9-]{0,61}-backend(?:\\.[A-Za-z0-9_.-]+)?$"
+		action        = "keep"
+	}
+
+	rule {
+		target_label = "container_role"
+		replacement  = "backend"
+	}
+
+	rule {
+		target_label = "service_name"
+		replacement  = "ifritah-backend"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "^/?([a-z0-9][a-z0-9-]{0,61})-backend(?:\\.[A-Za-z0-9_.-]+)?$"
+		target_label  = "tenant_id"
+		replacement   = "$1"
+	}
+}
+
+discovery.relabel "frontend_allowlist" {
+	targets = discovery.docker.frontend.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "^/?[a-z0-9][a-z0-9-]{0,61}-frontend(?:\\.[A-Za-z0-9_.-]+)?$"
+		action        = "keep"
+	}
+
+	rule {
+		target_label = "container_role"
+		replacement  = "frontend"
+	}
+
+	rule {
+		target_label = "service_name"
+		replacement  = "ifritah-frontend"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "^/?([a-z0-9][a-z0-9-]{0,61})-frontend(?:\\.[A-Za-z0-9_.-]+)?$"
+		target_label  = "tenant_id"
+		replacement   = "$1"
+	}
+}
+
+// Backend metrics are scraped from the private tenant-ingest network. The
+// target is rewritten from the allow-listed Dokku app name so no arbitrary
+// host/port can be supplied through container labels. The OTel receiver below
+// keeps only the exact backend metric families in streams.json.
+discovery.relabel "backend_metrics" {
+	targets = discovery.relabel.backend_allowlist.output
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "^/?([a-z0-9][a-z0-9-]{0,61}-backend)(?:\\.[A-Za-z0-9_.-]+)?$"
+		target_label  = "__address__"
+		replacement   = "$1:8090"
+	}
+
+	rule {
+		target_label = "__metrics_path__"
+		replacement  = "/metrics"
+	}
+}
+
+loki.source.docker "dashboard" {
+	host       = "http://docker-api-filter-openobserve:2375"
+	targets    = discovery.relabel.dashboard_allowlist.output
+	labels     = {"source" = "docker"}
+	forward_to = [loki.process.dashboard.receiver]
+}
+
+loki.source.docker "backend" {
+	host       = "http://docker-api-filter-openobserve:2375"
+	targets    = discovery.relabel.backend_allowlist.output
+	labels     = {"source" = "docker"}
+	forward_to = [loki.process.backend.receiver]
+}
+
+loki.source.docker "frontend" {
+	host       = "http://docker-api-filter-openobserve:2375"
+	targets    = discovery.relabel.frontend_allowlist.output
+	labels     = {"source" = "docker"}
+	forward_to = [loki.process.frontend.receiver]
+}
+
+prometheus.scrape "backend_http" {
+	job_name        = "ifritah-backend-http"
+	scrape_interval = "15s"
+	scrape_timeout  = "5s"
+	body_size_limit = "2MiB"
+	sample_limit    = 2048
+	label_limit     = 16
+	targets         = discovery.relabel.backend_metrics.output
+
+	authorization {
+		type        = "Bearer"
+		credentials = sys.env("OPENOBSERVE_TENANT_OTLP_TOKEN")
+	}
+
+	forward_to = [otelcol.receiver.prometheus.application.receiver]
+}
+
+// The three pipelines intentionally repeat the small normalization stage so
+// service identity never comes from an untrusted log field.
+loki.process "backend" {
+	forward_to = [otelcol.receiver.loki.docker.receiver]
+
+	stage.label_keep {
+		values = ["container_role", "service_name", "tenant_id"]
+	}
+
+	stage.docker { }
+
+	stage.decolorize { }
+
+	stage.replace {
+		expression = "[\\x00-\\x1F\\x7F]"
+		replace    = " "
+	}
+
+	stage.drop {
+		longer_than         = "64KB"
+		drop_counter_reason = "oversized_log"
+	}
+
+	stage.drop {
+		expression          = "(?i)([\"']?(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement)[\"']?[[:space:]]*[:=])"
+		drop_counter_reason = "forbidden_secret_key"
+	}
+
+	stage.regex {
+		source     = "output"
+		expression = `(?P<redaction_candidate>[0-9][0-9 -]{11,30}[0-9])`
+	}
+
+	stage.luhn {
+		replacement = "[REDACTED]"
+	}
+
+	stage.json {
+		source      = "output"
+		expressions = {
+			event_time_input             = "event_time",
+			timestamp_input              = "time",
+			event_type_input             = "event_type",
+			message_input                = "msg",
+			severity_input               = "severity",
+			level_input                  = "level",
+			service_version_input        = "service_version",
+			build_version_input          = "build_version",
+			deployment_environment_input = "deployment_environment",
+			environment_input            = "environment",
+			component_input              = "component",
+			operation_input              = "operation",
+			outcome_input                = "outcome",
+			error_code_input             = "error_code",
+			error_type_input             = "error_type",
+			request_id_input             = "request_id",
+			trace_id_input               = "trace_id",
+			span_id_input                = "span_id",
+			parent_span_id_input         = "parent_span_id",
+			origin_request_id_input      = "origin_request_id",
+			origin_trace_id_input        = "origin_trace_id",
+			operation_id_input           = "operation_id",
+			job_id_input                 = "job_id",
+			tenant_scope_input           = "tenant_scope",
+			tenant_input                 = "tenant",
+			tenant_id_input              = "tenant_id",
+			company_id_input             = "company_id",
+			actor_id_input               = "actor_id",
+			user_id_input                = "user_id",
+			route_input                  = "route",
+			method_input                 = "method",
+			status_input                 = "status",
+			status_code_input            = "status_code",
+			status_class_input           = "status_class",
+			legacy_error_type_input      = "error.type",
+			duration_ms_input            = "duration_ms",
+			dependency_input             = "dependency",
+			attempt_input                = "attempt",
+			retryable_input              = "retryable",
+			build_commit_input           = "build_commit",
+			image_digest_input           = "image_digest",
+			image_channel_input          = "image_channel",
+			scripts_revision_input       = "scripts_revision",
+			deployment_stage_input       = "deployment_stage",
+			script_input                 = "script",
+			resource_type_input          = "resource_type",
+			resource_id_input            = "resource_id",
+			resource_id_hashed_input     = "resource_id_hashed",
+		}
+	}
+
+	stage.logfmt {
+		source  = "output"
+		mapping = {
+			timestamp              = "",
+			severity_input         = "severity",
+			script_input           = "script",
+			operation_id_input     = "operation_id",
+			tenant_input           = "tenant",
+			deployment_stage_input = "deployment_stage",
+		}
+	}
+
+	stage.template {
+		source   = "event_time_candidate"
+		template = `{{ .event_time_input | default .timestamp_input | default .timestamp }}`
+	}
+
+	stage.regex {
+		source     = "event_time_candidate"
+		expression = `^(?P<event_time_valid>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z)$`
+	}
+
+	stage.template {
+		source   = "event_time"
+		template = `{{ .event_time_valid | default .timestamp | default "1970-01-01T00:00:00Z" }}`
+	}
+
+	stage.timestamp {
+		source            = "event_time"
+		format            = "RFC3339Nano"
+		fallback_formats  = ["RFC3339"]
+		action_on_failure = "skip"
+	}
+
+	stage.template {
+		source   = "service_name"
+		template = "ifritah-backend"
+	}
+
+	stage.template {
+		source   = "service_version"
+		template = `{{ .service_version_input | default .build_version_input | default "unknown" | TrimSpace | trunc 128 }}`
+	}
+
+	stage.template {
+		source   = "deployment_environment"
+		template = `{{ $v := ToLower (.deployment_environment_input | default .environment_input | default "unknown") }}{{ if or (eq $v "dev") (eq $v "qa") (eq $v "prod") }}{{ $v }}{{ else }}unknown{{ end }}`
+	}
+
+	stage.template {
+		source   = "severity"
+		template = `{{ $v := ToLower (.severity_input | default .level_input | default "info") }}{{ if eq $v "warning" }}warn{{ else if or (eq $v "debug") (eq $v "info") (eq $v "warn") (eq $v "error") (eq $v "fatal") }}{{ $v }}{{ else }}info{{ end }}`
+	}
+
+	stage.template {
+		source   = "event_type_candidate"
+		template = `{{ .event_type_input | default .message_input | default "runtime.lifecycle" }}`
+	}
+
+	stage.regex {
+		source     = "event_type_candidate"
+		expression = `^(?P<event_type_valid>[a-z0-9][a-z0-9_.:-]{0,95})$`
+	}
+
+	stage.template {
+		source   = "component_candidate"
+		template = `{{ .component_input | default "unknown" }}`
+	}
+
+	stage.regex {
+		source     = "component_candidate"
+		expression = `^(?P<component_valid>[a-z0-9][a-z0-9_.:-]{0,63})$`
+	}
+
+	stage.template {
+		source   = "operation_candidate"
+		template = `{{ .operation_input | default .event_type_input | default .message_input | default "unknown" }}`
+	}
+
+	stage.regex {
+		source     = "operation_candidate"
+		expression = `^(?P<operation_valid>[a-z0-9][a-z0-9_.:-]{0,95})$`
+	}
+
+	stage.regex {
+		source     = "error_code_input"
+		expression = `^(?P<error_code_valid>[a-z0-9][a-z0-9_.:-]{0,95})$`
+	}
+
+	stage.template {
+		source   = "error_type_candidate"
+		template = `{{ .error_type_input | default .legacy_error_type_input }}`
+	}
+
+	stage.regex {
+		source     = "error_type_candidate"
+		expression = `^(?P<error_type_valid>[a-z0-9][a-z0-9_.:-]{0,127})$`
+	}
+
+	stage.template {
+		source   = "tenant_candidate"
+		template = `{{ .tenant_id | default .tenant_input }}`
+	}
+
+	stage.regex {
+		source     = "tenant_candidate"
+		expression = `^(?P<tenant_valid>[a-z0-9][a-z0-9-]{0,62})$`
+	}
+
+	stage.label_drop {
+		values = ["tenant_id"]
+	}
+
+	stage.regex {
+		source     = "request_id_input"
+		expression = `^(?P<request_valid>[A-Za-z0-9._-]{1,64})$`
+	}
+
+	stage.regex {
+		source     = "trace_id_input"
+		expression = `^(?P<trace_valid>[0-9a-f]{32})$`
+	}
+
+	stage.regex {
+		source     = "span_id_input"
+		expression = `^(?P<span_valid>[0-9a-f]{16})$`
+	}
+
+	stage.regex {
+		source     = "parent_span_id_input"
+		expression = `^(?P<parent_span_valid>[0-9a-f]{16})$`
+	}
+
+	stage.regex {
+		source     = "origin_request_id_input"
+		expression = `^(?P<origin_request_valid>[A-Za-z0-9._-]{1,64})$`
+	}
+
+	stage.regex {
+		source     = "origin_trace_id_input"
+		expression = `^(?P<origin_trace_valid>[0-9a-f]{32})$`
+	}
+
+	stage.regex {
+		source     = "operation_id_input"
+		expression = `^(?P<operation_id_valid>[A-Za-z0-9._:-]{1,96})$`
+	}
+
+	stage.regex {
+		source     = "job_id_input"
+		expression = `^(?P<job_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "company_id_input"
+		expression = `^(?P<company_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "actor_id_input"
+		expression = `^(?P<actor_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "user_id_input"
+		expression = `^(?P<actor_fallback_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "route_input"
+		expression = `^(?P<route_valid>/[A-Za-z0-9_{}:./-]{0,127})$`
+	}
+
+	stage.regex {
+		source     = "method_input"
+		expression = `^(?P<method_valid>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|CONNECT|TRACE)$`
+	}
+
+	stage.template {
+		source   = "status_code_candidate"
+		template = `{{ .status_code_input | default .status_input }}`
+	}
+
+	stage.regex {
+		source     = "status_code_candidate"
+		expression = `^(?P<status_valid>[1-5][0-9]{2})$`
+	}
+
+	stage.regex {
+		source     = "status_code_candidate"
+		expression = `^(?P<status_class_from_code>[1-5])[0-9]{2}$`
+	}
+
+	stage.template {
+		source   = "status_class_candidate"
+		template = `{{ if .status_class_input }}{{ .status_class_input }}{{ else if .status_class_from_code }}{{ .status_class_from_code }}xx{{ else }}other{{ end }}`
+	}
+
+	stage.regex {
+		source     = "status_class_candidate"
+		expression = `^(?P<status_class_valid>[1-5]xx|other)$`
+	}
+
+	stage.template {
+		source   = "outcome_candidate"
+		template = `{{ if .outcome_input }}{{ .outcome_input }}{{ else if eq .status_class_candidate "4xx" }}rejected{{ else if eq .status_class_candidate "5xx" }}failure{{ else }}success{{ end }}`
+	}
+
+	stage.template {
+		source   = "outcome"
+		template = `{{ $v := ToLower (.outcome_candidate | default "success") }}{{ if or (eq $v "success") (eq $v "rejected") (eq $v "conflict") (eq $v "timeout") (eq $v "failure") (eq $v "degraded") (eq $v "dropped") }}{{ $v }}{{ else }}degraded{{ end }}`
+	}
+
+	stage.regex {
+		source     = "duration_ms_input"
+		expression = `^(?P<duration_valid>[0-9]{1,9})$`
+	}
+
+	stage.regex {
+		source     = "dependency_input"
+		expression = `^(?P<dependency_valid>[a-z0-9][a-z0-9.-]{0,63})$`
+	}
+
+	stage.regex {
+		source     = "attempt_input"
+		expression = `^(?P<attempt_valid>[1-9]|10)$`
+	}
+
+	stage.regex {
+		source     = "retryable_input"
+		expression = `^(?P<retryable_valid>true|false)$`
+	}
+
+	stage.regex {
+		source     = "build_commit_input"
+		expression = `^(?P<build_commit_valid>[0-9a-f]{1,64})$`
+	}
+
+	stage.regex {
+		source     = "image_digest_input"
+		expression = `^(?P<image_digest_valid>sha256:[0-9a-f]{64})$`
+	}
+
+	stage.regex {
+		source     = "image_channel_input"
+		expression = `^(?P<image_channel_valid>[a-z0-9][a-z0-9_.-]{0,31})$`
+	}
+
+	stage.regex {
+		source     = "scripts_revision_input"
+		expression = `^(?P<scripts_revision_valid>[0-9a-f]{1,64})$`
+	}
+
+	stage.regex {
+		source     = "deployment_stage_input"
+		expression = `^(?P<deployment_stage_valid>[a-z0-9][a-z0-9_.:-]{0,63})$`
+	}
+
+	stage.regex {
+		source     = "script_input"
+		expression = `^(?P<script_valid>[A-Za-z0-9_.-]{1,96})$`
+	}
+
+	stage.regex {
+		source     = "resource_type_input"
+		expression = `^(?P<resource_type_valid>[a-z0-9][a-z0-9_.:-]{0,63})$`
+	}
+
+	stage.regex {
+		source     = "resource_id_input"
+		expression = `^(?P<resource_id_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "resource_id_hashed_input"
+		expression = `^(?P<resource_id_hashed_valid>true|false)$`
+	}
+
+	stage.template {
+		source   = "resource_id_hashed_valid"
+		template = `{{ if eq .resource_id_hashed_valid "true" }}true{{ end }}`
+	}
+
+	stage.template {
+		source   = "redaction_applied"
+		template = `{{ if .redaction_candidate }}true{{ else }}false{{ end }}`
+	}
+
+	stage.template {
+		source   = "canonical_json"
+		template = `{"schema_version":1,"event_time":{{ .event_time | toJson }},"signal":"log","event_type":{{ if .event_type_valid }}{{ .event_type_valid | toJson }}{{ else }}"runtime.lifecycle"{{ end }},"severity":{{ .severity | toJson }},"service_name":{{ .service_name | toJson }},"service_version":{{ .service_version | toJson }},"deployment_environment":{{ .deployment_environment | toJson }},"component":{{ if .component_valid }}{{ .component_valid | toJson }}{{ else }}"unknown"{{ end }},"operation":{{ if .operation_valid }}{{ .operation_valid | toJson }}{{ else }}"unknown"{{ end }},"outcome":{{ .outcome | toJson }},"error_code":{{ if .error_code_valid }}{{ .error_code_valid | toJson }}{{ else }}null{{ end }},"error_type":{{ if .error_type_valid }}{{ .error_type_valid | toJson }}{{ else }}null{{ end }},"request_id":{{ if .request_valid }}{{ .request_valid | toJson }}{{ else }}null{{ end }},"trace_id":{{ if .trace_valid }}{{ .trace_valid | toJson }}{{ else }}null{{ end }},"span_id":{{ if .span_valid }}{{ .span_valid | toJson }}{{ else }}null{{ end }},"parent_span_id":{{ if .parent_span_valid }}{{ .parent_span_valid | toJson }}{{ else }}null{{ end }},"origin_request_id":{{ if .origin_request_valid }}{{ .origin_request_valid | toJson }}{{ else }}null{{ end }},"origin_trace_id":{{ if .origin_trace_valid }}{{ .origin_trace_valid | toJson }}{{ else }}null{{ end }},"operation_id":{{ if .operation_id_valid }}{{ .operation_id_valid | toJson }}{{ else }}null{{ end }},"job_id":{{ if .job_valid }}{{ .job_valid | toJson }}{{ else }}null{{ end }},"tenant_scope":{{ if .tenant_valid }}"tenant"{{ else if .script_valid }}"control_plane"{{ else }}"unknown"{{ end }},"tenant_id":{{ if .tenant_valid }}{{ .tenant_valid | toJson }}{{ else }}null{{ end }},"company_id":{{ if .company_valid }}{{ .company_valid | toJson }}{{ else }}null{{ end }},"actor_id":{{ if .actor_valid }}{{ .actor_valid | toJson }}{{ else if .actor_fallback_valid }}{{ .actor_fallback_valid | toJson }}{{ else }}null{{ end }},"route":{{ if .route_valid }}{{ .route_valid | toJson }}{{ else }}null{{ end }},"method":{{ if .method_valid }}{{ .method_valid | toJson }}{{ else }}null{{ end }},"status_code":{{ if .status_valid }}{{ .status_valid }}{{ else }}null{{ end }},"status_class":{{ if .status_class_valid }}{{ .status_class_valid | toJson }}{{ else }}null{{ end }},"duration_ms":{{ if .duration_valid }}{{ .duration_valid }}{{ else }}null{{ end }},"dependency":{{ if .dependency_valid }}{{ .dependency_valid | toJson }}{{ else }}null{{ end }},"attempt":{{ if .attempt_valid }}{{ .attempt_valid }}{{ else }}null{{ end }},"retryable":{{ if .retryable_valid }}{{ .retryable_valid }}{{ else }}null{{ end }},"build_version":{{ .service_version | toJson }},"build_commit":{{ if .build_commit_valid }}{{ .build_commit_valid | toJson }}{{ else }}null{{ end }},"image_digest":{{ if .image_digest_valid }}{{ .image_digest_valid | toJson }}{{ else }}null{{ end }},"image_channel":{{ if .image_channel_valid }}{{ .image_channel_valid | toJson }}{{ else }}null{{ end }},"scripts_revision":{{ if .scripts_revision_valid }}{{ .scripts_revision_valid | toJson }}{{ else }}null{{ end }},"deployment_stage":{{ if .deployment_stage_valid }}{{ .deployment_stage_valid | toJson }}{{ else }}null{{ end }},"script":{{ if .script_valid }}{{ .script_valid | toJson }}{{ else }}null{{ end }},"resource_type":{{ if .resource_type_valid }}{{ .resource_type_valid | toJson }}{{ else }}null{{ end }},"resource_id":{{ if and .resource_id_valid .resource_id_hashed_valid }}{{ .resource_id_valid | toJson }}{{ else }}null{{ end }},"resource_id_hashed":{{ if .resource_id_hashed_valid }}{{ .resource_id_hashed_valid }}{{ else }}false{{ end }},"redaction_applied":false,"redaction_rules":[]}`
+	}
+
+	stage.template {
+		source   = "canonical_json"
+		template = `{{ if .redaction_applied }}{{ .canonical_json | replace "\"redaction_applied\":false" "\"redaction_applied\":true" | replace "\"redaction_rules\":[]" "\"redaction_rules\":[\"luhn_card\"]" }}{{ else }}{{ .canonical_json }}{{ end }}`
+	}
+
+	stage.output {
+		source = "canonical_json"
+	}
+
+	stage.limit {
+		rate  = 1000
+		burst = 2000
+		drop  = true
+	}
+}
+
+loki.process "frontend" {
+	forward_to = [otelcol.receiver.loki.docker.receiver]
+
+	stage.label_keep {
+		values = ["container_role", "service_name", "tenant_id"]
+	}
+
+	stage.docker { }
+
+	stage.decolorize { }
+
+	stage.replace {
+		expression = "[\\x00-\\x1F\\x7F]"
+		replace    = " "
+	}
+
+	stage.drop {
+		longer_than         = "64KB"
+		drop_counter_reason = "oversized_log"
+	}
+
+	stage.drop {
+		expression          = "(?i)([\"']?(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement)[\"']?[[:space:]]*[:=])"
+		drop_counter_reason = "forbidden_secret_key"
+	}
+
+	stage.regex {
+		source     = "output"
+		expression = `(?P<redaction_candidate>[0-9][0-9 -]{11,30}[0-9])`
+	}
+
+	stage.luhn {
+		replacement = "[REDACTED]"
+	}
+
+	stage.json {
+		source      = "output"
+		expressions = {
+			event_time_input             = "event_time",
+			timestamp_input              = "time",
+			event_type_input             = "event_type",
+			message_input                = "msg",
+			severity_input               = "severity",
+			level_input                  = "level",
+			service_version_input        = "service_version",
+			build_version_input          = "build_version",
+			deployment_environment_input = "deployment_environment",
+			environment_input            = "environment",
+			component_input              = "component",
+			operation_input              = "operation",
+			outcome_input                = "outcome",
+			error_code_input             = "error_code",
+			error_type_input             = "error_type",
+			request_id_input             = "request_id",
+			trace_id_input               = "trace_id",
+			span_id_input                = "span_id",
+			parent_span_id_input         = "parent_span_id",
+			origin_request_id_input      = "origin_request_id",
+			origin_trace_id_input        = "origin_trace_id",
+			operation_id_input           = "operation_id",
+			job_id_input                 = "job_id",
+			tenant_scope_input           = "tenant_scope",
+			tenant_input                 = "tenant",
+			tenant_id_input              = "tenant_id",
+			company_id_input             = "company_id",
+			actor_id_input               = "actor_id",
+			user_id_input                = "user_id",
+			route_input                  = "route",
+			method_input                 = "method",
+			status_input                 = "status",
+			status_code_input            = "status_code",
+			status_class_input           = "status_class",
+			legacy_error_type_input      = "error.type",
+			duration_ms_input            = "duration_ms",
+			dependency_input             = "dependency",
+			attempt_input                = "attempt",
+			retryable_input              = "retryable",
+			build_commit_input           = "build_commit",
+			image_digest_input           = "image_digest",
+			image_channel_input          = "image_channel",
+			scripts_revision_input       = "scripts_revision",
+			deployment_stage_input       = "deployment_stage",
+			script_input                 = "script",
+			resource_type_input          = "resource_type",
+			resource_id_input            = "resource_id",
+			resource_id_hashed_input     = "resource_id_hashed",
+		}
+	}
+
+	stage.logfmt {
+		source  = "output"
+		mapping = {
+			timestamp              = "",
+			severity_input         = "severity",
+			script_input           = "script",
+			operation_id_input     = "operation_id",
+			tenant_input           = "tenant",
+			deployment_stage_input = "deployment_stage",
+		}
+	}
+
+	stage.template {
+		source   = "event_time_candidate"
+		template = `{{ .event_time_input | default .timestamp_input | default .timestamp }}`
+	}
+
+	stage.regex {
+		source     = "event_time_candidate"
+		expression = `^(?P<event_time_valid>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z)$`
+	}
+
+	stage.template {
+		source   = "event_time"
+		template = `{{ .event_time_valid | default .timestamp | default "1970-01-01T00:00:00Z" }}`
+	}
+
+	stage.timestamp {
+		source            = "event_time"
+		format            = "RFC3339Nano"
+		fallback_formats  = ["RFC3339"]
+		action_on_failure = "skip"
+	}
+
+	stage.template {
+		source   = "service_name"
+		template = "ifritah-frontend"
+	}
+
+	stage.template {
+		source   = "service_version"
+		template = `{{ .service_version_input | default .build_version_input | default "unknown" | TrimSpace | trunc 128 }}`
+	}
+
+	stage.template {
+		source   = "deployment_environment"
+		template = `{{ $v := ToLower (.deployment_environment_input | default .environment_input | default "unknown") }}{{ if or (eq $v "dev") (eq $v "qa") (eq $v "prod") }}{{ $v }}{{ else }}unknown{{ end }}`
+	}
+
+	stage.template {
+		source   = "severity"
+		template = `{{ $v := ToLower (.severity_input | default .level_input | default "info") }}{{ if eq $v "warning" }}warn{{ else if or (eq $v "debug") (eq $v "info") (eq $v "warn") (eq $v "error") (eq $v "fatal") }}{{ $v }}{{ else }}info{{ end }}`
+	}
+
+	stage.template {
+		source   = "event_type_candidate"
+		template = `{{ .event_type_input | default .message_input | default "runtime.lifecycle" }}`
+	}
+
+	stage.regex {
+		source     = "event_type_candidate"
+		expression = `^(?P<event_type_valid>[a-z0-9][a-z0-9_.:-]{0,95})$`
+	}
+
+	stage.template {
+		source   = "component_candidate"
+		template = `{{ .component_input | default "unknown" }}`
+	}
+
+	stage.regex {
+		source     = "component_candidate"
+		expression = `^(?P<component_valid>[a-z0-9][a-z0-9_.:-]{0,63})$`
+	}
+
+	stage.template {
+		source   = "operation_candidate"
+		template = `{{ .operation_input | default .event_type_input | default .message_input | default "unknown" }}`
+	}
+
+	stage.regex {
+		source     = "operation_candidate"
+		expression = `^(?P<operation_valid>[a-z0-9][a-z0-9_.:-]{0,95})$`
+	}
+
+	stage.regex {
+		source     = "error_code_input"
+		expression = `^(?P<error_code_valid>[a-z0-9][a-z0-9_.:-]{0,95})$`
+	}
+
+	stage.template {
+		source   = "error_type_candidate"
+		template = `{{ .error_type_input | default .legacy_error_type_input }}`
+	}
+
+	stage.regex {
+		source     = "error_type_candidate"
+		expression = `^(?P<error_type_valid>[a-z0-9][a-z0-9_.:-]{0,127})$`
+	}
+
+	stage.template {
+		source   = "tenant_candidate"
+		template = `{{ .tenant_id | default .tenant_input }}`
+	}
+
+	stage.regex {
+		source     = "tenant_candidate"
+		expression = `^(?P<tenant_valid>[a-z0-9][a-z0-9-]{0,62})$`
+	}
+
+	stage.label_drop {
+		values = ["tenant_id"]
+	}
+
+	stage.regex {
+		source     = "request_id_input"
+		expression = `^(?P<request_valid>[A-Za-z0-9._-]{1,64})$`
+	}
+
+	stage.regex {
+		source     = "trace_id_input"
+		expression = `^(?P<trace_valid>[0-9a-f]{32})$`
+	}
+
+	stage.regex {
+		source     = "span_id_input"
+		expression = `^(?P<span_valid>[0-9a-f]{16})$`
+	}
+
+	stage.regex {
+		source     = "parent_span_id_input"
+		expression = `^(?P<parent_span_valid>[0-9a-f]{16})$`
+	}
+
+	stage.regex {
+		source     = "origin_request_id_input"
+		expression = `^(?P<origin_request_valid>[A-Za-z0-9._-]{1,64})$`
+	}
+
+	stage.regex {
+		source     = "origin_trace_id_input"
+		expression = `^(?P<origin_trace_valid>[0-9a-f]{32})$`
+	}
+
+	stage.regex {
+		source     = "operation_id_input"
+		expression = `^(?P<operation_id_valid>[A-Za-z0-9._:-]{1,96})$`
+	}
+
+	stage.regex {
+		source     = "job_id_input"
+		expression = `^(?P<job_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "company_id_input"
+		expression = `^(?P<company_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "actor_id_input"
+		expression = `^(?P<actor_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "user_id_input"
+		expression = `^(?P<actor_fallback_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "route_input"
+		expression = `^(?P<route_valid>/[A-Za-z0-9_{}:./-]{0,127})$`
+	}
+
+	stage.regex {
+		source     = "method_input"
+		expression = `^(?P<method_valid>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|CONNECT|TRACE)$`
+	}
+
+	stage.template {
+		source   = "status_code_candidate"
+		template = `{{ .status_code_input | default .status_input }}`
+	}
+
+	stage.regex {
+		source     = "status_code_candidate"
+		expression = `^(?P<status_valid>[1-5][0-9]{2})$`
+	}
+
+	stage.regex {
+		source     = "status_code_candidate"
+		expression = `^(?P<status_class_from_code>[1-5])[0-9]{2}$`
+	}
+
+	stage.template {
+		source   = "status_class_candidate"
+		template = `{{ if .status_class_input }}{{ .status_class_input }}{{ else if .status_class_from_code }}{{ .status_class_from_code }}xx{{ else }}other{{ end }}`
+	}
+
+	stage.regex {
+		source     = "status_class_candidate"
+		expression = `^(?P<status_class_valid>[1-5]xx|other)$`
+	}
+
+	stage.template {
+		source   = "outcome_candidate"
+		template = `{{ if .outcome_input }}{{ .outcome_input }}{{ else if eq .status_class_candidate "4xx" }}rejected{{ else if eq .status_class_candidate "5xx" }}failure{{ else }}success{{ end }}`
+	}
+
+	stage.template {
+		source   = "outcome"
+		template = `{{ $v := ToLower (.outcome_candidate | default "success") }}{{ if or (eq $v "success") (eq $v "rejected") (eq $v "conflict") (eq $v "timeout") (eq $v "failure") (eq $v "degraded") (eq $v "dropped") }}{{ $v }}{{ else }}degraded{{ end }}`
+	}
+
+	stage.regex {
+		source     = "duration_ms_input"
+		expression = `^(?P<duration_valid>[0-9]{1,9})$`
+	}
+
+	stage.regex {
+		source     = "dependency_input"
+		expression = `^(?P<dependency_valid>[a-z0-9][a-z0-9.-]{0,63})$`
+	}
+
+	stage.regex {
+		source     = "attempt_input"
+		expression = `^(?P<attempt_valid>[1-9]|10)$`
+	}
+
+	stage.regex {
+		source     = "retryable_input"
+		expression = `^(?P<retryable_valid>true|false)$`
+	}
+
+	stage.regex {
+		source     = "build_commit_input"
+		expression = `^(?P<build_commit_valid>[0-9a-f]{1,64})$`
+	}
+
+	stage.regex {
+		source     = "image_digest_input"
+		expression = `^(?P<image_digest_valid>sha256:[0-9a-f]{64})$`
+	}
+
+	stage.regex {
+		source     = "image_channel_input"
+		expression = `^(?P<image_channel_valid>[a-z0-9][a-z0-9_.-]{0,31})$`
+	}
+
+	stage.regex {
+		source     = "scripts_revision_input"
+		expression = `^(?P<scripts_revision_valid>[0-9a-f]{1,64})$`
+	}
+
+	stage.regex {
+		source     = "deployment_stage_input"
+		expression = `^(?P<deployment_stage_valid>[a-z0-9][a-z0-9_.:-]{0,63})$`
+	}
+
+	stage.regex {
+		source     = "script_input"
+		expression = `^(?P<script_valid>[A-Za-z0-9_.-]{1,96})$`
+	}
+
+	stage.regex {
+		source     = "resource_type_input"
+		expression = `^(?P<resource_type_valid>[a-z0-9][a-z0-9_.:-]{0,63})$`
+	}
+
+	stage.regex {
+		source     = "resource_id_input"
+		expression = `^(?P<resource_id_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "resource_id_hashed_input"
+		expression = `^(?P<resource_id_hashed_valid>true|false)$`
+	}
+
+	stage.template {
+		source   = "resource_id_hashed_valid"
+		template = `{{ if eq .resource_id_hashed_valid "true" }}true{{ end }}`
+	}
+
+	stage.template {
+		source   = "redaction_applied"
+		template = `{{ if .redaction_candidate }}true{{ else }}false{{ end }}`
+	}
+
+	stage.template {
+		source   = "canonical_json"
+		template = `{"schema_version":1,"event_time":{{ .event_time | toJson }},"signal":"log","event_type":{{ if .event_type_valid }}{{ .event_type_valid | toJson }}{{ else }}"runtime.lifecycle"{{ end }},"severity":{{ .severity | toJson }},"service_name":{{ .service_name | toJson }},"service_version":{{ .service_version | toJson }},"deployment_environment":{{ .deployment_environment | toJson }},"component":{{ if .component_valid }}{{ .component_valid | toJson }}{{ else }}"unknown"{{ end }},"operation":{{ if .operation_valid }}{{ .operation_valid | toJson }}{{ else }}"unknown"{{ end }},"outcome":{{ .outcome | toJson }},"error_code":{{ if .error_code_valid }}{{ .error_code_valid | toJson }}{{ else }}null{{ end }},"error_type":{{ if .error_type_valid }}{{ .error_type_valid | toJson }}{{ else }}null{{ end }},"request_id":{{ if .request_valid }}{{ .request_valid | toJson }}{{ else }}null{{ end }},"trace_id":{{ if .trace_valid }}{{ .trace_valid | toJson }}{{ else }}null{{ end }},"span_id":{{ if .span_valid }}{{ .span_valid | toJson }}{{ else }}null{{ end }},"parent_span_id":{{ if .parent_span_valid }}{{ .parent_span_valid | toJson }}{{ else }}null{{ end }},"origin_request_id":{{ if .origin_request_valid }}{{ .origin_request_valid | toJson }}{{ else }}null{{ end }},"origin_trace_id":{{ if .origin_trace_valid }}{{ .origin_trace_valid | toJson }}{{ else }}null{{ end }},"operation_id":{{ if .operation_id_valid }}{{ .operation_id_valid | toJson }}{{ else }}null{{ end }},"job_id":{{ if .job_valid }}{{ .job_valid | toJson }}{{ else }}null{{ end }},"tenant_scope":{{ if .tenant_valid }}"tenant"{{ else }}"unknown"{{ end }},"tenant_id":{{ if .tenant_valid }}{{ .tenant_valid | toJson }}{{ else }}null{{ end }},"company_id":{{ if .company_valid }}{{ .company_valid | toJson }}{{ else }}null{{ end }},"actor_id":{{ if .actor_valid }}{{ .actor_valid | toJson }}{{ else if .actor_fallback_valid }}{{ .actor_fallback_valid | toJson }}{{ else }}null{{ end }},"route":{{ if .route_valid }}{{ .route_valid | toJson }}{{ else }}null{{ end }},"method":{{ if .method_valid }}{{ .method_valid | toJson }}{{ else }}null{{ end }},"status_code":{{ if .status_valid }}{{ .status_valid }}{{ else }}null{{ end }},"status_class":{{ if .status_class_valid }}{{ .status_class_valid | toJson }}{{ else }}null{{ end }},"duration_ms":{{ if .duration_valid }}{{ .duration_valid }}{{ else }}null{{ end }},"dependency":{{ if .dependency_valid }}{{ .dependency_valid | toJson }}{{ else }}null{{ end }},"attempt":{{ if .attempt_valid }}{{ .attempt_valid }}{{ else }}null{{ end }},"retryable":{{ if .retryable_valid }}{{ .retryable_valid }}{{ else }}null{{ end }},"build_version":{{ .service_version | toJson }},"build_commit":{{ if .build_commit_valid }}{{ .build_commit_valid | toJson }}{{ else }}null{{ end }},"image_digest":{{ if .image_digest_valid }}{{ .image_digest_valid | toJson }}{{ else }}null{{ end }},"image_channel":{{ if .image_channel_valid }}{{ .image_channel_valid | toJson }}{{ else }}null{{ end }},"scripts_revision":{{ if .scripts_revision_valid }}{{ .scripts_revision_valid | toJson }}{{ else }}null{{ end }},"deployment_stage":{{ if .deployment_stage_valid }}{{ .deployment_stage_valid | toJson }}{{ else }}null{{ end }},"script":{{ if .script_valid }}{{ .script_valid | toJson }}{{ else }}null{{ end }},"resource_type":{{ if .resource_type_valid }}{{ .resource_type_valid | toJson }}{{ else }}null{{ end }},"resource_id":{{ if and .resource_id_valid .resource_id_hashed_valid }}{{ .resource_id_valid | toJson }}{{ else }}null{{ end }},"resource_id_hashed":{{ if .resource_id_hashed_valid }}{{ .resource_id_hashed_valid }}{{ else }}false{{ end }},"redaction_applied":false,"redaction_rules":[]}`
+	}
+
+	stage.template {
+		source   = "canonical_json"
+		template = `{{ if .redaction_applied }}{{ .canonical_json | replace "\"redaction_applied\":false" "\"redaction_applied\":true" | replace "\"redaction_rules\":[]" "\"redaction_rules\":[\"luhn_card\"]" }}{{ else }}{{ .canonical_json }}{{ end }}`
+	}
+
+	stage.output {
+		source = "canonical_json"
+	}
+
+	stage.limit {
+		rate  = 1000
+		burst = 2000
+		drop  = true
+	}
+}
+
+loki.process "dashboard" {
+	forward_to = [otelcol.receiver.loki.docker.receiver]
+
+	stage.label_keep {
+		values = ["container_role", "service_name"]
+	}
+
+	stage.docker { }
+
+	stage.decolorize { }
+
+	stage.replace {
+		expression = "[\\x00-\\x1F\\x7F]"
+		replace    = " "
+	}
+
+	stage.drop {
+		longer_than         = "64KB"
+		drop_counter_reason = "oversized_log"
+	}
+
+	stage.drop {
+		expression          = "(?i)([\"']?(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement)[\"']?[[:space:]]*[:=])"
+		drop_counter_reason = "forbidden_secret_key"
+	}
+
+	stage.regex {
+		source     = "output"
+		expression = `(?P<redaction_candidate>[0-9][0-9 -]{11,30}[0-9])`
+	}
+
+	stage.luhn {
+		replacement = "[REDACTED]"
+	}
+
+	stage.json {
+		source      = "output"
+		expressions = {
+			event_time_input             = "event_time",
+			timestamp_input              = "time",
+			event_type_input             = "event_type",
+			message_input                = "msg",
+			severity_input               = "severity",
+			level_input                  = "level",
+			service_version_input        = "service_version",
+			build_version_input          = "build_version",
+			deployment_environment_input = "deployment_environment",
+			environment_input            = "environment",
+			component_input              = "component",
+			operation_input              = "operation",
+			outcome_input                = "outcome",
+			error_code_input             = "error_code",
+			error_type_input             = "error_type",
+			request_id_input             = "request_id",
+			trace_id_input               = "trace_id",
+			span_id_input                = "span_id",
+			parent_span_id_input         = "parent_span_id",
+			origin_request_id_input      = "origin_request_id",
+			origin_trace_id_input        = "origin_trace_id",
+			operation_id_input           = "operation_id",
+			job_id_input                 = "job_id",
+			tenant_scope_input           = "tenant_scope",
+			tenant_input                 = "tenant",
+			tenant_id_input              = "tenant_id",
+			company_id_input             = "company_id",
+			actor_id_input               = "actor_id",
+			user_id_input                = "user_id",
+			route_input                  = "route",
+			method_input                 = "method",
+			status_input                 = "status",
+			status_code_input            = "status_code",
+			status_class_input           = "status_class",
+			legacy_error_type_input      = "error.type",
+			duration_ms_input            = "duration_ms",
+			dependency_input             = "dependency",
+			attempt_input                = "attempt",
+			retryable_input              = "retryable",
+			build_commit_input           = "build_commit",
+			image_digest_input           = "image_digest",
+			image_channel_input          = "image_channel",
+			scripts_revision_input       = "scripts_revision",
+			deployment_stage_input       = "deployment_stage",
+			script_input                 = "script",
+			resource_type_input          = "resource_type",
+			resource_id_input            = "resource_id",
+			resource_id_hashed_input     = "resource_id_hashed",
+		}
+	}
+
+	stage.logfmt {
+		source  = "output"
+		mapping = {
+			timestamp              = "",
+			severity_input         = "severity",
+			script_input           = "script",
+			operation_id_input     = "operation_id",
+			tenant_input           = "tenant",
+			deployment_stage_input = "deployment_stage",
+		}
+	}
+
+	stage.template {
+		source   = "event_time_candidate"
+		template = `{{ .event_time_input | default .timestamp_input | default .timestamp }}`
+	}
+
+	stage.regex {
+		source     = "event_time_candidate"
+		expression = `^(?P<event_time_valid>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z)$`
+	}
+
+	stage.template {
+		source   = "event_time"
+		template = `{{ .event_time_valid | default .timestamp | default "1970-01-01T00:00:00Z" }}`
+	}
+
+	stage.timestamp {
+		source            = "event_time"
+		format            = "RFC3339Nano"
+		fallback_formats  = ["RFC3339"]
+		action_on_failure = "skip"
+	}
+
+	stage.template {
+		source   = "service_name"
+		template = "ifritah-dashboard"
+	}
+
+	stage.template {
+		source   = "service_version"
+		template = `{{ .service_version_input | default .build_version_input | default "unknown" | TrimSpace | trunc 128 }}`
+	}
+
+	stage.template {
+		source   = "deployment_environment"
+		template = `{{ $v := ToLower (.deployment_environment_input | default .environment_input | default "unknown") }}{{ if or (eq $v "dev") (eq $v "qa") (eq $v "prod") }}{{ $v }}{{ else }}unknown{{ end }}`
+	}
+
+	stage.template {
+		source   = "severity"
+		template = `{{ $v := ToLower (.severity_input | default .level_input | default "info") }}{{ if eq $v "warning" }}warn{{ else if or (eq $v "debug") (eq $v "info") (eq $v "warn") (eq $v "error") (eq $v "fatal") }}{{ $v }}{{ else }}info{{ end }}`
+	}
+
+	stage.template {
+		source   = "event_type_candidate"
+		template = `{{ if .script_input }}deployment.operation{{ else }}{{ .event_type_input | default .message_input | default "runtime.lifecycle" }}{{ end }}`
+	}
+
+	stage.regex {
+		source     = "event_type_candidate"
+		expression = `^(?P<event_type_valid>[a-z0-9][a-z0-9_.:-]{0,95})$`
+	}
+
+	stage.template {
+		source   = "component_candidate"
+		template = `{{ .component_input | default "deployment" }}`
+	}
+
+	stage.regex {
+		source     = "component_candidate"
+		expression = `^(?P<component_valid>[a-z0-9][a-z0-9_.:-]{0,63})$`
+	}
+
+	stage.template {
+		source   = "operation_candidate"
+		template = `{{ .operation_input | default .event_type_input | default .message_input | default "deployment.operation" }}`
+	}
+
+	stage.regex {
+		source     = "operation_candidate"
+		expression = `^(?P<operation_valid>[a-z0-9][a-z0-9_.:-]{0,95})$`
+	}
+
+	stage.template {
+		source   = "outcome"
+		template = `{{ $v := ToLower (.outcome_candidate | default "success") }}{{ if or (eq $v "success") (eq $v "rejected") (eq $v "conflict") (eq $v "timeout") (eq $v "failure") (eq $v "degraded") (eq $v "dropped") }}{{ $v }}{{ else }}degraded{{ end }}`
+	}
+
+	stage.regex {
+		source     = "error_code_input"
+		expression = `^(?P<error_code_valid>[a-z0-9][a-z0-9_.:-]{0,95})$`
+	}
+
+	stage.template {
+		source   = "error_type_candidate"
+		template = `{{ .error_type_input | default .legacy_error_type_input }}`
+	}
+
+	stage.regex {
+		source     = "error_type_candidate"
+		expression = `^(?P<error_type_valid>[a-z0-9][a-z0-9_.:-]{0,127})$`
+	}
+
+	stage.template {
+		source   = "tenant_candidate"
+		template = `{{ .tenant_id_input | default .tenant_input }}`
+	}
+
+	stage.regex {
+		source     = "tenant_candidate"
+		expression = `^(?P<tenant_valid>[a-z0-9][a-z0-9-]{0,62})$`
+	}
+
+	stage.regex {
+		source     = "request_id_input"
+		expression = `^(?P<request_valid>[A-Za-z0-9._-]{1,64})$`
+	}
+
+	stage.regex {
+		source     = "trace_id_input"
+		expression = `^(?P<trace_valid>[0-9a-f]{32})$`
+	}
+
+	stage.regex {
+		source     = "span_id_input"
+		expression = `^(?P<span_valid>[0-9a-f]{16})$`
+	}
+
+	stage.regex {
+		source     = "parent_span_id_input"
+		expression = `^(?P<parent_span_valid>[0-9a-f]{16})$`
+	}
+
+	stage.regex {
+		source     = "origin_request_id_input"
+		expression = `^(?P<origin_request_valid>[A-Za-z0-9._-]{1,64})$`
+	}
+
+	stage.regex {
+		source     = "origin_trace_id_input"
+		expression = `^(?P<origin_trace_valid>[0-9a-f]{32})$`
+	}
+
+	stage.regex {
+		source     = "operation_id_input"
+		expression = `^(?P<operation_id_valid>[A-Za-z0-9._:-]{1,96})$`
+	}
+
+	stage.regex {
+		source     = "job_id_input"
+		expression = `^(?P<job_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "company_id_input"
+		expression = `^(?P<company_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "actor_id_input"
+		expression = `^(?P<actor_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "user_id_input"
+		expression = `^(?P<actor_fallback_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "route_input"
+		expression = `^(?P<route_valid>/[A-Za-z0-9_{}:./-]{0,127})$`
+	}
+
+	stage.regex {
+		source     = "method_input"
+		expression = `^(?P<method_valid>GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|CONNECT|TRACE)$`
+	}
+
+	stage.template {
+		source   = "status_code_candidate"
+		template = `{{ .status_code_input | default .status_input }}`
+	}
+
+	stage.regex {
+		source     = "status_code_candidate"
+		expression = `^(?P<status_valid>[1-5][0-9]{2})$`
+	}
+
+	stage.regex {
+		source     = "status_code_candidate"
+		expression = `^(?P<status_class_from_code>[1-5])[0-9]{2}$`
+	}
+
+	stage.template {
+		source   = "status_class_candidate"
+		template = `{{ if .status_class_input }}{{ .status_class_input }}{{ else if .status_class_from_code }}{{ .status_class_from_code }}xx{{ else }}other{{ end }}`
+	}
+
+	stage.regex {
+		source     = "status_class_candidate"
+		expression = `^(?P<status_class_valid>[1-5]xx|other)$`
+	}
+
+	stage.template {
+		source   = "outcome_candidate"
+		template = `{{ if .outcome_input }}{{ .outcome_input }}{{ else if eq .status_class_candidate "4xx" }}rejected{{ else if eq .status_class_candidate "5xx" }}failure{{ else }}success{{ end }}`
+	}
+
+	stage.template {
+		source   = "outcome"
+		template = `{{ $v := ToLower (.outcome_candidate | default "success") }}{{ if or (eq $v "success") (eq $v "rejected") (eq $v "conflict") (eq $v "timeout") (eq $v "failure") (eq $v "degraded") (eq $v "dropped") }}{{ $v }}{{ else }}degraded{{ end }}`
+	}
+
+	stage.regex {
+		source     = "duration_ms_input"
+		expression = `^(?P<duration_valid>[0-9]{1,9})$`
+	}
+
+	stage.regex {
+		source     = "dependency_input"
+		expression = `^(?P<dependency_valid>[a-z0-9][a-z0-9.-]{0,63})$`
+	}
+
+	stage.regex {
+		source     = "attempt_input"
+		expression = `^(?P<attempt_valid>[1-9]|10)$`
+	}
+
+	stage.regex {
+		source     = "retryable_input"
+		expression = `^(?P<retryable_valid>true|false)$`
+	}
+
+	stage.regex {
+		source     = "build_commit_input"
+		expression = `^(?P<build_commit_valid>[0-9a-f]{1,64})$`
+	}
+
+	stage.regex {
+		source     = "image_digest_input"
+		expression = `^(?P<image_digest_valid>sha256:[0-9a-f]{64})$`
+	}
+
+	stage.regex {
+		source     = "image_channel_input"
+		expression = `^(?P<image_channel_valid>[a-z0-9][a-z0-9_.-]{0,31})$`
+	}
+
+	stage.regex {
+		source     = "scripts_revision_input"
+		expression = `^(?P<scripts_revision_valid>[0-9a-f]{1,64})$`
+	}
+
+	stage.regex {
+		source     = "deployment_stage_input"
+		expression = `^(?P<deployment_stage_valid>[a-z0-9][a-z0-9_.:-]{0,63})$`
+	}
+
+	stage.regex {
+		source     = "script_input"
+		expression = `^(?P<script_valid>[A-Za-z0-9_.-]{1,96})$`
+	}
+
+	stage.regex {
+		source     = "resource_type_input"
+		expression = `^(?P<resource_type_valid>[a-z0-9][a-z0-9_.:-]{0,63})$`
+	}
+
+	stage.regex {
+		source     = "resource_id_input"
+		expression = `^(?P<resource_id_valid>[A-Za-z0-9._:-]{1,128})$`
+	}
+
+	stage.regex {
+		source     = "resource_id_hashed_input"
+		expression = `^(?P<resource_id_hashed_valid>true|false)$`
+	}
+
+	stage.template {
+		source   = "resource_id_hashed_valid"
+		template = `{{ if eq .resource_id_hashed_valid "true" }}true{{ end }}`
+	}
+
+	stage.template {
+		source   = "redaction_applied"
+		template = `{{ if .redaction_candidate }}true{{ else }}false{{ end }}`
+	}
+
+	stage.template {
+		source   = "canonical_json"
+		template = `{"schema_version":1,"event_time":{{ .event_time | toJson }},"signal":"log","event_type":{{ if .event_type_valid }}{{ .event_type_valid | toJson }}{{ else }}"runtime.lifecycle"{{ end }},"severity":{{ .severity | toJson }},"service_name":{{ .service_name | toJson }},"service_version":{{ .service_version | toJson }},"deployment_environment":{{ .deployment_environment | toJson }},"component":{{ if .component_valid }}{{ .component_valid | toJson }}{{ else }}"deployment"{{ end }},"operation":{{ if .operation_valid }}{{ .operation_valid | toJson }}{{ else }}"deployment.operation"{{ end }},"outcome":{{ .outcome | toJson }},"error_code":{{ if .error_code_valid }}{{ .error_code_valid | toJson }}{{ else }}null{{ end }},"error_type":{{ if .error_type_valid }}{{ .error_type_valid | toJson }}{{ else }}null{{ end }},"request_id":{{ if .request_valid }}{{ .request_valid | toJson }}{{ else }}null{{ end }},"trace_id":{{ if .trace_valid }}{{ .trace_valid | toJson }}{{ else }}null{{ end }},"span_id":{{ if .span_valid }}{{ .span_valid | toJson }}{{ else }}null{{ end }},"parent_span_id":{{ if .parent_span_valid }}{{ .parent_span_valid | toJson }}{{ else }}null{{ end }},"origin_request_id":{{ if .origin_request_valid }}{{ .origin_request_valid | toJson }}{{ else }}null{{ end }},"origin_trace_id":{{ if .origin_trace_valid }}{{ .origin_trace_valid | toJson }}{{ else }}null{{ end }},"operation_id":{{ if .operation_id_valid }}{{ .operation_id_valid | toJson }}{{ else }}null{{ end }},"job_id":{{ if .job_valid }}{{ .job_valid | toJson }}{{ else }}null{{ end }},"tenant_scope":{{ if .tenant_valid }}"tenant"{{ else if .script_input }}"control_plane"{{ else }}"unknown"{{ end }},"tenant_id":{{ if .tenant_valid }}{{ .tenant_valid | toJson }}{{ else }}null{{ end }},"company_id":{{ if .company_valid }}{{ .company_valid | toJson }}{{ else }}null{{ end }},"actor_id":{{ if .actor_valid }}{{ .actor_valid | toJson }}{{ else if .actor_fallback_valid }}{{ .actor_fallback_valid | toJson }}{{ else }}null{{ end }},"route":{{ if .route_valid }}{{ .route_valid | toJson }}{{ else }}null{{ end }},"method":{{ if .method_valid }}{{ .method_valid | toJson }}{{ else }}null{{ end }},"status_code":{{ if .status_valid }}{{ .status_valid }}{{ else }}null{{ end }},"status_class":{{ if .status_class_valid }}{{ .status_class_valid | toJson }}{{ else }}null{{ end }},"duration_ms":{{ if .duration_valid }}{{ .duration_valid }}{{ else }}null{{ end }},"dependency":{{ if .dependency_valid }}{{ .dependency_valid | toJson }}{{ else }}null{{ end }},"attempt":{{ if .attempt_valid }}{{ .attempt_valid }}{{ else }}null{{ end }},"retryable":{{ if .retryable_valid }}{{ .retryable_valid }}{{ else }}null{{ end }},"build_version":{{ .service_version | toJson }},"build_commit":{{ if .build_commit_valid }}{{ .build_commit_valid | toJson }}{{ else }}null{{ end }},"image_digest":{{ if .image_digest_valid }}{{ .image_digest_valid | toJson }}{{ else }}null{{ end }},"image_channel":{{ if .image_channel_valid }}{{ .image_channel_valid | toJson }}{{ else }}null{{ end }},"scripts_revision":{{ if .scripts_revision_valid }}{{ .scripts_revision_valid | toJson }}{{ else }}null{{ end }},"deployment_stage":{{ if .deployment_stage_valid }}{{ .deployment_stage_valid | toJson }}{{ else }}null{{ end }},"script":{{ if .script_valid }}{{ .script_valid | toJson }}{{ else }}null{{ end }},"resource_type":{{ if .resource_type_valid }}{{ .resource_type_valid | toJson }}{{ else }}null{{ end }},"resource_id":{{ if and .resource_id_valid .resource_id_hashed_valid }}{{ .resource_id_valid | toJson }}{{ else }}null{{ end }},"resource_id_hashed":{{ if .resource_id_hashed_valid }}{{ .resource_id_hashed_valid }}{{ else }}false{{ end }},"redaction_applied":false,"redaction_rules":[]}`
+	}
+
+	stage.template {
+		source   = "canonical_json"
+		template = `{{ if .redaction_applied }}{{ .canonical_json | replace "\"redaction_applied\":false" "\"redaction_applied\":true" | replace "\"redaction_rules\":[]" "\"redaction_rules\":[\"luhn_card\"]" }}{{ else }}{{ .canonical_json }}{{ end }}`
+	}
+
+	stage.output {
+		source = "canonical_json"
+	}
+
+	stage.limit {
+		rate  = 1000
+		burst = 2000
+		drop  = true
+	}
+}
+
+otelcol.auth.basic "openobserve" {
+	username = sys.env("ZO_ROOT_USER_EMAIL")
+	password = sys.env("ZO_ROOT_USER_PASSWORD")
+}
+
+// Docker logs are converted from Loki entries to OTLP logs. The OTLP
+// receiver remains private on the OpenObserve network for future application
+// traces and metrics.
+otelcol.receiver.loki "docker" {
+	output {
+		logs = [otelcol.processor.memory_limiter.main.input]
+	}
+}
+
+// Tenant OTLP callers must authenticate with the deployment-provided token.
+// The token is deliberately not stored in this tracked configuration.
+otelcol.auth.basic "tenant" {
+	username = "ifritah-tenant"
+	password = sys.env("OPENOBSERVE_TENANT_OTLP_TOKEN")
+}
+
+otelcol.receiver.otlp "private" {
+	grpc {
+		endpoint               = "0.0.0.0:4317"
+		max_recv_msg_size      = "4MiB"
+		max_concurrent_streams = 128
+		auth                   = otelcol.auth.basic.tenant.handler
+	}
+
+	http {
+		endpoint              = "0.0.0.0:4318"
+		max_request_body_size = "4MiB"
+		auth                  = otelcol.auth.basic.tenant.handler
+	}
+
+	output {
+		metrics = [otelcol.processor.memory_limiter.tenant.input]
+		logs    = [otelcol.processor.memory_limiter.tenant.input]
+		traces  = [otelcol.processor.memory_limiter.tenant.input]
+	}
+}
+
+otelcol.processor.memory_limiter "main" {
+	check_interval = "1s"
+	limit          = "192MiB"
+	spike_limit    = "32MiB"
+
+	output {
+		metrics = [otelcol.processor.filter.unsafe.input]
+		logs    = [otelcol.processor.filter.unsafe.input]
+		traces  = [otelcol.processor.filter.unsafe.input]
+	}
+}
+
+otelcol.processor.memory_limiter "tenant" {
+	check_interval = "1s"
+	limit          = "96MiB"
+	spike_limit    = "16MiB"
+
+	output {
+		metrics = [otelcol.processor.filter.tenant_unsafe.input]
+		logs    = [otelcol.processor.filter.tenant_unsafe.input]
+		traces  = [otelcol.processor.filter.tenant_unsafe.input]
+	}
+}
+
+otelcol.processor.filter "unsafe" {
+	error_mode = "ignore"
+
+	logs {
+		log_record = [
+			`IsString(body) and IsMatch(body, "(?i)(\"?(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw)\"?[[:space:]]*[:=])")`,
+			`IsString(body) and Len(body) > 65536`,
+		]
+	}
+
+	output {
+		metrics = [otelcol.processor.transform.sanitize.input]
+		logs    = [otelcol.processor.transform.sanitize.input]
+		traces  = [otelcol.processor.transform.sanitize.input]
+	}
+}
+
+otelcol.processor.filter "tenant_unsafe" {
+	error_mode = "ignore"
+
+	logs {
+		log_record = [
+			`IsString(body) and IsMatch(body, "(?i)(\"?(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw)\"?[[:space:]]*[:=])")`,
+			`IsString(body) and Len(body) > 65536`,
+		]
+	}
+
+	output {
+		metrics = [otelcol.processor.transform.tenant_identity.input]
+		logs    = [otelcol.processor.transform.tenant_identity.input]
+		traces  = [otelcol.processor.transform.tenant_identity.input]
+	}
+}
+
+// Tenant OTLP has an authenticated but shared credential, so its caller
+// identity is deliberately replaced before the common sanitizer runs.
+otelcol.processor.transform "tenant_identity" {
+	error_mode = "ignore"
+
+	trace_statements {
+		context    = "resource"
+		statements = [
+			`set(attributes["service.name"], "ifritah-tenant")`,
+		]
+	}
+
+	metric_statements {
+		context    = "resource"
+		statements = [
+			`set(attributes["service.name"], "ifritah-tenant")`,
+		]
+	}
+
+	metric_statements {
+		context    = "datapoint"
+		statements = [
+			`set(attributes["service_name"], "ifritah-tenant")`,
+		]
+	}
+
+	log_statements {
+		context    = "resource"
+		statements = [
+			`set(attributes["service.name"], "ifritah-tenant")`,
+		]
+	}
+
+	log_statements {
+		context    = "log"
+		statements = [
+			`set(attributes["service_name"], "ifritah-tenant")`,
+		]
+	}
+
+	output {
+		metrics = [otelcol.processor.transform.sanitize.input]
+		logs    = [otelcol.processor.transform.sanitize.input]
+		traces  = [otelcol.processor.transform.sanitize.input]
+	}
+}
+
+otelcol.processor.transform "sanitize" {
+	error_mode = "ignore"
+
+	trace_statements {
+		context    = "resource"
+		statements = [
+			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`set(attributes["service.name"], attributes["service_name"]) where attributes["service.name"] == nil and attributes["service_name"] != nil`,
+			`set(attributes["service.name"], "otel-collector") where attributes["service.name"] == nil`,
+			`keep_keys(attributes, ["service.name", "service.version", "deployment.environment.name", "component", "cluster", "host.role", "container.role", "image.channel"])`,
+			`truncate_all(attributes, 128)`,
+		]
+	}
+
+	trace_statements {
+		context    = "span"
+		statements = [
+			`set(attributes["request_id"], attributes["request.id"]) where attributes["request.id"] != nil`,
+			`set(attributes["method"], attributes["http.request.method"]) where attributes["http.request.method"] != nil`,
+			`set(attributes["route"], attributes["http.route"]) where attributes["http.route"] != nil`,
+			`set(attributes["status_code"], attributes["http.response.status_code"]) where attributes["http.response.status_code"] != nil`,
+			`set(attributes["error_type"], attributes["error.type"]) where attributes["error.type"] != nil`,
+			`set(attributes["error_type"], attributes["exception.type"]) where attributes["error_type"] == nil and attributes["exception.type"] != nil`,
+			`set(attributes["operation"], attributes["ifritah.operation"]) where attributes["ifritah.operation"] != nil`,
+			`set(attributes["operation"], attributes["db.operation.name"]) where attributes["operation"] == nil and attributes["db.operation.name"] != nil`,
+			`set(attributes["operation"], attributes["messaging.operation.type"]) where attributes["operation"] == nil and attributes["messaging.operation.type"] != nil`,
+			`set(attributes["duration_ms"], (end_time_unix_nano - start_time_unix_nano) / 1000000)`,
+			`delete_key(attributes, "service_name")`,
+			`set(attributes["service_name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil`,
+			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw|stacktrace).*")`,
+			`keep_keys(attributes, ["service_name", "request_id", "company_id", "actor_id", "operation_id", "job_id", "method", "route", "status_code", "duration_ms", "operation", "error_type", "db.system", "messaging.system", "resource_type", "resource_id"])`,
+			`truncate_all(attributes, 256)`,
+		]
+	}
+
+	metric_statements {
+		context    = "resource"
+		statements = [
+			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`set(attributes["service.name"], attributes["service_name"]) where attributes["service.name"] == nil and attributes["service_name"] != nil`,
+			`set(attributes["service.name"], "otel-collector") where attributes["service.name"] == nil`,
+			`keep_keys(attributes, ["service.name", "service.version", "deployment.environment.name", "component", "cluster", "host.role", "container.role", "image.channel"])`,
+			`truncate_all(attributes, 64)`,
+		]
+	}
+
+	metric_statements {
+		context    = "datapoint"
+		statements = [
+			`delete_matching_keys(attributes, "(?i).*(tenant|request|trace|span|actor|user|resource|digest|authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`set(attributes["service_name"], resource.attributes["service.name"]) where attributes["service_name"] == nil and resource.attributes["service.name"] != nil`,
+			`keep_keys(attributes, ["service_name", "deployment_environment", "dependency", "operation", "outcome", "method", "route", "status_class", "container_role", "host_role", "device", "interface", "mountpoint", "mode", "cpu"])`,
+			`truncate_all(attributes, 64)`,
+		]
+	}
+
+	log_statements {
+		context    = "resource"
+		statements = [
+			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`set(attributes["service.name"], attributes["service_name"]) where attributes["service.name"] == nil and attributes["service_name"] != nil`,
+			`set(attributes["service.name"], "otel-collector") where attributes["service.name"] == nil`,
+			`keep_keys(attributes, ["service.name", "service.version", "deployment.environment.name", "component", "cluster", "host.role", "container.role", "service_name"])`,
+			`truncate_all(attributes, 128)`,
+		]
+	}
+
+	log_statements {
+		context    = "log"
+		statements = [
+			`replace_pattern(body, "(?s)^(.{0,1000}).*$", "$1[TRUNCATED]") where IsString(body) and Len(body) > 1000`,
+			`merge_maps(attributes, ParseJSON(body), "upsert") where IsString(body) and IsMatch(body, "^\\s*\\{")`,
+			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`delete_key(attributes, "tenant_id")`,
+			`delete_key(attributes, "tenant_scope")`,
+			`delete_key(attributes, "tenant")`,
+			`set(attributes["service_name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil`,
+			`keep_keys(attributes, ["schema_version", "event_time", "signal", "event_type", "severity", "service_name", "service_version", "deployment_environment", "component", "operation", "outcome", "error_code", "error_type", "request_id", "trace_id", "span_id", "parent_span_id", "origin_request_id", "origin_trace_id", "operation_id", "job_id", "tenant_scope", "tenant_id", "company_id", "actor_id", "route", "method", "status_code", "status_class", "duration_ms", "dependency", "attempt", "retryable", "build_version", "build_commit", "image_digest", "image_channel", "scripts_revision", "deployment_stage", "script", "resource_type", "resource_id", "resource_id_hashed", "redaction_applied", "redaction_rules", "container_role"])`,
+			`truncate_all(attributes, 256)`,
+		]
+	}
+
+	output {
+		metrics = [otelcol.processor.batch.main.input]
+		logs    = [otelcol.processor.batch.main.input]
+		traces  = [otelcol.processor.batch.main.input]
+	}
+}
+
+otelcol.processor.batch "main" {
+	timeout             = "10s"
+	send_batch_size     = 128
+	send_batch_max_size = 128
+
+	output {
+		logs    = [otelcol.exporter.otlphttp.logs.input]
+		metrics = [otelcol.exporter.otlphttp.metrics.input]
+		traces  = [otelcol.exporter.otlphttp.traces.input]
+	}
+}
+
+// Resource signals are scraped privately and converted into OTLP metrics.
+prometheus.scrape "host_resources" {
+	job_name        = "openobserve-host-resources"
+	scrape_interval = "15s"
+	scrape_timeout  = "5s"
+	body_size_limit = "2MiB"
+	sample_limit    = 2048
+	label_limit     = 32
+	targets         = [{
+		"__address__"  = "node-exporter-openobserve:9100",
+		"service_name" = "ifritah-node-exporter",
+		"host_role"    = "deployment",
+	}]
+	forward_to = [otelcol.receiver.prometheus.direct.receiver]
+}
+
+prometheus.scrape "container_resources" {
+	job_name        = "openobserve-container-resources"
+	scrape_interval = "15s"
+	scrape_timeout  = "5s"
+	body_size_limit = "2MiB"
+	sample_limit    = 1024
+	label_limit     = 16
+	targets         = [{
+		"__address__"  = "resource-exporter-openobserve:8080",
+		"service_name" = "ifritah-resource-exporter",
+		"host_role"    = "deployment",
+	}]
+	forward_to = [otelcol.receiver.prometheus.direct.receiver]
+}
+
+otelcol.receiver.prometheus "direct" {
+	output {
+		metrics = [otelcol.processor.filter.resource_metrics.input]
+	}
+}
+
+otelcol.receiver.prometheus "application" {
+	output {
+		metrics = [otelcol.processor.filter.backend_metrics.input]
+	}
+}
+
+// Scrape only bounded component/gateway health metrics. These signals use a
+// separate receiver, processor, batch, exporter, and gateway queue so queue
+// pressure and auth/schema failures remain visible without also entering the
+// ordinary metrics path.
+prometheus.scrape "collector_health" {
+	job_name        = "openobserve-collector-health"
+	scrape_interval = "15s"
+	scrape_timeout  = "5s"
+	body_size_limit = "2MiB"
+	sample_limit    = 2048
+	label_limit     = 16
+	targets         = [
+		{
+			"__address__"  = "127.0.0.1:12345",
+			"service_name" = "ifritah-alloy",
+			"component"    = "collector",
+		},
+		{
+			"__address__"  = "openobserve-gateway:8080",
+			"service_name" = "ifritah-openobserve-gateway",
+			"component"    = "gateway",
+		},
+	]
+	forward_to = [otelcol.receiver.prometheus.health.receiver]
+}
+
+otelcol.receiver.prometheus "health" {
+	output {
+		metrics = [otelcol.processor.filter.health_metrics.input]
+	}
+}
+
+// Prometheus scrapes are routed directly into OTel receivers because the
+// prometheus.relabel-to-OTel path does not reliably forward samples in the
+// full profile. Apply the metric-family policy after each receiver instead.
+otelcol.processor.filter "backend_metrics" {
+	error_mode = "propagate"
+
+	metrics {
+		metric = [
+			`not IsMatch(name, "^(ifritah_http_requests_total|ifritah_http_request_duration_seconds|up|scrape_duration_seconds|scrape_samples_scraped|scrape_samples_post_metric_relabeling|scrape_series_added|scrape_timeout_seconds)$")`,
+		]
+	}
+
+	output {
+		metrics = [otelcol.processor.memory_limiter.main.input]
+	}
+}
+
+otelcol.processor.filter "resource_metrics" {
+	error_mode = "propagate"
+
+	metrics {
+		metric = [
+			`not IsMatch(name, "^(node_cpu_seconds_total|node_memory_MemTotal_bytes|node_memory_MemAvailable_bytes|node_memory_MemFree_bytes|node_memory_Buffers_bytes|node_memory_Cached_bytes|node_filesystem_avail_bytes|node_filesystem_free_bytes|node_filesystem_size_bytes|node_network_receive_bytes_total|node_network_transmit_bytes_total|node_network_up|ifritah_container_cpu_usage_ratio|ifritah_container_memory_working_set_bytes|ifritah_container_restarts_total|ifritah_container_network_receive_bytes_total|ifritah_container_network_transmit_bytes_total|ifritah_container_running|ifritah_container_count|ifritah_resource_exporter_up|ifritah_resource_exporter_allowlisted_containers|ifritah_resource_exporter_scrape_errors_total|ifritah_resource_exporter_last_success_timestamp_seconds|up|scrape_duration_seconds|scrape_samples_scraped|scrape_samples_post_metric_relabeling|scrape_series_added|scrape_timeout_seconds)$")`,
+		]
+	}
+
+	output {
+		metrics = [otelcol.processor.memory_limiter.main.input]
+	}
+}
+
+otelcol.processor.filter "health_metrics" {
+	error_mode = "propagate"
+
+	metrics {
+		metric = [
+			`not IsMatch(name, "^(alloy_build_info|alloy_component_controller_running_components|alloy_component_controller_component_health|alloy_component_controller_evaluation_errors_total|alloy_component_controller_evaluation_latency_seconds|alloy_component_controller_evaluation_total|otelcol_exporter_sent_metric_points|otelcol_exporter_send_failed_metric_points|otelcol_receiver_accepted_metric_points|otelcol_receiver_refused_metric_points|otelcol_processor_accepted_metric_points|otelcol_processor_dropped_metric_points|ifritah_gateway_up|ifritah_gateway_queue_bytes|ifritah_gateway_queue_files|ifritah_gateway_enqueued_records_total|ifritah_gateway_received_bytes_total|ifritah_gateway_dropped_records_total|ifritah_gateway_forwarded_records_total|ifritah_gateway_forward_failures_total|ifritah_gateway_auth_blocked|ifritah_gateway_last_success_timestamp_seconds|ifritah_gateway_oversized_payloads_total|ifritah_gateway_queue_write_errors_total|up|scrape_duration_seconds|scrape_samples_scraped|scrape_samples_post_metric_relabeling|scrape_series_added|scrape_timeout_seconds)$")`,
+		]
+	}
+
+	output {
+		metrics = [otelcol.processor.memory_limiter.health.input]
+	}
+}
+
+otelcol.processor.memory_limiter "health" {
+	check_interval = "1s"
+	limit          = "32MiB"
+	spike_limit    = "8MiB"
+
+	output {
+		metrics = [otelcol.processor.transform.health.input]
+	}
+}
+
+otelcol.processor.transform "health" {
+	error_mode = "ignore"
+
+	metric_statements {
+		context    = "resource"
+		statements = [
+			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`set(attributes["service.name"], "ifritah-telemetry-health")`,
+			`keep_keys(attributes, ["service.name", "service.version", "deployment.environment.name", "component", "host.role", "service_name", "job"])`,
+			`truncate_all(attributes, 64)`,
+		]
+	}
+
+	metric_statements {
+		context    = "datapoint"
+		statements = [
+			`delete_matching_keys(attributes, "(?i).*(tenant|request|trace|span|actor|user|resource|digest|authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`keep_keys(attributes, ["service_name", "component", "signal", "reason", "status_class", "job", "host_role"])`,
+			`truncate_all(attributes, 64)`,
+		]
+	}
+
+	output {
+		metrics = [otelcol.processor.batch.health.input]
+	}
+}
+
+otelcol.processor.batch "health" {
+	timeout             = "10s"
+	send_batch_size     = 64
+	send_batch_max_size = 64
+
+	output {
+		metrics = [otelcol.exporter.otlphttp.health.input]
+	}
+}
+
+// Alloy has a bounded in-memory queue; the gateway adds a durable per-signal
+// disk queue capped at 64 MiB and is the only component that talks to
+// OpenObserve.
+otelcol.exporter.otlphttp "logs" {
+	logs_endpoint = "http://openobserve-gateway:4318/v1/logs"
+
+	client {
+		endpoint                = "http://openobserve-gateway:4318"
+		timeout                 = "5s"
+		compression             = "none"
+		max_conns_per_host      = 4
+		max_idle_conns_per_host = 4
+	}
+
+	sending_queue {
+		enabled       = true
+		num_consumers = 2
+		queue_size    = 40
+	}
+
+	retry_on_failure {
+		enabled              = true
+		initial_interval     = "5s"
+		max_interval         = "30s"
+		max_elapsed_time     = "30s"
+		multiplier           = 1.5
+		randomization_factor = 0.2
+	}
+}
+
+otelcol.exporter.otlphttp "metrics" {
+	metrics_endpoint = "http://openobserve-gateway:4318/v1/metrics"
+
+	client {
+		endpoint                = "http://openobserve-gateway:4318"
+		timeout                 = "5s"
+		compression             = "none"
+		max_conns_per_host      = 4
+		max_idle_conns_per_host = 4
+	}
+
+	sending_queue {
+		enabled       = true
+		num_consumers = 2
+		queue_size    = 40
+	}
+
+	retry_on_failure {
+		enabled              = true
+		initial_interval     = "5s"
+		max_interval         = "30s"
+		max_elapsed_time     = "30s"
+		multiplier           = 1.5
+		randomization_factor = 0.2
+	}
+}
+
+otelcol.exporter.otlphttp "traces" {
+	traces_endpoint = "http://openobserve-gateway:4318/v1/traces"
+
+	client {
+		endpoint                = "http://openobserve-gateway:4318"
+		timeout                 = "5s"
+		compression             = "none"
+		max_conns_per_host      = 4
+		max_idle_conns_per_host = 4
+	}
+
+	sending_queue {
+		enabled       = true
+		num_consumers = 2
+		queue_size    = 40
+	}
+
+	retry_on_failure {
+		enabled              = true
+		initial_interval     = "5s"
+		max_interval         = "30s"
+		max_elapsed_time     = "30s"
+		multiplier           = 1.5
+		randomization_factor = 0.2
+	}
+}
+
+otelcol.exporter.otlphttp "health" {
+	metrics_endpoint = "http://openobserve-gateway:4318/v1/health"
+
+	client {
+		endpoint                = "http://openobserve-gateway:4318"
+		timeout                 = "5s"
+		compression             = "none"
+		max_conns_per_host      = 2
+		max_idle_conns_per_host = 2
+	}
+
+	sending_queue {
+		enabled       = true
+		num_consumers = 1
+		queue_size    = 20
+	}
+
+	retry_on_failure {
+		enabled              = true
+		initial_interval     = "5s"
+		max_interval         = "30s"
+		max_elapsed_time     = "30s"
+		multiplier           = 1.5
+		randomization_factor = 0.2
+	}
+}

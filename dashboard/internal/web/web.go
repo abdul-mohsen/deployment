@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -59,6 +60,7 @@ type server struct {
 	authMu          sync.RWMutex
 	operationMu     sync.RWMutex
 	operations      map[string]operationStatus
+	logger          *slog.Logger
 }
 
 type operationStatus struct {
@@ -92,7 +94,16 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		SameSite: http.SameSiteLaxMode,
 	}
 
-	s := &server{cfg: cfg, dokku: d, logs: l, runner: runner, pages: pages, store: store, operations: map[string]operationStatus{}}
+	s := &server{
+		cfg:        cfg,
+		dokku:      d,
+		logs:       l,
+		runner:     runner,
+		pages:      pages,
+		store:      store,
+		operations: map[string]operationStatus{},
+		logger:     slog.Default(),
+	}
 	s.tenantState = tenantstate.NewStore(cfg.TenantStateDir)
 	s.snapshots = newSnapshotCache(60*time.Second, s.collectSnapshot)
 	s.snapshots.Start(context.Background())
@@ -102,7 +113,8 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Recoverer)
+	r.Use(RecoveryMiddleware(s.logger))
+	r.Use(AccessMiddleware(s.logger, nil))
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			setBuildHeaders(w)

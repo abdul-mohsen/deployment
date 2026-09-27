@@ -1,0 +1,702 @@
+{
+  "version": 5,
+  "title": "Ifritah OpenObserve Operations",
+  "description": "Operator-only request, trace, service, resource, telemetry-pipeline, and OpenObserve health views.",
+  "dashboardId": "",
+  "owner": "",
+  "role": "",
+  "created": "2026-09-19T00:00:00.000Z",
+  "variables": {
+    "list": [],
+    "showDynamicFilters": false
+  },
+  "defaultDatetimeDuration": {
+    "startTime": null,
+    "endTime": null,
+    "relativeTimePeriod": "1h",
+    "type": "relative"
+  },
+  "tabs": [
+    {
+      "name": "Operations",
+      "tabId": "openobserve-operations",
+      "panels": [
+        {
+          "id": "request-volume",
+          "type": "line",
+          "title": "Request volume",
+          "description": "Completed requests per bounded time bucket.",
+          "config": {
+            "show_legends": true,
+            "legends_position": "bottom",
+            "unit": "short",
+            "unit_custom": null
+          },
+          "queryType": "sql",
+          "queries": [
+            {
+              "query": "SELECT histogram(_timestamp) AS x_axis_1, COUNT(*) AS y_axis_1 FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND event_type = 'http.request.completed' GROUP BY x_axis_1 ORDER BY x_axis_1 LIMIT 120",
+              "customQuery": true,
+              "fields": {
+                "stream": "ifritah_logs_v1",
+                "stream_type": "logs",
+                "x": [
+                  {
+                    "label": "x_axis_1",
+                    "alias": "x_axis_1",
+                    "column": "x_axis_1",
+                    "aggregationFunction": null
+                  }
+                ],
+                "y": [
+                  {
+                    "label": "y_axis_1",
+                    "alias": "y_axis_1",
+                    "column": "y_axis_1",
+                    "aggregationFunction": null
+                  }
+                ],
+                "z": [],
+                "breakdown": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": ""
+              }
+            }
+          ],
+          "layout": {
+            "x": 0,
+            "y": 0,
+            "w": 24,
+            "h": 10,
+            "i": 1
+          }
+        },
+        {
+          "id": "server-errors",
+          "type": "line",
+          "title": "5xx error rate",
+          "description": "Server-error percentage for completed requests in the last hour.",
+          "config": {
+            "show_legends": true,
+            "legends_position": "bottom",
+            "unit": "percent",
+            "unit_custom": null
+          },
+          "queryType": "sql",
+          "queries": [
+            {
+              "query": "SELECT histogram(_timestamp) AS x_axis_1, SUM(CASE WHEN status_class = '5xx' THEN 1 ELSE 0 END) * 100.0 / COUNT(*) AS y_axis_1 FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND event_type = 'http.request.completed' GROUP BY x_axis_1 ORDER BY x_axis_1 LIMIT 120",
+              "customQuery": true,
+              "fields": {
+                "stream": "ifritah_logs_v1",
+                "stream_type": "logs",
+                "x": [
+                  {
+                    "label": "x_axis_1",
+                    "alias": "x_axis_1",
+                    "column": "x_axis_1",
+                    "aggregationFunction": null
+                  }
+                ],
+                "y": [
+                  {
+                    "label": "y_axis_1",
+                    "alias": "y_axis_1",
+                    "column": "y_axis_1",
+                    "aggregationFunction": null
+                  }
+                ],
+                "z": [],
+                "breakdown": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": ""
+              }
+            }
+          ],
+          "layout": {
+            "x": 24,
+            "y": 0,
+            "w": 24,
+            "h": 10,
+            "i": 2
+          }
+        },
+        {
+          "id": "request-latency",
+          "type": "line",
+          "title": "Average request latency",
+          "description": "Average duration_ms by service for completed requests.",
+          "config": {
+            "show_legends": true,
+            "legends_position": "bottom",
+            "unit": "ms",
+            "unit_custom": null
+          },
+          "queryType": "sql",
+          "queries": [
+            {
+              "query": "SELECT histogram(_timestamp) AS x_axis_1, AVG(duration_ms) AS y_axis_1 FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND event_type = 'http.request.completed' GROUP BY x_axis_1 ORDER BY x_axis_1 LIMIT 120",
+              "customQuery": true,
+              "fields": {
+                "stream": "ifritah_logs_v1",
+                "stream_type": "logs",
+                "x": [
+                  {
+                    "label": "x_axis_1",
+                    "alias": "x_axis_1",
+                    "column": "x_axis_1",
+                    "aggregationFunction": null
+                  }
+                ],
+                "y": [
+                  {
+                    "label": "y_axis_1",
+                    "alias": "y_axis_1",
+                    "column": "y_axis_1",
+                    "aggregationFunction": null
+                  }
+                ],
+                "z": [],
+                "breakdown": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": ""
+              }
+            }
+          ],
+          "layout": {
+            "x": 0,
+            "y": 10,
+            "w": 24,
+            "h": 10,
+            "i": 3
+          }
+        },
+        {
+          "id": "service-errors",
+          "type": "table",
+          "title": "Service errors and outcomes",
+          "description": "Bounded service and status-class error summary.",
+          "config": {
+            "show_legends": false,
+            "legends_position": null,
+            "unit": null,
+            "unit_custom": null
+          },
+          "queryType": "sql",
+          "queries": [
+            {
+              "query": "SELECT service_name, status_class, outcome, COUNT(*) AS error_count FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND outcome IN ('failure', 'timeout', 'rejected') GROUP BY service_name, status_class, outcome ORDER BY error_count DESC LIMIT 32",
+              "customQuery": true,
+              "fields": {
+                "stream": "ifritah_logs_v1",
+                "stream_type": "logs",
+                "x": [
+                  {
+                    "label": "service_name",
+                    "alias": "service_name",
+                    "column": "service_name",
+                    "aggregationFunction": null
+                  }
+                ],
+                "y": [
+                  {
+                    "label": "error_count",
+                    "alias": "error_count",
+                    "column": "error_count",
+                    "aggregationFunction": null
+                  }
+                ],
+                "z": [],
+                "breakdown": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": ""
+              }
+            }
+          ],
+          "layout": {
+            "x": 24,
+            "y": 10,
+            "w": 24,
+            "h": 10,
+            "i": 4
+          }
+        },
+        {
+          "id": "request-trace-correlation",
+          "type": "table",
+          "title": "Request and trace correlation",
+          "description": "Recent request records with searchable request_id and trace_id fields.",
+          "config": {
+            "show_legends": false,
+            "legends_position": null,
+            "unit": null,
+            "unit_custom": null
+          },
+          "queryType": "sql",
+          "queries": [
+            {
+              "query": "SELECT event_time, tenant_id, request_id, trace_id, service_name, route, status_code, duration_ms, outcome, error_code FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND event_type = 'http.request.completed' ORDER BY _timestamp DESC LIMIT 50",
+              "customQuery": true,
+              "fields": {
+                "stream": "ifritah_logs_v1",
+                "stream_type": "logs",
+                "x": [
+                  {
+                    "label": "event_time",
+                    "alias": "event_time",
+                    "column": "event_time",
+                    "aggregationFunction": null
+                  }
+                ],
+                "y": [
+                  {
+                    "label": "duration_ms",
+                    "alias": "duration_ms",
+                    "column": "duration_ms",
+                    "aggregationFunction": null
+                  }
+                ],
+                "z": [],
+                "breakdown": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": ""
+              }
+            }
+          ],
+          "layout": {
+            "x": 0,
+            "y": 30,
+            "w": 48,
+            "h": 12,
+            "i": 5
+          }
+        },
+        {
+          "id": "panic-exception",
+          "type": "table",
+          "title": "Panic and exception events",
+          "description": "Bounded panic and exception categories without raw values or bodies.",
+          "config": {
+            "show_legends": false,
+            "legends_position": null,
+            "unit": null,
+            "unit_custom": null
+          },
+          "queryType": "sql",
+          "queries": [
+            {
+              "query": "SELECT event_time, request_id, trace_id, service_name, route, panic_type, exception_type, error_type, outcome FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND (event_type = 'http.panic_recovered' OR panic_type IS NOT NULL OR exception_type IS NOT NULL) ORDER BY _timestamp DESC LIMIT 100",
+              "customQuery": true,
+              "fields": {
+                "stream": "ifritah_logs_v1",
+                "stream_type": "logs",
+                "x": [
+                  {
+                    "label": "event_time",
+                    "alias": "event_time",
+                    "column": "event_time",
+                    "aggregationFunction": null
+                  }
+                ],
+                "y": [
+                  {
+                    "label": "error_type",
+                    "alias": "error_type",
+                    "column": "error_type",
+                    "aggregationFunction": null
+                  }
+                ],
+                "z": [],
+                "breakdown": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": ""
+              }
+            }
+          ],
+          "layout": {
+            "x": 0,
+            "y": 42,
+            "w": 48,
+            "h": 12,
+            "i": 6
+          }
+        },
+        {
+          "id": "deployment-auth",
+          "type": "table",
+          "title": "Deployment, migration, and auth failures",
+          "description": "Operational failures grouped by stable event and error fields.",
+          "config": {
+            "show_legends": false,
+            "legends_position": null,
+            "unit": null,
+            "unit_custom": null
+          },
+          "queryType": "sql",
+          "queries": [
+            {
+              "query": "SELECT event_time, event_type, operation_id, tenant_id, deployment_stage, script, operation, error_code, outcome FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND ((event_type = 'deployment.operation' AND outcome = 'failure' AND deployment_stage IN ('migration', 'backup', 'image_swap', 'verify', 'rollback')) OR (event_type = 'auth.decision' AND outcome = 'rejected')) ORDER BY _timestamp DESC LIMIT 100",
+              "customQuery": true,
+              "fields": {
+                "stream": "ifritah_logs_v1",
+                "stream_type": "logs",
+                "x": [
+                  {
+                    "label": "event_time",
+                    "alias": "event_time",
+                    "column": "event_time",
+                    "aggregationFunction": null
+                  }
+                ],
+                "y": [
+                  {
+                    "label": "outcome",
+                    "alias": "outcome",
+                    "column": "outcome",
+                    "aggregationFunction": null
+                  }
+                ],
+                "z": [],
+                "breakdown": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": ""
+              }
+            }
+          ],
+          "layout": {
+            "x": 0,
+            "y": 54,
+            "w": 48,
+            "h": 12,
+            "i": 7
+          }
+        },
+        {
+          "id": "resource-health",
+          "type": "line",
+          "title": "Container CPU health",
+          "description": "Bounded container CPU ratio by approved role.",
+          "config": {
+            "show_legends": true,
+            "legends_position": "bottom",
+            "unit": "percent",
+            "unit_custom": null
+          },
+          "queryType": "promql",
+          "queries": [
+            {
+              "query": "100 * avg by (container_role) (ifritah_container_cpu_usage_ratio)",
+              "customQuery": true,
+              "vrlFunctionQuery": "",
+              "fields": {
+                "stream": "ifritah_container_cpu_usage_ratio",
+                "stream_type": "metrics",
+                "x": [],
+                "y": [],
+                "z": [],
+                "breakdown": [],
+                "promql_labels": [],
+                "promql_operations": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": "{{container_role}}",
+                "query_label": "",
+                "step_value": null
+              }
+            }
+          ],
+          "layout": {
+            "x": 0,
+            "y": 66,
+            "w": 48,
+            "h": 12,
+            "i": 8
+          }
+        },
+        {
+          "id": "memory-health",
+          "type": "line",
+          "title": "Container memory health",
+          "description": "Container working set by approved role.",
+          "config": {
+            "show_legends": true,
+            "legends_position": "bottom",
+            "unit": "bytes",
+            "unit_custom": null
+          },
+          "queryType": "promql",
+          "queries": [
+            {
+              "query": "sum by (container_role) (ifritah_container_memory_working_set_bytes)",
+              "customQuery": true,
+              "vrlFunctionQuery": "",
+              "fields": {
+                "stream": "ifritah_container_memory_working_set_bytes",
+                "stream_type": "metrics",
+                "x": [],
+                "y": [],
+                "z": [],
+                "breakdown": [],
+                "promql_labels": [],
+                "promql_operations": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": "{{container_role}}",
+                "query_label": "",
+                "step_value": null
+              }
+            }
+          ],
+          "layout": {
+            "x": 0,
+            "y": 78,
+            "w": 48,
+            "h": 12,
+            "i": 10
+          }
+        },
+        {
+          "id": "disk-health",
+          "type": "line",
+          "title": "Host filesystem availability",
+          "description": "Available bytes for deployment filesystems; host metrics require Linux node-exporter mounts.",
+          "config": {
+            "show_legends": true,
+            "legends_position": "bottom",
+            "unit": "bytes",
+            "unit_custom": null
+          },
+          "queryType": "promql",
+          "queries": [
+            {
+              "query": "min by (mountpoint) (node_filesystem_avail_bytes)",
+              "customQuery": true,
+              "vrlFunctionQuery": "",
+              "fields": {
+                "stream": "node_filesystem_avail_bytes",
+                "stream_type": "metrics",
+                "x": [],
+                "y": [],
+                "z": [],
+                "breakdown": [],
+                "promql_labels": [],
+                "promql_operations": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": "{{mountpoint}}",
+                "query_label": "",
+                "step_value": null
+              }
+            }
+          ],
+          "layout": {
+            "x": 0,
+            "y": 90,
+            "w": 48,
+            "h": 12,
+            "i": 11
+          }
+        },
+        {
+          "id": "restart-pressure",
+          "type": "table",
+          "title": "Container restart pressure",
+          "description": "Recent restart counters by bounded service and container role.",
+          "config": {
+            "show_legends": false,
+            "legends_position": null,
+            "unit": null,
+            "unit_custom": null,
+            "promql_table_mode": "all"
+          },
+          "queryType": "promql",
+          "queries": [
+            {
+              "query": "sum by (container_role) (rate(ifritah_container_restarts_total[10m]))",
+              "customQuery": true,
+              "vrlFunctionQuery": "",
+              "fields": {
+                "stream": "ifritah_container_restarts_total",
+                "stream_type": "metrics",
+                "x": [],
+                "y": [],
+                "z": [],
+                "breakdown": [],
+                "promql_labels": [],
+                "promql_operations": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": "{{container_role}}",
+                "query_label": "",
+                "step_value": null
+              }
+            }
+          ],
+          "layout": {
+            "x": 0,
+            "y": 102,
+            "w": 48,
+            "h": 12,
+            "i": 9
+          }
+        },
+        {
+          "id": "telemetry-pipeline",
+          "type": "line",
+          "title": "Collector drops and queue pressure",
+          "description": "Dedicated health-path view for gateway drops and durable queue pressure.",
+          "config": {
+            "show_legends": true,
+            "legends_position": "bottom",
+            "unit": "short",
+            "unit_custom": null
+          },
+          "queryType": "promql",
+          "queries": [
+            {
+              "query": "sum(increase(ifritah_gateway_dropped_records_total[10m])) + sum(ifritah_gateway_queue_files)",
+              "customQuery": true,
+              "vrlFunctionQuery": "",
+              "fields": {
+                "stream": "ifritah_gateway_dropped_records_total",
+                "stream_type": "metrics",
+                "x": [],
+                "y": [],
+                "z": [],
+                "breakdown": [],
+                "promql_labels": [],
+                "promql_operations": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": "",
+                "query_label": "",
+                "step_value": null
+              }
+            }
+          ],
+          "layout": {
+            "x": 0,
+            "y": 114,
+            "w": 48,
+            "h": 12,
+            "i": 12
+          }
+        },
+        {
+          "id": "openobserve-health",
+          "type": "table",
+          "title": "Telemetry gateway health",
+          "description": "Dedicated health-path heartbeat for the private telemetry gateway.",
+          "config": {
+            "show_legends": false,
+            "legends_position": null,
+            "unit": null,
+            "unit_custom": null
+          },
+          "queryType": "promql",
+          "queries": [
+            {
+              "query": "max by (signal) (ifritah_gateway_up)",
+              "customQuery": true,
+              "vrlFunctionQuery": "",
+              "fields": {
+                "stream": "ifritah_gateway_up",
+                "stream_type": "metrics",
+                "x": [],
+                "y": [],
+                "z": [],
+                "breakdown": [],
+                "promql_labels": [],
+                "promql_operations": [],
+                "filter": {
+                  "filterType": "group",
+                  "logicalOperator": "AND",
+                  "conditions": []
+                }
+              },
+              "config": {
+                "promql_legend": "",
+                "query_label": "",
+                "step_value": null
+              }
+            }
+          ],
+          "layout": {
+            "x": 0,
+            "y": 126,
+            "w": 48,
+            "h": 12,
+            "i": 13
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -3,9 +3,9 @@ name: Linux release gate
 on:
   # `branches` selects the PR base branch, not the contributor's head branch.
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   push:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
 
 jobs:
@@ -40,6 +40,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          bash scripts/tests/test-tenant-env-allowlist.sh
           bash scripts/tests/test-reconcile-runtime.sh
           bash scripts/tests/test-tenant-provenance.sh
           bash scripts/tests/test-runtime-probes.sh
@@ -48,6 +49,42 @@ jobs:
       - name: Check deployment contracts
         shell: bash
         run: bash scripts/tests/test-release-contract.sh
+
+      - name: Check deployment logging contracts
+        shell: bash
+        run: bash scripts/tests/test-logging-contract.sh
+
+      - name: Check observability provisioning contracts
+        shell: bash
+        run: bash scripts/tests/test-observability-provisioning.sh
+
+      - name: Check OpenObserve deployment profile contracts
+        shell: bash
+        run: bash scripts/tests/test-openobserve-profile.sh
+
+      - name: Check OpenObserve UI provisioning contracts
+        shell: bash
+        run: bash scripts/tests/test-openobserve-provisioning.sh
+
+      - name: Check OpenObserve provisioning fail-closed regressions
+        shell: bash
+        run: bash scripts/tests/test-openobserve-provisioning-fail-closed.sh
+
+      - name: Check OpenObserve collector and resource contracts
+        shell: bash
+        run: bash scripts/tests/test-openobserve-pipeline.sh
+
+      - name: Check OpenObserve health routing contracts
+        shell: bash
+        run: bash scripts/tests/test-openobserve-health-routing.sh
+
+      - name: Check OpenObserve tenant application wiring
+        shell: bash
+        run: bash scripts/tests/test-openobserve-app-wiring.sh
+
+      - name: Check OpenObserve pilot runbook contracts
+        shell: bash
+        run: bash scripts/tests/test-openobserve-runbook.sh
 
   dashboard-release-gate:
     name: Dashboard test, vet, and build

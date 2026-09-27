@@ -21,7 +21,8 @@
 #   --backend-port <port>     Port the backend listens on (default: 3000)
 #   --frontend-port <port>    Port the frontend listens on (default: 80)
 #   --no-database             Skip database creation
-#   --env KEY=VALUE           Set env var (repeatable)
+#   --env KEY=VALUE           Set application env var (repeatable; reserved
+#                             deployment keys are rejected; see REQUIREMENTS.md)
 #   --git-only                Create apps without deploying (deploy via git push)
 #   --dry-run                 Show plan without executing
 #   --migrate <cmd>           Run migration after initial deploy (e.g. "npm run migrate")
@@ -51,6 +52,15 @@ log()   { echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[✗]${NC} $*" >&2; }
 info()  { echo -e "${BLUE}[i]${NC} $*"; }
+
+# MySQL's CLI has no bind-parameter mode for CREATE USER/ALTER USER. Keep the
+# password in a SQL string literal, doubling quotes and disabling backslash
+# escapes for this connection so existing passwords are passed byte-for-byte.
+mysql_password_sql_literal() {
+    local password="$1"
+    password="${password//\'/\'\'}"
+    printf "'%s'" "$password"
+}
 
 # ---- Load config ----
 CONFIG_FILE="${CONFIG_FILE:-$PROJECT_DIR/config.env}"
@@ -113,6 +123,31 @@ env_value() {
         fi
     done
     return 0
+}
+
+redact_env_var() {
+    local entry="$1" key value normalized_key
+    if [[ "$entry" != *=* ]]; then
+        printf '%s' "$entry"
+        return 0
+    fi
+
+    key="${entry%%=*}"
+    value="${entry#*=}"
+    normalized_key="${key^^}"
+    case "$normalized_key" in
+        *PASSWORD*|*PASSWD*|*TOKEN*|*SECRET*|*KEY*|*CREDENTIAL*|*AUTH*|*COOKIE*|*SESSION*|*DSN*|*DATABASE_URL*)
+            # Keep the dashboard's existing *** redaction marker.
+            printf '%s=***' "$key"
+            ;;
+        *)
+            if [[ "$value" == *"://"*"@"* ]]; then
+                printf '%s=***' "$key"
+            else
+                printf '%s' "$entry"
+            fi
+            ;;
+    esac
 }
 
 validate_docker_network_name() {
@@ -233,7 +268,11 @@ while [[ $# -gt 0 ]]; do
         --backend-port)   BACKEND_PORT="$2"; shift 2 ;;
         --frontend-port)  FRONTEND_PORT="$2"; shift 2 ;;
         --no-database)    NO_DATABASE=true; shift ;;
-        --env)            ENV_VARS+=("$2"); shift 2 ;;
+        --env)
+            [ "$#" -ge 2 ] || { error "--env requires KEY=VALUE"; exit 1; }
+            ENV_VARS+=("$2")
+            shift 2
+            ;;
         --git-only)       GIT_ONLY=true; shift ;;
         --dry-run)        DRY_RUN=true; shift ;;
         --update)         FORCE_UPDATE=true; shift ;;
@@ -251,6 +290,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if ! validate_tenant_env_overrides "${ENV_VARS[@]}"; then
+    error "Refusing invalid or reserved --env override."
+    exit 1
+fi
 
 # ---- Validate ----
 if [ -z "$TENANT_NAME" ]; then
@@ -479,6 +523,7 @@ info "  Domain:         $TENANT_DOMAIN"
 info "  Backend app:    $BACKEND_APP  → internal only (${BACKEND_APP}.web:${BACKEND_PORT})"
 info "  Frontend app:   $FRONTEND_APP → $TENANT_DOMAIN"
 info "  Docker network: $TENANT_NETWORK"
+info "  OpenObserve telemetry: ${OPENOBSERVE_TENANT_TELEMETRY_ENABLED:-false}"
 info "  Backend port:   $BACKEND_PORT"
 info "  Frontend port:  $FRONTEND_PORT"
 info "  Storage:        $STORAGE_ROOT/$TENANT_NAME/{uploads,data}"
@@ -497,7 +542,7 @@ if $GIT_ONLY; then
     info "  Deploy method:  git push (no image deploy now)"
 fi
 for ev in "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; do
-    info "  Env var:        $ev"
+    info "  Env var:        $(redact_env_var "$ev")"
 done
 echo ""
 
@@ -660,6 +705,7 @@ if ! $NO_DATABASE; then
         if [ -z "$TENANT_DB_PASS" ]; then
             TENANT_DB_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)
         fi
+        TENANT_DB_PASS_SQL="$(mysql_password_sql_literal "$TENANT_DB_PASS")"
 
         log "Creating MySQL database: $TENANT_DB_NAME (user: $TENANT_DB_USER@'$MYSQL_TENANT_HOST')"
 
@@ -672,11 +718,14 @@ if ! $NO_DATABASE; then
             info "[dev-diag] SQL: DROP @'localhost'; CREATE/ALTER @'${MYSQL_TENANT_HOST}'; GRANT ON ${TENANT_DB_NAME}.*"
             set +e
         fi
-        run_mysql <<SQLEOF
+        # Binary mode prevents the mysql batch client from interpreting
+        # backslash commands if a reused password contains them.
+        run_mysql --binary-mode <<SQLEOF
+SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'NO_BACKSLASH_ESCAPES');
 CREATE DATABASE IF NOT EXISTS \`${TENANT_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 DROP USER IF EXISTS '${TENANT_DB_USER}'@'localhost';
-CREATE USER IF NOT EXISTS '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY '${TENANT_DB_PASS}';
-ALTER USER '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY '${TENANT_DB_PASS}';
+CREATE USER IF NOT EXISTS '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY ${TENANT_DB_PASS_SQL};
+ALTER USER '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY ${TENANT_DB_PASS_SQL};
 GRANT ALL PRIVILEGES ON \`${TENANT_DB_NAME}\`.* TO '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}';
 SQLEOF
         _mysql_rc=$?
@@ -747,6 +796,12 @@ SQLEOF
         fi
     fi
 fi
+
+# ---- 7b. Optional OpenObserve application wiring --------------------------
+# This is deliberately after the normal tenant/database environment setup so
+# an enabled pilot wins over a user-supplied OTEL endpoint, while the helper
+# still fails open if Docker or the collector network is unavailable.
+openobserve_reconcile_tenant_apps "$TENANT_NAME" "$BACKEND_APP" "$FRONTEND_APP" || true
 
 # ---- 8. Health checks ----
 # Modern Dokku (>= 0.30) uses an app-root CHECKS file or app.json for HTTP

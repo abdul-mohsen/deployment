@@ -158,6 +158,41 @@ Rules learned the hard way:
 
 ---
 
+### Tenant `--env` overrides
+
+`create-tenant.sh` and `update-tenant.sh` accept repeatable `--env
+KEY=VALUE` flags for tenant **application** settings. The scripts keep this
+surface open for new application settings rather than maintaining a brittle
+application allow-list. `DATABASE_URL`, the documented modern `DB_*`
+connection keys, the legacy backend database keys (`HOST`, `DBUSER`,
+`PASSWORD`, `DBNAME`), `ADMIN_*`/`MANAGER_*` seed values, `COMPANY_NAME`, and
+arbitrary application keys such as `FEATURE_FLAG` remain valid.
+
+Before any Dokku command runs, the scripts reject reserved deployment keys:
+
+- **Control plane and runtime identity:** `APP_*`,
+  `AUTO_BACKUP_BEFORE_REDEPLOY`, `AUTO_REDEPLOY_DISABLED`, `BACKEND_IMAGE`,
+  `BASE_DOMAIN`, `BASEURL`, `BACKUP_DIR`, `DASHBOARD_*`, `DEPLOY_*`,
+  `DEPLOY_ENV`, `DEV_TAG`, `DEV_TENANT`, `DOCKERHUB_*`,
+  `IMAGE_PULL_POLICY`, `LOG_DIR`, `MSG_HOST`, `MSG_PORT`, `NATS_URL`,
+  `NGINX_*`, `PORT`, `PUBLIC_PROTOCOL`, `PULL_TAG`, `SERVER_PORT`,
+  `STORAGE_ROOT`, `TENANT_APP_NETWORK`, `TENANT_ID`,
+  `TENANT_IMAGE_PULL_POLICY`, `TENANT_NAME_PREFIX`, `TENANT_NETWORK`,
+  `TENANT_PROVENANCE_*`, `TENANT_STATE_DIR`, `TENANT_VERIFY_*`, and
+  `WEBHOOK_SECRET`.
+- **Database administration:** `MYSQL_*`, `MYSQL_PWD`, and `DB_ADMIN_*`.
+- **Migration controls:** `MIGRATE_CMD`, `MIGRATION_*`,
+  `TENANT_SCHEMA_*`, `TENANT_MIGRATIONS_*`,
+  `TENANT_IGNORED_SCHEMA_FILES`, and `BACKUP_BEFORE_MIGRATION`.
+- **Docker execution:** `DOCKER_*` and `DOKKU_*`.
+- **Telemetry and telemetry secrets:** `OPENOBSERVE_*`, `OTEL_*`, and
+  `METRICS_TOKEN`.
+
+Keys must match shell environment-name syntax (`[A-Za-z_][A-Za-z0-9_]*`).
+Only the key is inspected; values may contain `=`. Reserved values must be
+provided through the operator-owned `config.env`/observability configuration,
+not through a tenant `--env` override.
+
 ## 6. Backend container env (LEGACY names — required)
 
 The `ifritah-go` backend reads the legacy variable names below. Setting only

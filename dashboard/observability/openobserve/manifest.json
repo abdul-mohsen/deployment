@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "provisioning_version": "2026-09-20",
+  "product": "openobserve",
+  "tested_image": "public.ecr.aws/zinclabs/openobserve:v1.0.3",
+  "access": {
+    "audience": "operators",
+    "dashboard_proxying": false,
+    "credentials_source": "operator-managed OpenObserve credentials",
+    "notification_credentials_source": "external OpenObserve destination or notification relay"
+  },
+  "endpoint": {
+    "placeholder": "${OPENOBSERVE_ENDPOINT}",
+    "api_prefix": "/api",
+    "organization_placeholder": "${OPENOBSERVE_ORG}"
+  },
+  "retention": {
+    "mode": "per_stream",
+    "requires_operator_setting": "OBS_OPENOBSERVE_IGNORE_STREAM_RETENTION=false",
+    "note": "Per-stream retention stays enabled by default; set the variable to true only for an approved global-retention override."
+  },
+  "streams_file": "streams.json",
+  "dashboard_file": "dashboards/ifritah-operator.json",
+  "saved_views_file": "saved-views.json",
+  "alerts_file": "alerts.json",
+  "notification_example_file": "notifications.example.json",
+  "apply_script": "apply-openobserve.sh",
+  "streams": [
+    {
+      "name": "ifritah_logs_v1",
+      "type": "logs",
+      "retention_days": 14
+    },
+    {
+      "name": "ifritah_traces_v1",
+      "type": "traces",
+      "retention_days": 7
+    }
+  ],
+  "health_signal": {
+    "ingress_path": "/v1/health",
+    "signal_type": "metrics",
+    "query_mode": "promql",
+    "retention_days": 15,
+    "metric_name_prefixes": [
+      "ifritah_gateway_",
+      "alloy_",
+      "otelcol_",
+      "prometheus_"
+    ],
+    "note": "Health metrics use the dedicated Alloy health pipeline and gateway queue; OpenObserve stores them in native metric-family streams rather than a synthetic health log stream."
+  },
+  "metric_stream_policy": {
+    "retention_days": 15,
+    "max_query_range": 24,
+    "approved_metric_families": {
+      "backend": [
+        "ifritah_http_requests_total",
+        "ifritah_http_request_duration_seconds",
+        "up",
+        "scrape_duration_seconds",
+        "scrape_samples_scraped",
+        "scrape_samples_post_metric_relabeling",
+        "scrape_series_added",
+        "scrape_timeout_seconds"
+      ],
+      "resource": [
+        "node_cpu_seconds_total",
+        "node_memory_MemTotal_bytes",
+        "node_memory_MemAvailable_bytes",
+        "node_memory_MemFree_bytes",
+        "node_memory_Buffers_bytes",
+        "node_memory_Cached_bytes",
+        "node_filesystem_avail_bytes",
+        "node_filesystem_free_bytes",
+        "node_filesystem_size_bytes",
+        "node_network_receive_bytes_total",
+        "node_network_transmit_bytes_total",
+        "node_network_up",
+        "ifritah_container_cpu_usage_ratio",
+        "ifritah_container_memory_working_set_bytes",
+        "ifritah_container_restarts_total",
+        "ifritah_container_network_receive_bytes_total",
+        "ifritah_container_network_transmit_bytes_total",
+        "ifritah_container_running",
+        "ifritah_container_count",
+        "ifritah_resource_exporter_up",
+        "ifritah_resource_exporter_allowlisted_containers",
+        "ifritah_resource_exporter_scrape_errors_total",
+        "ifritah_resource_exporter_last_success_timestamp_seconds",
+        "up",
+        "scrape_duration_seconds",
+        "scrape_samples_scraped",
+        "scrape_samples_post_metric_relabeling",
+        "scrape_series_added",
+        "scrape_timeout_seconds"
+      ],
+      "health": [
+        "alloy_build_info",
+        "alloy_component_controller_running_components",
+        "alloy_component_controller_component_health",
+        "alloy_component_controller_evaluation_errors_total",
+        "alloy_component_controller_evaluation_latency_seconds",
+        "alloy_component_controller_evaluation_total",
+        "otelcol_exporter_sent_metric_points",
+        "otelcol_exporter_send_failed_metric_points",
+        "otelcol_receiver_accepted_metric_points",
+        "otelcol_receiver_refused_metric_points",
+        "otelcol_processor_accepted_metric_points",
+        "otelcol_processor_dropped_metric_points",
+        "ifritah_gateway_up",
+        "ifritah_gateway_queue_bytes",
+        "ifritah_gateway_queue_files",
+        "ifritah_gateway_enqueued_records_total",
+        "ifritah_gateway_received_bytes_total",
+        "ifritah_gateway_dropped_records_total",
+        "ifritah_gateway_forwarded_records_total",
+        "ifritah_gateway_forward_failures_total",
+        "ifritah_gateway_auth_blocked",
+        "ifritah_gateway_last_success_timestamp_seconds",
+        "ifritah_gateway_oversized_payloads_total",
+        "ifritah_gateway_queue_write_errors_total",
+        "up",
+        "scrape_duration_seconds",
+        "scrape_samples_scraped",
+        "scrape_samples_post_metric_relabeling",
+        "scrape_series_added",
+        "scrape_timeout_seconds"
+      ]
+    },
+    "query_mode": "promql",
+    "note": "Native OpenObserve metric streams are named after metric families; only the exact approved backend, resource, and health families are accepted by the Prometheus-to-OTel paths, and dashboards and alerts use PromQL."
+  },
+  "operator_workflows": [
+    "request and trace correlation",
+    "5xx, panic, exception, and authentication investigation",
+    "migration and deployment failure investigation",
+    "service error and latency review",
+    "host and container CPU, memory, disk, and restart review",
+    "collector drops, lag, queue, and parse health",
+    "OpenObserve health and ingestion review",
+    "bounded saved searches and alert templates"
+  ],
+  "notification_destination_env": "OPENOBSERVE_ALERT_DESTINATION_NAME"
+}

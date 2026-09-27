@@ -242,10 +242,26 @@ openssl rand -hex 32
 ## Run locally (dev)
 
 ```sh
-# dev-up.sh derives SCRIPTS_HOST_PATH from this checkout for the sidecar runner.
+# First run: create the ignored OpenObserve credentials file and edit its
+# operator credentials/token.
+cp observability/openobserve.env.example observability/openobserve.env
+chmod 600 observability/openobserve.env
+
+# dev-up.sh derives SCRIPTS_HOST_PATH, rebuilds the dashboard, and restarts
+# the dashboard plus the OpenObserve profile in one command.
 bash ./dev-up.sh
-# UI:  http://localhost:8088
+# Dashboard:   http://localhost:8088
+# OpenObserve: http://127.0.0.1:5080
 # Login: admin / admin   (override via ADMIN_USER / ADMIN_PASSWORD_HASH env)
+```
+
+The OpenObserve services are defined in
+`docker-compose.openobserve.yml`, not `docker-compose.dev.yml`. The script
+starts them with the `openobserve` profile. List their status with:
+
+```sh
+docker compose --env-file observability/openobserve.env \
+  -f docker-compose.openobserve.yml --profile openobserve ps
 ```
 
 To invoke Compose directly, provide the host checkout path explicitly:

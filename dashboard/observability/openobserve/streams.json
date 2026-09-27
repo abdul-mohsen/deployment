@@ -1,0 +1,186 @@
+{
+  "schema_version": 1,
+  "streams": [
+    {
+      "name": "ifritah_logs_v1",
+      "type": "logs",
+      "retention_days": 14,
+      "create": {
+        "fields": [],
+        "settings": {
+          "data_retention": 14,
+          "max_query_range": 168,
+          "store_original_data": false,
+          "index_fields": [
+            "event_type",
+            "service_name",
+            "deployment_environment",
+            "request_id",
+            "trace_id",
+            "operation_id",
+            "tenant_id",
+            "error_code",
+            "error_type",
+            "outcome",
+            "status_class",
+            "route",
+            "deployment_stage",
+            "script"
+          ],
+          "full_text_search_keys": [
+            "event_type",
+            "operation",
+            "error_code",
+            "error_type"
+          ]
+        }
+      },
+      "settings": {
+        "data_retention": 14
+      },
+      "search_fields": [
+        "request_id",
+        "trace_id",
+        "tenant_id",
+        "operation_id",
+        "service_name",
+        "event_type",
+        "error_code"
+      ]
+    },
+    {
+      "name": "ifritah_traces_v1",
+      "type": "traces",
+      "retention_days": 7,
+      "create": {
+        "fields": [],
+        "settings": {
+          "data_retention": 7,
+          "max_query_range": 168,
+          "store_original_data": false,
+          "index_fields": [
+            "trace_id",
+            "span_id",
+            "parent_span_id",
+            "service_name",
+            "deployment_environment",
+            "operation",
+            "route",
+            "status_code",
+            "duration_ms",
+            "error_type"
+          ],
+          "full_text_search_keys": [
+            "service_name",
+            "operation",
+            "error_type"
+          ]
+        }
+      },
+      "settings": {
+        "data_retention": 7
+      },
+      "search_fields": [
+        "trace_id",
+        "span_id",
+        "service_name",
+        "operation",
+        "route",
+        "duration_ms"
+      ]
+    }
+  ],
+  "health_signal": {
+    "ingress_path": "/v1/health",
+    "signal_type": "metrics",
+    "query_mode": "promql",
+    "retention_days": 15,
+    "metric_name_prefixes": [
+      "ifritah_gateway_",
+      "alloy_",
+      "otelcol_",
+      "prometheus_"
+    ],
+    "note": "Health metrics use a dedicated Alloy pipeline and gateway queue, then land in native OpenObserve metric-family streams. No synthetic health log stream is created."
+  },
+  "metric_stream_policy": {
+    "retention_days": 15,
+    "max_query_range": 24,
+    "approved_metric_families": {
+      "backend": [
+        "ifritah_http_requests_total",
+        "ifritah_http_request_duration_seconds",
+        "up",
+        "scrape_duration_seconds",
+        "scrape_samples_scraped",
+        "scrape_samples_post_metric_relabeling",
+        "scrape_series_added",
+        "scrape_timeout_seconds"
+      ],
+      "resource": [
+        "node_cpu_seconds_total",
+        "node_memory_MemTotal_bytes",
+        "node_memory_MemAvailable_bytes",
+        "node_memory_MemFree_bytes",
+        "node_memory_Buffers_bytes",
+        "node_memory_Cached_bytes",
+        "node_filesystem_avail_bytes",
+        "node_filesystem_free_bytes",
+        "node_filesystem_size_bytes",
+        "node_network_receive_bytes_total",
+        "node_network_transmit_bytes_total",
+        "node_network_up",
+        "ifritah_container_cpu_usage_ratio",
+        "ifritah_container_memory_working_set_bytes",
+        "ifritah_container_restarts_total",
+        "ifritah_container_network_receive_bytes_total",
+        "ifritah_container_network_transmit_bytes_total",
+        "ifritah_container_running",
+        "ifritah_container_count",
+        "ifritah_resource_exporter_up",
+        "ifritah_resource_exporter_allowlisted_containers",
+        "ifritah_resource_exporter_scrape_errors_total",
+        "ifritah_resource_exporter_last_success_timestamp_seconds",
+        "up",
+        "scrape_duration_seconds",
+        "scrape_samples_scraped",
+        "scrape_samples_post_metric_relabeling",
+        "scrape_series_added",
+        "scrape_timeout_seconds"
+      ],
+      "health": [
+        "alloy_build_info",
+        "alloy_component_controller_running_components",
+        "alloy_component_controller_component_health",
+        "alloy_component_controller_evaluation_errors_total",
+        "alloy_component_controller_evaluation_latency_seconds",
+        "alloy_component_controller_evaluation_total",
+        "otelcol_exporter_sent_metric_points",
+        "otelcol_exporter_send_failed_metric_points",
+        "otelcol_receiver_accepted_metric_points",
+        "otelcol_receiver_refused_metric_points",
+        "otelcol_processor_accepted_metric_points",
+        "otelcol_processor_dropped_metric_points",
+        "ifritah_gateway_up",
+        "ifritah_gateway_queue_bytes",
+        "ifritah_gateway_queue_files",
+        "ifritah_gateway_enqueued_records_total",
+        "ifritah_gateway_received_bytes_total",
+        "ifritah_gateway_dropped_records_total",
+        "ifritah_gateway_forwarded_records_total",
+        "ifritah_gateway_forward_failures_total",
+        "ifritah_gateway_auth_blocked",
+        "ifritah_gateway_last_success_timestamp_seconds",
+        "ifritah_gateway_oversized_payloads_total",
+        "ifritah_gateway_queue_write_errors_total",
+        "up",
+        "scrape_duration_seconds",
+        "scrape_samples_scraped",
+        "scrape_samples_post_metric_relabeling",
+        "scrape_series_added",
+        "scrape_timeout_seconds"
+      ]
+    },
+    "note": "OpenObserve native OTLP metrics create one metrics stream per metric family. Only the exact approved families above enter the backend, resource, and health Prometheus-to-OTel paths; retention is applied only to existing streams whose names exactly match this policy."
+  }
+}

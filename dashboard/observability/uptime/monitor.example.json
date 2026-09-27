@@ -1,0 +1,18 @@
+{
+  "provider": "replace-with-approved-uptime-provider",
+  "monitor": {
+    "name": "ifritah-public-health",
+    "url": "https://<tenant>.<base-domain>/healthz",
+    "method": "GET",
+    "interval_seconds": 60,
+    "timeout_seconds": 10,
+    "expected_status": 200,
+    "expected_body": "ok",
+    "follow_redirects": false,
+    "verify_tls": true
+  },
+  "credentials": {
+    "api_token_env": "UPTIME_API_TOKEN",
+    "monitor_id_env": "UPTIME_MONITOR_ID"
+  }
+}

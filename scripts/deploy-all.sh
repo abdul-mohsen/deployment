@@ -29,10 +29,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-log()   { echo -e "${GREEN}[+]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-error() { echo -e "${RED}[✗]${NC} $*" >&2; }
-info()  { echo -e "${BLUE}[i]${NC} $*"; }
+log()   { deployment_log INFO "$*"; echo -e "${GREEN}[+]${NC} $*"; }
+warn()  { deployment_log WARN "$*"; echo -e "${YELLOW}[!]${NC} $*"; }
+error() { deployment_log ERROR "$*"; echo -e "${RED}[✗]${NC} $*" >&2; }
+info()  { deployment_log INFO "$*"; echo -e "${BLUE}[i]${NC} $*"; }
 
 CONFIG_FILE="$PROJECT_DIR/config.env"
 
@@ -55,6 +55,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+deployment_init_logging
 
 if [ -z "$IMAGE" ]; then
     echo "Usage: $0 <image> [--type backend|frontend] [--tenant <name>] [--skip-canary]"
@@ -120,6 +121,7 @@ get_tenant_override() {
 deploy_one() {
     local app="$1"
     local tenant="${app%${SUFFIX}}"
+    deployment_set_tenant "$tenant"
     local image="$IMAGE"
     local previous_image previous_identity backup_info="" backup_id="" backup_artifact=""
     local migrations_attempted=false
@@ -380,6 +382,7 @@ fi
 APP_COUNT=$(echo "$APPS" | wc -l)
 
 # Repair persisted tenant routing before pulling or deploying the image.
+# The shared routing helper also reconciles opt-in private OpenObserve wiring.
 # A failed pull/rebuild must not prevent an existing tenant from moving to the
 # configured BASE_DOMAIN.
 while IFS= read -r app; do
@@ -411,7 +414,9 @@ FIRST=$(echo "$APPS" | head -1)
 REST=$(echo "$APPS" | tail -n +2)
 
 log "=== Canary: ${FIRST} ==="
-if ! deploy_one "$FIRST"; then
+if deployment_run_boundary "deploy_one" deploy_one "$FIRST"; then
+    :
+else
     error "Canary deploy failed — aborting."
     exit 1
 fi
@@ -443,7 +448,7 @@ if [ -n "$REST" ]; then
     FAILED=0
     while IFS= read -r app; do
         log "=== Deploying: ${app} ==="
-        if deploy_one "$app"; then
+        if deployment_run_boundary "deploy_one" deploy_one "$app"; then
             log "${app} ✓"
         else
             error "${app} FAILED"

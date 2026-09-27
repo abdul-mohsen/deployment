@@ -6,8 +6,8 @@ logging {
 }
 
 // Docker discovery is split by source so the service and container-role
-// identity is bounded before the log line is normalized. No arbitrary
-// container is accepted by the relabel rules below.
+// identity is bounded before the log line is normalized. Dokku container names
+// vary by version, so app-name/process-type labels are authoritative.
 discovery.docker "dashboard" {
 	host             = "http://docker-api-filter-openobserve:2375"
 	refresh_interval = "30s"
@@ -23,10 +23,8 @@ discovery.docker "backend" {
 	refresh_interval = "30s"
 
 	filter {
-		name = "name"
-		// Docker's name filter is substring-based; the relabel rule below
-		// performs the strict tenant-app match before logs are tailed.
-		values = ["-backend"]
+		name   = "label"
+		values = ["com.dokku.app-name"]
 	}
 }
 
@@ -35,8 +33,8 @@ discovery.docker "frontend" {
 	refresh_interval = "30s"
 
 	filter {
-		name   = "name"
-		values = ["-frontend"]
+		name   = "label"
+		values = ["com.dokku.app-name"]
 	}
 }
 
@@ -64,8 +62,14 @@ discovery.relabel "backend_allowlist" {
 	targets = discovery.docker.backend.targets
 
 	rule {
-		source_labels = ["__meta_docker_container_name"]
-		regex         = "^/?[a-z0-9][a-z0-9-]{0,61}-backend(?:\\.[A-Za-z0-9_.-]+)?$"
+		source_labels = ["__meta_docker_container_label_com_dokku_app_name"]
+		regex         = "^[a-z0-9][a-z0-9-]{0,61}-backend$"
+		action        = "keep"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_dokku_process_type"]
+		regex         = "web"
 		action        = "keep"
 	}
 
@@ -80,8 +84,8 @@ discovery.relabel "backend_allowlist" {
 	}
 
 	rule {
-		source_labels = ["__meta_docker_container_name"]
-		regex         = "^/?([a-z0-9][a-z0-9-]{0,61})-backend(?:\\.[A-Za-z0-9_.-]+)?$"
+		source_labels = ["__meta_docker_container_label_com_dokku_app_name"]
+		regex         = "^([a-z0-9][a-z0-9-]{0,61})-backend$"
 		target_label  = "tenant_id"
 		replacement   = "$1"
 	}
@@ -91,8 +95,14 @@ discovery.relabel "frontend_allowlist" {
 	targets = discovery.docker.frontend.targets
 
 	rule {
-		source_labels = ["__meta_docker_container_name"]
-		regex         = "^/?[a-z0-9][a-z0-9-]{0,61}-frontend(?:\\.[A-Za-z0-9_.-]+)?$"
+		source_labels = ["__meta_docker_container_label_com_dokku_app_name"]
+		regex         = "^[a-z0-9][a-z0-9-]{0,61}-frontend$"
+		action        = "keep"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_dokku_process_type"]
+		regex         = "web"
 		action        = "keep"
 	}
 
@@ -107,8 +117,8 @@ discovery.relabel "frontend_allowlist" {
 	}
 
 	rule {
-		source_labels = ["__meta_docker_container_name"]
-		regex         = "^/?([a-z0-9][a-z0-9-]{0,61})-frontend(?:\\.[A-Za-z0-9_.-]+)?$"
+		source_labels = ["__meta_docker_container_label_com_dokku_app_name"]
+		regex         = "^([a-z0-9][a-z0-9-]{0,61})-frontend$"
 		target_label  = "tenant_id"
 		replacement   = "$1"
 	}
@@ -122,8 +132,8 @@ discovery.relabel "backend_metrics" {
 	targets = discovery.relabel.backend_allowlist.output
 
 	rule {
-		source_labels = ["__meta_docker_container_name"]
-		regex         = "^/?([a-z0-9][a-z0-9-]{0,61}-backend)(?:\\.[A-Za-z0-9_.-]+)?$"
+		source_labels = ["__meta_docker_container_label_com_dokku_app_name"]
+		regex         = "^([a-z0-9][a-z0-9-]{0,61}-backend)$"
 		target_label  = "__address__"
 		replacement   = "$1:8090"
 	}

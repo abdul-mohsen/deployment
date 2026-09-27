@@ -28,16 +28,19 @@ for source in dashboard backend frontend; do
 done
 grep -Fq 'com_ifritah_observability' "$alloy" \
     || fail "dashboard label allow-list is missing"
-grep -Fq 'values = ["-backend"]' "$alloy" \
-    || fail "backend Docker discovery filter is missing"
-grep -Fq 'values = ["-frontend"]' "$alloy" \
-    || fail "frontend Docker discovery filter is missing"
-grep -Fq 'regex         = "^/?[a-z0-9][a-z0-9-]{0,61}-backend' "$alloy" \
-    || fail "backend strict relabel allow-list is missing"
-grep -Fq 'regex         = "^/?[a-z0-9][a-z0-9-]{0,61}-frontend' "$alloy" \
-    || fail "frontend strict relabel allow-list is missing"
+if [ "$(grep -Fc 'values = ["com.dokku.app-name"]' "$alloy")" -lt 2 ]; then
+    fail "Dokku app-label discovery filters are missing"
+fi
+grep -Fq 'source_labels = ["__meta_docker_container_label_com_dokku_app_name"]' "$alloy" \
+    || fail "Dokku app-label relabel source is missing"
+grep -Fq 'regex         = "^[a-z0-9][a-z0-9-]{0,61}-backend$"' "$alloy" \
+    || fail "backend app-label allow-list is missing"
+grep -Fq 'regex         = "^[a-z0-9][a-z0-9-]{0,61}-frontend$"' "$alloy" \
+    || fail "frontend app-label allow-list is missing"
+grep -Fq 'com_dokku_process_type' "$alloy" \
+    || fail "Dokku web process allow-list is missing"
 if [ "$(grep -c 'target_label  = "tenant_id"' "$alloy")" -lt 2 ]; then
-    fail "tenant identity is not derived from backend/frontend container names"
+    fail "tenant identity is not derived from backend/frontend app labels"
 fi
 if [ "$(grep -c 'template = `{{ .tenant_id | default .tenant_input }}`' "$alloy")" -lt 2 ]; then
     fail "backend/frontend log pipelines do not use trusted container tenant identity"

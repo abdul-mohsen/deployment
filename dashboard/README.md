@@ -264,6 +264,16 @@ docker compose --env-file observability/openobserve.env \
   -f docker-compose.openobserve.yml --profile openobserve ps
 ```
 
+For one-command, read-only startup diagnostics:
+
+```sh
+cd ..
+bash scripts/diagnose-openobserve.sh
+```
+
+The diagnostic script prints OpenObserve service status, startup logs, and
+healthcheck output. It does not start, stop, recreate, or print env values.
+
 To invoke Compose directly, provide the host checkout path explicitly:
 
 ```sh

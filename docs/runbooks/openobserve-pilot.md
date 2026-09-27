@@ -104,6 +104,17 @@ docker compose --env-file observability/openobserve.env \
   -f docker-compose.openobserve.yml --profile openobserve ps
 ```
 
+If startup reports `dependency failed to start`, inspect the root
+`openobserve` service rather than the dependent gateway or Alloy services:
+
+```sh
+bash scripts/diagnose-openobserve.sh
+```
+
+This read-only diagnostic prints Compose status, the OpenObserve startup log,
+and the container healthcheck history. It does not print the env file or
+change any service.
+
 Do not paste `docker compose config` output into an issue: it can render
 environment-file values.
 

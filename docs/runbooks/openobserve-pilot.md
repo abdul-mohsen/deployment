@@ -28,6 +28,12 @@ Edit `observability/openobserve.env` and replace
 OpenObserve root-user settings; do not put them in `config.env`, a shell
 history, or this repository.
 
+Set `OPENOBSERVE_TENANT_OTLP_TOKEN` to a separate random printable token.
+The same value must be supplied through the protected deployment `config.env`
+when tenant telemetry is enabled. It is used by Alloy's private OTLP
+receiver for Basic authentication; do not print it with `dokku config:get`,
+place it in a tracked file, or reuse the OpenObserve root password.
+
 The defaults are intentionally conservative:
 
 | Setting | Default | Boundary |
@@ -47,12 +53,11 @@ authenticated TLS reverse-proxy path are in place. The Compose network remains
 internal-only; the gRPC/OTLP port is exposed only to future services on that
 network and is not published to the host.
 
-The ignored env example currently keeps the profile's global retention
-behavior by setting `OBS_OPENOBSERVE_IGNORE_STREAM_RETENTION=true`. Before
-using the stream-specific pilot values below, set
-`OBS_OPENOBSERVE_IGNORE_STREAM_RETENTION=false` in the protected
-`observability/openobserve.env` file and recreate the service. Do not commit
-that file.
+The ignored env example sets
+`OBS_OPENOBSERVE_IGNORE_STREAM_RETENTION=false`, so the stream-specific
+retention values below apply. If an older protected
+`observability/openobserve.env` file still has this setting enabled, change it
+to `false` and recreate the service. Do not commit that file.
 
 ## Pilot safety gates
 
@@ -163,14 +168,20 @@ when a controlled rebuild of both apps is acceptable:
 sudo bash scripts/post-merge-cleanup.sh acme
 ```
 
-The backend receives only private OTLP HTTP trace settings:
-`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://alloy-openobserve:4318`,
+The backend receives only private, authenticated OTLP HTTP trace settings:
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://alloy-openobserve:4318/v1/traces`,
+`OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic ...`,
 `OTEL_TRACES_EXPORTER=otlp`,
 `OTEL_EXPORTER_OTLP_TRACES_INSECURE=true`, service/resource identity, and
 bounded batch/sampling defaults. The frontend receives the same future-ready
 container environment and network attachment, but this does **not** claim that
 browser instrumentation exists. Docker logs continue to arrive through the
 collector's Docker API path; no OTLP log exporter is added to tenant apps.
+The shared OTLP receiver authenticates the deployment token, overwrites
+caller-provided `service.name` with the bounded `ifritah-tenant` identity, and
+does not export caller-provided `tenant.id`. Tenant identity in Docker logs
+comes from the collector's allow-listed container metadata instead of an OTLP
+payload.
 
 Verify the private boundary and backend values:
 
@@ -180,6 +191,9 @@ docker network inspect ifritah-observability-openobserve \
 dokku config:get acme-backend OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
 dokku config:get acme-backend OTEL_TRACES_EXPORTER
 dokku config:get acme-backend OTEL_EXPORTER_OTLP_TRACES_INSECURE
+# Verify the auth key exists without printing its value:
+dokku config:report acme-backend | grep -Fq 'OTEL_EXPORTER_OTLP_HEADERS=' \
+  && echo "OTLP auth header configured"
 docker ps --format '{{.Names}}\t{{.Ports}}' | grep -E '4317|4318' || true
 ```
 
@@ -212,8 +226,10 @@ sudo bash scripts/rollback-tenant.sh acme --type backend \
 Do not remove the named OpenObserve network while any tenant or collector is
 attached. Stop the profile without `--volumes`, detach wired tenants, and
 remove the network only after `docker network inspect` shows no containers.
-The named OpenObserve data and gateway volumes are independent of tenant app
-rollback.
+If Dokku rejects the network setter during disablement, the scripts retain the
+telemetry marker and OTLP configuration and return a failure so the same
+disable operation can be retried safely. The named OpenObserve data and
+gateway volumes are independent of tenant app rollback.
 
 ## Verify collector, queues, and resource signals
 
@@ -281,10 +297,15 @@ The alert bundle preserves the existing request, exception, authentication,
 deployment, latency, collector, and OpenObserve-health templates and adds
 disabled-by-default coverage for container memory, filesystem/free-space,
 container restart loops, host memory and host-metric health,
-resource-exporter health, and telemetry-gateway failures. Resource thresholds
-are conservative pilot defaults (absolute bytes or bounded counter changes);
-operators must tune and review them against the host and container budgets
-before enabling a destination. No alert is enabled by importing the JSON.
+resource-exporter heartbeat/scrape health, and telemetry-gateway
+heartbeat/failure/authentication health. Cumulative counters use bounded
+ten-minute deltas; heartbeat alerts also fire when no healthy sample exists.
+Resource thresholds are conservative pilot defaults (absolute bytes or bounded
+counter changes); operators must tune and review them against the host and
+container budgets before enabling a destination. No alert is enabled by
+importing the JSON. Resource-exporter scrape errors include Docker list,
+inspect, and stats collection failures; investigate those before treating
+missing container metrics as application health.
 
 The script requires `curl`, `python3`, an explicit endpoint, organization, and
 operator credentials. It does not assume dashboard proxying and it never
@@ -309,8 +330,13 @@ deployment dashboard must not proxy these resources to tenant users.
 The default apply creates or updates the four streams, the
 `Ifritah OpenObserve Operations` dashboard, and saved views. Alert templates
 are skipped until an operator configures a destination outside this repository.
-The apply is idempotent by default: it updates the dashboard found by title and
-does not delete an existing dashboard. Leave
+When alert application is explicitly enabled, existing saved views and alerts
+are updated by their API IDs rather than silently skipped. Existing alert
+enablement is preserved unless `OPENOBSERVE_ENABLE_ALERTS=true` and the alert
+name is explicitly selected; the configured destination is always required and
+never created by this script. Listing failures fail closed instead of creating
+duplicates. The apply is idempotent by default: it updates the dashboard found
+by title and does not delete an existing dashboard. Leave
 `OPENOBSERVE_REPLACE_DASHBOARD=false` for normal applies; set it to `true` only
 for an approved replacement that records the old dashboard ID and hash.
 If a change record requires a manual dashboard import, use the OpenObserve

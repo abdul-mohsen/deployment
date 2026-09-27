@@ -141,7 +141,7 @@ PY
     fi
     api_put "$settings_path" "$settings_body" >/dev/null
     echo "  retention applied: $stream_name"
-done < <(python3 "$STREAMS_FILE" <<'PY'
+done < <(python3 - "$STREAMS_FILE" <<'PY'
 import json
 import sys
 
@@ -152,7 +152,7 @@ for item in document["streams"]:
 PY
 )
 
-dashboard_title="$(python3 "$DASHBOARD_FILE" <<'PY'
+dashboard_title="$(python3 - "$DASHBOARD_FILE" <<'PY'
 import json
 import sys
 
@@ -205,11 +205,14 @@ else
     echo "created dashboard: $dashboard_title"
 fi
 
-saved_views="$(api_get "/api/$ORG_PATH/savedviews" || true)"
+if ! saved_views="$(api_get "/api/$ORG_PATH/savedviews")"; then
+    echo "could not list OpenObserve saved views; refusing to create duplicate state" >&2
+    exit 1
+fi
 echo "provisioning saved views"
 while IFS= read -r view_body; do
     view_name="$(printf '%s' "$view_body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["view_name"])')"
-    view_exists="$(printf '%s' "$saved_views" | python3 -c '
+    view_id="$(printf '%s' "$saved_views" | python3 -c '
 import json, sys
 name = sys.argv[1]
 try:
@@ -219,15 +222,25 @@ except Exception:
 def walk(item):
     if isinstance(item, dict):
         if item.get("view_name") == name:
-            return True
-        return any(walk(child) for child in item.values())
+            return item.get("view_id") or item.get("id") or item.get("uuid") or "__MISSING_ID__"
+        for child in item.values():
+            found = walk(child)
+            if found:
+                return found
     if isinstance(item, list):
-        return any(walk(child) for child in item)
-    return False
-print("true" if walk(value) else "false")
+        for child in item:
+            found = walk(child)
+            if found:
+                return found
+    return ""
+print(walk(value))
 ' "$view_name")"
-    if [[ "$view_exists" == "true" ]]; then
-        echo "  exists: $view_name"
+    if [[ "$view_id" == "__MISSING_ID__" ]]; then
+        echo "saved view '$view_name' exists but has no update ID" >&2
+        exit 1
+    elif [[ -n "$view_id" ]]; then
+        api_put "/api/$ORG_PATH/savedviews/$(urlencode "$view_id")" "$view_body" >/dev/null
+        echo "  updated: $view_name"
     else
         api_post "/api/$ORG_PATH/savedviews" "$view_body" >/dev/null
         echo "  created: $view_name"
@@ -308,28 +321,68 @@ PY
 
 if [[ "$APPLY_ALERTS" == "true" && -n "$DESTINATION" ]]; then
     echo "provisioning alert templates"
-    existing_alerts="$(api_get "/api/v2/$ORG_PATH/alerts" || true)"
+    if ! existing_alerts="$(api_get "/api/v2/$ORG_PATH/alerts")"; then
+        echo "could not list OpenObserve alerts; refusing to create duplicate state" >&2
+        exit 1
+    fi
     while IFS= read -r alert_body; do
         alert_name="$(printf '%s' "$alert_body" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')"
-        alert_exists="$(printf '%s' "$existing_alerts" | python3 -c '
+        alert_result="$(printf '%s' "$existing_alerts" | python3 -c '
 import json, sys
-name = sys.argv[1]
+name, template, destination, enable_alerts, selected_names = sys.argv[1:]
 try:
     value = json.load(sys.stdin)
 except Exception:
     value = {}
+selected = {item.strip() for item in selected_names.split(",") if item.strip()}
 def walk(item):
     if isinstance(item, dict):
         if item.get("name") == name:
-            return True
-        return any(walk(child) for child in item.values())
+            return item
+        for child in item.values():
+            found = walk(child)
+            if found is not None:
+                return found
     if isinstance(item, list):
-        return any(walk(child) for child in item)
-    return False
-print("true" if walk(value) else "false")
-' "$alert_name")"
-        if [[ "$alert_exists" == "true" ]]; then
-            echo "  exists: $alert_name"
+        for child in item:
+            found = walk(child)
+            if found is not None:
+                return found
+    return None
+existing = walk(value)
+payload = json.loads(template)
+payload["destinations"] = [destination]
+if existing is None:
+    payload["enabled"] = enable_alerts.lower() == "true" and name in selected
+    alert_id = ""
+else:
+    alert_id = existing.get("id") or existing.get("alert_id") or existing.get("alertId") or ""
+    if not alert_id:
+        print("__MISSING_ID__")
+        raise SystemExit(0)
+    # Updating a definition must not silently disable an operator-enabled
+    # alert. Enabling is opt-in and applies only to explicitly selected names.
+    if enable_alerts.lower() == "true" and name in selected:
+        payload["enabled"] = True
+    else:
+        current_enabled = existing.get("enabled", payload.get("enabled", False))
+        if isinstance(current_enabled, str):
+            current_enabled = current_enabled.lower() == "true"
+        payload["enabled"] = bool(current_enabled)
+    for key in ("folder_id", "owner"):
+        if key in existing and key not in payload:
+            payload[key] = existing[key]
+print(json.dumps({"id": alert_id, "body": payload}, separators=(",", ":")))
+' "$alert_name" "$alert_body" "$DESTINATION" "$ENABLE_ALERTS" "$ALERT_NAMES")"
+        if [[ "$alert_result" == "__MISSING_ID__" ]]; then
+            echo "alert '$alert_name' exists but has no update ID" >&2
+            exit 1
+        fi
+        alert_id="$(printf '%s' "$alert_result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+        alert_body="$(printf '%s' "$alert_result" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["body"], separators=(",", ":")))')"
+        if [[ -n "$alert_id" ]]; then
+            api_put "/api/v2/$ORG_PATH/alerts/$(urlencode "$alert_id")" "$alert_body" >/dev/null
+            echo "  updated alert: $alert_name"
         else
             api_post "/api/v2/$ORG_PATH/alerts" "$alert_body" >/dev/null
             echo "  created alert template: $alert_name"

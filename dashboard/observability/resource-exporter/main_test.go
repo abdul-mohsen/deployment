@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
 
 func TestRoleForContainerUsesOnlyApprovedSources(t *testing.T) {
 	tests := []struct {
@@ -32,5 +37,32 @@ func TestWorkingSetAndCPURatio(t *testing.T) {
 		PreCPUStats: cpuStats{CPUUsage: cpuUsage{TotalUsage: 100}, SystemCPUUsage: 800},
 	}); got != 2 {
 		t.Fatalf("cpuRatio = %v, want 2", got)
+	}
+}
+
+func TestCollectCountsContainerCollectionErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/containers/json":
+			_, _ = writer.Write([]byte(`[{"Id":"container-1","Names":["/acme-backend.1"],"State":"running"}]`))
+		case "/containers/container-1/json", "/containers/container-1/stats":
+			http.Error(writer, "collection failed", http.StatusBadGateway)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newDockerClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exporter := &exporter{client: client}
+	current := exporter.collect(context.Background())
+	if current.scrapeErrors != 2 {
+		t.Fatalf("scrapeErrors = %d, want 2", current.scrapeErrors)
+	}
+	if current.lastErrorMessage != "docker_container_collection_failed" {
+		t.Fatalf("lastErrorMessage = %q, want container collection failure", current.lastErrorMessage)
 	}
 }

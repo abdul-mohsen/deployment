@@ -36,6 +36,12 @@ grep -Fq 'regex         = "^/?[a-z0-9][a-z0-9-]{0,61}-backend' "$alloy" \
     || fail "backend strict relabel allow-list is missing"
 grep -Fq 'regex         = "^/?[a-z0-9][a-z0-9-]{0,61}-frontend' "$alloy" \
     || fail "frontend strict relabel allow-list is missing"
+if [ "$(grep -c 'target_label  = "tenant_id"' "$alloy")" -lt 2 ]; then
+    fail "tenant identity is not derived from backend/frontend container names"
+fi
+if [ "$(grep -c 'template = `{{ .tenant_id }}`' "$alloy")" -lt 2 ]; then
+    fail "backend/frontend log pipelines do not use trusted container tenant identity"
+fi
 grep -Fq 'container_role' "$resource" \
     || fail "resource exporter role aggregation is missing"
 grep -Fq 'tenantContainerPattern' "$resource" \
@@ -57,6 +63,17 @@ grep -Fq 'delete_matching_keys' "$alloy" \
     || fail "OTLP attribute deny-list is missing"
 grep -Fq 'keep_keys(attributes' "$alloy" \
     || fail "OTLP attribute allow-list is missing"
+grep -Fq 'otelcol.auth.basic "tenant"' "$alloy" \
+    || fail "shared OTLP receiver does not require deployment authentication"
+grep -Fq 'password = sys.env("OPENOBSERVE_TENANT_OTLP_TOKEN")' "$alloy" \
+    || fail "shared OTLP receiver token is not deployment-provided"
+grep -Fq 'auth                  = otelcol.auth.basic.tenant.handler' "$alloy" \
+    || fail "OTLP HTTP receiver is not protected by the deployment token"
+grep -Fq 'set(attributes["service.name"], "ifritah-tenant")' "$alloy" \
+    || fail "shared OTLP receiver does not overwrite caller service identity"
+if grep -Fq 'set(attributes["tenant_id"], attributes["tenant.id"])' "$alloy"; then
+    fail "shared OTLP receiver trusts caller-supplied tenant.id"
+fi
 pass "redaction, size, and attribute allow-lists are configured"
 
 grep -Fq 'QUEUE_MAX_BYTES' "$gateway" \
@@ -89,6 +106,8 @@ grep -Fq 'openobserve-gateway:4318/v1/metrics' "$alloy" \
     || fail "metrics do not use the single gateway egress"
 grep -Fq 'openobserve-gateway:4318/v1/traces' "$alloy" \
     || fail "traces do not use the single gateway egress"
+grep -Fq 'OPENOBSERVE_TENANT_OTLP_TOKEN: ${OPENOBSERVE_TENANT_OTLP_TOKEN:?set OPENOBSERVE_TENANT_OTLP_TOKEN in observability/openobserve.env}' "$compose" \
+    || fail "Alloy token is not sourced from a protected operator environment"
 if grep -Fq 'openobserve:5080' "$alloy"; then
     fail "Alloy has a direct OpenObserve egress"
 fi

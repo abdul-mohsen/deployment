@@ -78,6 +78,13 @@ discovery.relabel "backend_allowlist" {
 		target_label = "service_name"
 		replacement  = "ifritah-backend"
 	}
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "^/?([a-z0-9][a-z0-9-]{0,61})-backend(?:\\.[A-Za-z0-9_.-]+)?$"
+		target_label  = "tenant_id"
+		replacement   = "$1"
+	}
 }
 
 discovery.relabel "frontend_allowlist" {
@@ -97,6 +104,13 @@ discovery.relabel "frontend_allowlist" {
 	rule {
 		target_label = "service_name"
 		replacement  = "ifritah-frontend"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "^/?([a-z0-9][a-z0-9-]{0,61})-frontend(?:\\.[A-Za-z0-9_.-]+)?$"
+		target_label  = "tenant_id"
+		replacement   = "$1"
 	}
 }
 
@@ -127,7 +141,7 @@ loki.process "backend" {
 	forward_to = [otelcol.receiver.loki.docker.receiver]
 
 	stage.label_keep {
-		values = ["container_role", "service_name"]
+		values = ["container_role", "service_name", "tenant_id"]
 	}
 
 	stage.docker { }
@@ -309,7 +323,7 @@ loki.process "backend" {
 
 	stage.template {
 		source   = "tenant_candidate"
-		template = `{{ .tenant_id_input | default .tenant_input }}`
+		template = `{{ .tenant_id }}`
 	}
 
 	stage.regex {
@@ -492,7 +506,7 @@ loki.process "frontend" {
 	forward_to = [otelcol.receiver.loki.docker.receiver]
 
 	stage.label_keep {
-		values = ["container_role", "service_name"]
+		values = ["container_role", "service_name", "tenant_id"]
 	}
 
 	stage.docker { }
@@ -674,7 +688,7 @@ loki.process "frontend" {
 
 	stage.template {
 		source   = "tenant_candidate"
-		template = `{{ .tenant_id_input | default .tenant_input }}`
+		template = `{{ .tenant_id }}`
 	}
 
 	stage.regex {
@@ -1232,16 +1246,25 @@ otelcol.receiver.loki "docker" {
 	}
 }
 
+// Tenant OTLP callers must authenticate with the deployment-provided token.
+// The token is deliberately not stored in this tracked configuration.
+otelcol.auth.basic "tenant" {
+	username = "ifritah-tenant"
+	password = sys.env("OPENOBSERVE_TENANT_OTLP_TOKEN")
+}
+
 otelcol.receiver.otlp "private" {
 	grpc {
 		endpoint               = "0.0.0.0:4317"
 		max_recv_msg_size      = "4MiB"
 		max_concurrent_streams = 128
+		auth                   = otelcol.auth.basic.tenant.handler
 	}
 
 	http {
 		endpoint              = "0.0.0.0:4318"
 		max_request_body_size = "4MiB"
+		auth                  = otelcol.auth.basic.tenant.handler
 	}
 
 	output {
@@ -1287,6 +1310,7 @@ otelcol.processor.transform "sanitize" {
 		context    = "resource"
 		statements = [
 			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`set(attributes["service.name"], "ifritah-tenant")`,
 			`keep_keys(attributes, ["service.name", "service.version", "deployment.environment.name", "component", "cluster", "host.role", "container.role", "image.channel"])`,
 			`truncate_all(attributes, 128)`,
 		]
@@ -1295,11 +1319,12 @@ otelcol.processor.transform "sanitize" {
 	trace_statements {
 		context    = "span"
 		statements = [
-			`set(attributes["service_name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil`,
 			`set(attributes["request_id"], attributes["request.id"]) where attributes["request.id"] != nil`,
-			`set(attributes["tenant_id"], attributes["tenant.id"]) where attributes["tenant.id"] != nil`,
+			`delete_key(attributes, "service_name")`,
+			`delete_key(attributes, "tenant_id")`,
+			`set(attributes["service_name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil`,
 			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw|stacktrace).*")`,
-			`keep_keys(attributes, ["service_name", "request_id", "tenant_id", "company_id", "actor_id", "operation_id", "job_id", "http.request.method", "http.route", "http.response.status_code", "db.system", "messaging.system", "error.type", "resource_type", "resource_id"])`,
+			`keep_keys(attributes, ["service_name", "request_id", "company_id", "actor_id", "operation_id", "job_id", "http.request.method", "http.route", "http.response.status_code", "db.system", "messaging.system", "error.type", "resource_type", "resource_id"])`,
 			`truncate_all(attributes, 256)`,
 		]
 	}
@@ -1308,6 +1333,7 @@ otelcol.processor.transform "sanitize" {
 		context    = "resource"
 		statements = [
 			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`set(attributes["service.name"], "ifritah-tenant")`,
 			`keep_keys(attributes, ["service.name", "service.version", "deployment.environment.name", "component", "cluster", "host.role", "container.role", "image.channel"])`,
 			`truncate_all(attributes, 64)`,
 		]
@@ -1317,6 +1343,7 @@ otelcol.processor.transform "sanitize" {
 		context    = "datapoint"
 		statements = [
 			`delete_matching_keys(attributes, "(?i).*(tenant|request|trace|span|actor|user|resource|digest|authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`set(attributes["service_name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil`,
 			`keep_keys(attributes, ["service_name", "deployment_environment", "dependency", "operation", "outcome", "method", "route", "status_class", "container_role", "host_role", "device", "interface", "mountpoint", "mode", "cpu"])`,
 			`truncate_all(attributes, 64)`,
 		]
@@ -1326,6 +1353,7 @@ otelcol.processor.transform "sanitize" {
 		context    = "resource"
 		statements = [
 			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`set(attributes["service.name"], "ifritah-tenant")`,
 			`keep_keys(attributes, ["service.name", "service.version", "deployment.environment.name", "component", "cluster", "host.role", "container.role", "service_name"])`,
 			`truncate_all(attributes, 128)`,
 		]
@@ -1337,6 +1365,7 @@ otelcol.processor.transform "sanitize" {
 			`replace_pattern(body, "(?s)^(.{0,1000}).*$", "$1[TRUNCATED]") where IsString(body) and Len(body) > 1000`,
 			`merge_maps(attributes, ParseJSON(body), "upsert") where IsString(body) and IsMatch(body, "^\\s*\\{")`,
 			`delete_matching_keys(attributes, "(?i).*(authorization|cookie|credential|password|secret|session|token|otp|payload|body|query|sql|statement|message|raw).*")`,
+			`set(attributes["service_name"], resource.attributes["service.name"]) where resource.attributes["service.name"] != nil`,
 			`keep_keys(attributes, ["schema_version", "event_time", "signal", "event_type", "severity", "service_name", "service_version", "deployment_environment", "component", "operation", "outcome", "error_code", "error_type", "request_id", "trace_id", "span_id", "parent_span_id", "origin_request_id", "origin_trace_id", "operation_id", "job_id", "tenant_scope", "tenant_id", "company_id", "actor_id", "route", "method", "status_code", "status_class", "duration_ms", "dependency", "attempt", "retryable", "build_version", "build_commit", "image_digest", "image_channel", "scripts_revision", "deployment_stage", "script", "resource_type", "resource_id", "resource_id_hashed", "redaction_applied", "redaction_rules", "container_role"])`,
 			`truncate_all(attributes, 256)`,
 		]

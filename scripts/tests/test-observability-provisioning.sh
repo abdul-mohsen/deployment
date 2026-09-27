@@ -100,6 +100,14 @@ grep -Fq 'OBS_ALERT_EMAIL_TO:' "$compose" \
     || fail "email environment handoff is missing"
 grep -Fq 'observability:' "$compose" \
     || fail "observability network is missing"
+for image in \
+    'grafana/alloy:v1.5.1@sha256:' \
+    'grafana/loki:3.3.2@sha256:' \
+    'prom/prometheus:v3.1.0@sha256:' \
+    'grafana/grafana:11.5.2@sha256:'; do
+    grep -Fq "image: ${image}" "$compose" \
+        || fail "rollback observability image is not digest-pinned: ${image}"
+done
 awk '/^  observability:/{section=1} /^networks:/{if (section) exit} section{print}' "$compose" |
     grep -Fq 'internal: true' \
     || fail "observability network is not internal-only"

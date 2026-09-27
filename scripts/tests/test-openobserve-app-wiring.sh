@@ -22,6 +22,8 @@ tr -d '\r' < config.env.example | grep -Fx 'OPENOBSERVE_TENANT_TELEMETRY_ENABLED
     || fail "OpenObserve tenant telemetry is not opt-in by default"
 tr -d '\r' < config.env.example | grep -Fx 'OPENOBSERVE_NETWORK_NAME=ifritah-observability-openobserve' >/dev/null \
     || fail "approved OpenObserve network name is missing from config example"
+grep -Fq 'OPENOBSERVE_TENANT_OTLP_TOKEN=replace-with-a-random-otlp-token' config.env.example \
+    || fail "deployment OTLP token contract is missing from config example"
 grep -Fq 'openobserve_reconcile_tenant_apps "$TENANT_NAME"' scripts/create-tenant.sh \
     || fail "create path does not reconcile OpenObserve wiring"
 grep -Fq 'optional,' scripts/update-tenant.sh \
@@ -54,6 +56,10 @@ pass "network validation, persistence, and live-container connection are present
 
 grep -Fq 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OPENOBSERVE_OTLP_ENDPOINT}' scripts/lib.sh \
     || fail "private OTLP traces endpoint is missing"
+grep -Fq 'OPENOBSERVE_OTLP_ENDPOINT="http://alloy-openobserve:4318/v1/traces"' scripts/lib.sh \
+    || fail "tenant OTLP traces endpoint is not signal-specific"
+grep -Fq 'OTEL_EXPORTER_OTLP_HEADERS=' scripts/lib.sh \
+    || fail "tenant OTLP authentication header is missing"
 grep -Fq 'OTEL_TRACES_EXPORTER=otlp' scripts/lib.sh \
     || fail "OTEL_TRACES_EXPORTER is missing"
 grep -Fq 'OTEL_EXPORTER_OTLP_TRACES_INSECURE=true' scripts/lib.sh \
@@ -142,6 +148,7 @@ declare -A TEST_NETWORKS=(
     ["acme-backend"]="existing-backend-network"
     ["acme-frontend"]="existing-frontend-network"
 )
+SET_NETWORK_FAILURE=0
 dokku() {
     local command="${1:-}"
     shift || true
@@ -161,6 +168,7 @@ dokku() {
         network:set)
             local app="$1" key="$2"
             shift 2
+            [ "$SET_NETWORK_FAILURE" -eq 1 ] && return 1
             TEST_NETWORKS["$app"]="$*"
             printf 'network:set %s %s %s\n' "$app" "$key" "$*" >> "$OPENOBSERVE_TEST_LOG"
             return 0
@@ -186,7 +194,7 @@ dokku() {
             local app="$1" key
             shift
             for key in "$@"; do
-                unset 'TEST_CONFIG['"$app:$key"']'
+                unset "TEST_CONFIG[$app:$key]"
             done
             printf 'config:unset %s\n' "$*" >> "$OPENOBSERVE_TEST_LOG"
             return 0
@@ -201,14 +209,18 @@ dokku() {
     esac
 }
 
+OPENOBSERVE_TENANT_OTLP_TOKEN=deployment-token-123456
 OPENOBSERVE_TENANT_TELEMETRY_ENABLED=true
 openobserve_reconcile_tenant_apps acme
 first_config_sets="$(grep -c '^config:set' "$OPENOBSERVE_TEST_LOG")"
 [ "$first_config_sets" -eq 4 ] \
     || fail "enabled reconciliation did not capture and configure backend and frontend"
-grep -Fq 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://alloy-openobserve:4318' \
+grep -Fq 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://alloy-openobserve:4318/v1/traces' \
     "$OPENOBSERVE_TEST_LOG" \
     || fail "private collector endpoint was not passed to Dokku"
+grep -Fq 'OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic' \
+    "$OPENOBSERVE_TEST_LOG" \
+    || fail "deployment-provided OTLP authentication header was not passed to Dokku"
 grep -Fq 'network:set acme-backend attach-post-deploy existing-backend-network ifritah-observability-openobserve' \
     "$OPENOBSERVE_TEST_LOG" \
     || fail "backend Dokku networks were not preserved while adding telemetry"
@@ -220,19 +232,43 @@ openobserve_reconcile_tenant_apps acme
     || fail "repeated reconciliation rewrote unchanged environment"
 pass "enabled wiring is idempotent and uses the private collector endpoint"
 
+# A network added by an operator after enablement must survive disablement.
+TEST_NETWORKS["acme-backend"]="existing-backend-network post-enable-backend-network ifritah-observability-openobserve"
+TEST_NETWORKS["acme-frontend"]="existing-frontend-network post-enable-frontend-network ifritah-observability-openobserve"
 OPENOBSERVE_TENANT_TELEMETRY_ENABLED=false
 openobserve_reconcile_tenant_apps acme
 first_config_unsets="$(grep -c '^config:unset' "$OPENOBSERVE_TEST_LOG")"
 [ "$first_config_unsets" -eq 2 ] \
     || fail "disable reconciliation did not remove both app environments"
-[ "${TEST_NETWORKS["acme-backend"]}" = "existing-backend-network" ] \
-    || fail "disable reconciliation did not restore backend Dokku networks"
-[ "${TEST_NETWORKS["acme-frontend"]}" = "existing-frontend-network" ] \
-    || fail "disable reconciliation did not restore frontend Dokku networks"
+[ "${TEST_NETWORKS["acme-backend"]}" = "existing-backend-network post-enable-backend-network" ] \
+    || fail "disable reconciliation did not preserve the backend post-enable network"
+[ "${TEST_NETWORKS["acme-frontend"]}" = "existing-frontend-network post-enable-frontend-network" ] \
+    || fail "disable reconciliation did not preserve the frontend post-enable network"
 openobserve_reconcile_tenant_apps acme
 [ "$(grep -c '^config:unset' "$OPENOBSERVE_TEST_LOG")" -eq "$first_config_unsets" ] \
     || fail "repeated disable reconciliation rewrote unchanged environment"
-pass "disable wiring is idempotent and removes the telemetry marker"
+pass "disable wiring removes only the approved network and is idempotent"
+
+# A setter failure is transactional: the current network and capture marker
+# remain so a later retry can restore the app safely.
+OPENOBSERVE_TENANT_TELEMETRY_ENABLED=true
+openobserve_reconcile_tenant_apps acme
+SET_NETWORK_FAILURE=1
+OPENOBSERVE_TENANT_TELEMETRY_ENABLED=false
+if openobserve_reconcile_tenant_apps acme; then
+    fail "network:set failure was swallowed during disablement"
+fi
+[ "${TEST_NETWORKS["acme-backend"]}" = "existing-backend-network post-enable-backend-network ifritah-observability-openobserve" ] \
+    || fail "failed rollback changed backend networks"
+[ "${TEST_CONFIG["acme-backend:IFRITAH_OPENOBSERVE_NETWORK_CAPTURED"]:-}" = "1" ] \
+    || fail "failed rollback discarded the backend capture marker"
+[ -n "${TEST_CONFIG["acme-backend:OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"]:-}" ] \
+    || fail "failed rollback discarded backend OTLP configuration"
+SET_NETWORK_FAILURE=0
+openobserve_reconcile_tenant_apps acme
+[ "${TEST_NETWORKS["acme-backend"]}" = "existing-backend-network post-enable-backend-network" ] \
+    || fail "retry did not remove only the approved backend network"
+pass "network setter failures retain capture state until restoration succeeds"
 
 echo
 echo "ALL OPENOBSERVE APPLICATION WIRING TESTS PASSED"

@@ -82,7 +82,12 @@ for text in \
     "OPENOBSERVE_REPLACE_DASHBOARD=false" \
     "OPENOBSERVE_APPLY_ALERTS=true" \
     "OPENOBSERVE_ENABLE_ALERTS=false" \
-    "OPENOBSERVE_ALERT_NAMES="; do
+    "OPENOBSERVE_ALERT_NAMES=" \
+    "OPENOBSERVE_TENANT_OTLP_TOKEN" \
+    "/v1/traces" \
+    "ifritah-tenant" \
+    "existing saved views and alerts" \
+    "heartbeat"; do
     contains "$runbook" "$text" "runbook covers apply/import value: $text"
 done
 contains "$apply" "OPENOBSERVE_REPLACE_DASHBOARD" \

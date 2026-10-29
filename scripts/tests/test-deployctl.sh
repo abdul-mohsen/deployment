@@ -74,6 +74,9 @@ expect_plan "bash scripts/restart-stack.sh --env all" \
 expect_plan "bash scripts/setup-nats.sh" \
     setup nats
 
+expect_plan "bash scripts/setup-zatca-daemon.sh --config /opt/deployment/config.prod.env" \
+    --config /opt/deployment/config.prod.env setup zatca
+
 expect_plan "bash scripts/verify-mysql.sh" \
     db verify
 

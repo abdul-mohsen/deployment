@@ -54,6 +54,38 @@ that repo. Equal is allowed so a rebuild can overwrite the same Docker tag.
 - `WEBHOOK_URL_DEV`  *(optional — instant dev deploy)*
 - `WEBHOOK_SECRET`   *(optional — must match `config.env` on the server)*
 
+## ZATCA daemon and backend NATS
+
+The deployment repository can run the ZATCA daemon as an optional first-class
+service with:
+
+```bash
+sudo ./scripts/deployctl.sh --config /opt/deployment/config.env setup zatca
+```
+
+When enabled, the daemon owns the single embedded NATS/JetStream instance.
+Tenant backend containers must receive the same host-reachable endpoint through
+`NATS_URL`/`ZATCA_NATS_URL` (normally
+`nats://host.docker.internal:4222`). Do not add a second NATS service to an app
+deployment.
+
+The daemon image is supplied by the ZATCA integration build lane and must
+already contain the Go daemon, Java runtime, and approved Fatoora SDK artifact.
+Set the following in the deployment server's private `config.env`; none are
+hard-coded in these templates:
+
+- `ZATCA_DAEMON_IMAGE`
+- `ZATCA_DB_USER` / `ZATCA_DB_PASSWORD`
+- `ZATCA_ENCRYPT_KEY`
+- `ZATCA_MONITOR_PASSWORD`
+- `ZATCA_XML_ROOT` and `ZATCA_NATS_DATA_ROOT`
+
+The runtime account needs access to the master tenant registry and the
+tenant-database pattern. Optional onboarding credentials are configured with
+`ZATCA_ADMIN_DB_USER` / `ZATCA_ADMIN_DB_PASSWORD`. Signed XML and JetStream
+data are persisted on the configured host paths, and readiness is the
+authenticated daemon monitor `GET /healthz`.
+
 ## Release notes
 
 Keep release notes in GitHub Releases as the source of truth. Mirror the released

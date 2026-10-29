@@ -34,6 +34,7 @@ DOKKU_ONLY=false
 DASHBOARD_ONLY=false
 DOKKU_STOP_SECONDS="${DOKKU_STOP_SECONDS:-20}"
 COMMAND_TIMEOUT_SECONDS="${COMMAND_TIMEOUT_SECONDS:-60}"
+ZATCA_DAEMON_CONTAINER="${ZATCA_DAEMON_CONTAINER:-zatca-daemon}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -70,10 +71,29 @@ load_stack_env() {
             set -a; . "$env_file"; set +a
         fi
     done
+    if [ -f "${REPO_DIR}/config.env" ]; then
+        # Keep the existing install.env precedence for the legacy stack, but
+        # let the deployment config explicitly enable/identify the daemon.
+        config_zatca_enabled="$(
+            set -a
+            # shellcheck disable=SC1091
+            . "${REPO_DIR}/config.env"
+            printf '%s' "${ZATCA_DAEMON_ENABLED:-0}"
+        )"
+        config_zatca_container="$(
+            set -a
+            # shellcheck disable=SC1091
+            . "${REPO_DIR}/config.env"
+            printf '%s' "${ZATCA_DAEMON_CONTAINER:-zatca-daemon}"
+        )"
+        ZATCA_DAEMON_ENABLED="$config_zatca_enabled"
+        ZATCA_DAEMON_CONTAINER="$config_zatca_container"
+    fi
     [ -n "$caller_dokku_port" ] && DOKKU_PORT="$caller_dokku_port"
     [ -n "$caller_dokku_hostname" ] && DOKKU_HOSTNAME="$caller_dokku_hostname"
     DOKKU_PORT="${DOKKU_PORT:-8080}"
     DOKKU_HOSTNAME="${DOKKU_HOSTNAME:-${BASE_DOMAIN:-localtest.me}}"
+    ZATCA_DAEMON_CONTAINER="${ZATCA_DAEMON_CONTAINER:-zatca-daemon}"
 }
 
 dashboard_envs() {
@@ -86,6 +106,23 @@ dashboard_envs() {
 
 compose_file_for() { echo "${REPO_DIR}/dashboard/docker-compose.$1.yml"; }
 dashboard_container_for() { echo "dokku-dashboard-$1"; }
+
+stack_config_file() {
+    if [ -f "${REPO_DIR}/config.env" ]; then
+        echo "${REPO_DIR}/config.env"
+    elif [ -f "${REPO_DIR}/install.env" ]; then
+        echo "${REPO_DIR}/install.env"
+    else
+        echo "${REPO_DIR}/config.env"
+    fi
+}
+
+zatca_daemon_enabled() {
+    case "${ZATCA_DAEMON_ENABLED:-0}" in
+        1|true|yes) return 0 ;;
+        *)          return 1 ;;
+    esac
+}
 
 dump_logs() {
     local container="$1"
@@ -158,6 +195,29 @@ start_dashboard_env() {
     error "  dashboard container not running after 15s. Last 200 log lines:"
     dump_logs "$container"
     exit 1
+}
+
+stop_zatca_daemon() {
+    zatca_daemon_enabled || return 0
+    if docker ps --format '{{.Names}}' | grep -qx "$ZATCA_DAEMON_CONTAINER"; then
+        log "Stopping ZATCA daemon..."
+        if ! run_with_timeout "$COMMAND_TIMEOUT_SECONDS" docker stop "$ZATCA_DAEMON_CONTAINER" >/dev/null; then
+            error "  failed to stop $ZATCA_DAEMON_CONTAINER"
+            dump_logs "$ZATCA_DAEMON_CONTAINER"
+            exit 1
+        fi
+        info "  ZATCA daemon stopped: $ZATCA_DAEMON_CONTAINER"
+    fi
+}
+
+start_zatca_daemon() {
+    zatca_daemon_enabled || return 0
+    log "Starting ZATCA daemon..."
+    if ! bash "${SCRIPT_DIR}/setup-zatca-daemon.sh" --config "$(stack_config_file)"; then
+        error "  ZATCA daemon failed to start. Last 200 log lines:"
+        dump_logs "$ZATCA_DAEMON_CONTAINER"
+        exit 1
+    fi
 }
 
 dokku_exists() { docker ps -a --format '{{.Names}}' | grep -qx 'dokku'; }
@@ -265,8 +325,14 @@ if ! $DOKKU_ONLY; then
 fi
 
 if ! $DASHBOARD_ONLY; then
+    if ! $DOKKU_ONLY; then
+        stop_zatca_daemon
+    fi
     stop_dokku_if_present
     start_or_recreate_dokku
+    if ! $DOKKU_ONLY; then
+        start_zatca_daemon
+    fi
 fi
 
 if ! $DOKKU_ONLY; then
@@ -278,4 +344,4 @@ fi
 echo ""
 log "Stack restarted (env=$ENV_NAME)."
 docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' \
-    | awk '$1 == "NAMES" || $1 == "dokku" || $1 == "dokku-dashboard-dev" || $1 == "dokku-dashboard-prod"'
+    | awk -v daemon="$ZATCA_DAEMON_CONTAINER" '$1 == "NAMES" || $1 == "dokku" || $1 == daemon || $1 == "dokku-dashboard-dev" || $1 == "dokku-dashboard-prod"'

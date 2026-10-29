@@ -212,6 +212,19 @@ MYSQL_ROOT_USER=${MYSQL_ROOT_USER}
 MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
 MYSQL_MASTER_DB=${MYSQL_MASTER_DB}
 
+# ZATCA daemon (optional; fill these values before enabling)
+ZATCA_DAEMON_ENABLED=${ZATCA_DAEMON_ENABLED:-0}
+ZATCA_DAEMON_IMAGE=${ZATCA_DAEMON_IMAGE:-}
+ZATCA_DB_USER=${ZATCA_DB_USER:-zatca_daemon}
+ZATCA_DB_PASSWORD=${ZATCA_DB_PASSWORD:-}
+ZATCA_ENCRYPT_KEY=${ZATCA_ENCRYPT_KEY:-}
+ZATCA_MONITOR_PASSWORD=${ZATCA_MONITOR_PASSWORD:-}
+ZATCA_XML_ROOT=${ZATCA_XML_ROOT:-/opt/zatca-xml}
+ZATCA_NATS_DATA_ROOT=${ZATCA_NATS_DATA_ROOT:-/opt/zatca-nats}
+NATS_PORT=${NATS_PORT:-4222}
+NATS_MONITOR_PORT=${NATS_MONITOR_PORT:-8222}
+ZATCA_NATS_URL=${ZATCA_NATS_URL:-nats://host.docker.internal:4222}
+
 # Docker Hub
 DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME}
 PULL_TAG=latest
@@ -260,6 +273,17 @@ MYSQL_PORT="${MYSQL_PORT:-3306}"
 MYSQL_ROOT_USER="${MYSQL_ROOT_USER:-root}"
 MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
+ZATCA_DAEMON_ENABLED="${ZATCA_DAEMON_ENABLED:-0}"
+ZATCA_DAEMON_IMAGE="${ZATCA_DAEMON_IMAGE:-}"
+ZATCA_DB_USER="${ZATCA_DB_USER:-zatca_daemon}"
+ZATCA_DB_PASSWORD="${ZATCA_DB_PASSWORD:-}"
+ZATCA_ENCRYPT_KEY="${ZATCA_ENCRYPT_KEY:-}"
+ZATCA_MONITOR_PASSWORD="${ZATCA_MONITOR_PASSWORD:-}"
+ZATCA_XML_ROOT="${ZATCA_XML_ROOT:-/opt/zatca-xml}"
+ZATCA_NATS_DATA_ROOT="${ZATCA_NATS_DATA_ROOT:-/opt/zatca-nats}"
+NATS_PORT="${NATS_PORT:-4222}"
+NATS_MONITOR_PORT="${NATS_MONITOR_PORT:-8222}"
+ZATCA_NATS_URL="${ZATCA_NATS_URL:-nats://host.docker.internal:${NATS_PORT}}"
 DOCKERHUB_USERNAME="${DOCKERHUB_USERNAME:-}"
 WEBHOOK_SECRET="${WEBHOOK_SECRET:-}"
 SETUP_WEBHOOK="${SETUP_WEBHOOK:-false}"
@@ -275,6 +299,7 @@ echo "  Dokku:      ${DOKKU_HOSTNAME}:${DOKKU_PORT}"
 echo "  MySQL:      ${MYSQL_HOST}:${MYSQL_PORT}"
 echo "  Docker Hub: ${DOCKERHUB_USERNAME:-not configured}"
 echo "  Storage:    ${STORAGE_ROOT}"
+echo "  ZATCA:      $([ "$ZATCA_DAEMON_ENABLED" = "1" ] && echo enabled || echo disabled)"
 echo "==========================================="
 echo ""
 
@@ -467,6 +492,14 @@ else
     info "No Docker Hub username configured — skipping auto-deploy setup."
     info "You can deploy manually with: ./scripts/deploy-all.sh <image> --type backend"
 fi
+
+# ---- 8c: Optional first-class ZATCA daemon -------------------------------
+case "$ZATCA_DAEMON_ENABLED" in
+    1|true|yes)
+        log "Starting the configured ZATCA daemon..."
+        bash "$SCRIPT_DIR/setup-zatca-daemon.sh" --config "$CONFIG_FILE"
+        ;;
+esac
 
 # =============================================================================
 # STEP 9: Optionally create first tenant

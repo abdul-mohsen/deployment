@@ -61,6 +61,7 @@ scripts/                    # ops automation (run on the server)
   webhook-tls.sh            # TLS in front of webhook
   webhook-deploy.service    # systemd unit
   Dockerfile.webhook
+  setup-zatca-daemon.sh     # optional first-class ZATCA daemon
   lib.sh                    # shared helpers
 templates/                  # COPY these into your backend / frontend repos
   README.md
@@ -78,6 +79,8 @@ templates/                  # COPY these into your backend / frontend repos
     .dockerignore
     .gitignore
     .github/workflows/deploy.yml
+dashboard/
+  docker-compose.zatca.yml  # optional daemon compose overlay
 ```
 
 ## Server prerequisites
@@ -85,6 +88,9 @@ templates/                  # COPY these into your backend / frontend repos
 - Linux + Docker Engine
 - MySQL on the host (or reachable via `host.docker.internal`)
 - Wildcard DNS: `*.app.example.com → server IP`
+- For the optional ZATCA daemon: an approved daemon image containing the
+  Java/Fatoora SDK runtime, a dedicated MySQL daemon account, and persistent
+  paths for signed XML and JetStream data.
 
 ## Initial setup
 
@@ -97,6 +103,19 @@ $EDITOR config.env
 sudo ./scripts/setup.sh
 sudo ./scripts/deployctl.sh setup dev-tenant        # creates the one dev tenant
 ```
+
+The existing deployment remains compatible with the standalone NATS setup.
+To enable the first-class ZATCA daemon, fill the `ZATCA_*` values in
+`config.env` (never commit that file), stop any legacy `nats` container using
+the configured port, and run:
+
+```bash
+sudo ./scripts/deployctl.sh --config /opt/deployment/config.env setup zatca
+```
+
+The command consumes `ZATCA_DAEMON_IMAGE`; the image must already contain the
+daemon binary, Java runtime, and approved Fatoora SDK artifact. This repository
+does not download, copy, or license the SDK.
 
 ## Day-2 operations
 
@@ -117,8 +136,41 @@ sudo ./scripts/deployctl.sh setup dev-tenant        # creates the one dev tenant
 | Prune by policy | `sudo ./scripts/deployctl.sh fleet backups prune` |
 | Restore / rollback | `sudo ./scripts/deployctl.sh tenant restore acme --from acme_20250101_120000` |
 | Restart platform | `sudo ./scripts/deployctl.sh stack restart --env all` |
+| Start/verify ZATCA daemon | `sudo ./scripts/deployctl.sh --config /opt/deployment/config.env setup zatca` |
+| Check daemon health | `docker inspect --format '{{.State.Health.Status}}' zatca-daemon` |
 
 The old `scripts/*.sh` files remain as readable implementation units and compatibility entrypoints. New operations should be exposed through `deployctl.sh` first.
+
+## ZATCA daemon deployment contract
+
+When `ZATCA_DAEMON_ENABLED=1`, `stack restart` manages the daemon around Dokku:
+it stops the daemon before Dokku, then starts the daemon and waits for its
+authenticated readiness check before starting dashboards. The daemon owns one
+embedded NATS/JetStream instance; tenant backends connect through
+`ZATCA_NATS_URL` (normally `nats://host.docker.internal:4222`). Do not run a
+second NATS service on the same port.
+
+Required operator inputs are intentionally blank in `config.env.example`:
+
+| Input | Purpose |
+|---|---|
+| `ZATCA_DAEMON_IMAGE` | Approved image from the ZATCA build lane; includes Java/Fatoora runtime |
+| `ZATCA_DB_USER` / `ZATCA_DB_PASSWORD` | Dedicated runtime account for master registry and tenant DBs |
+| `ZATCA_ENCRYPT_KEY` | Encrypts sensitive branch credentials at runtime |
+| `ZATCA_MONITOR_PASSWORD` | Protects the daemon/NATS monitoring endpoint |
+| `ZATCA_XML_ROOT` | Persistent host directory mounted at `/data/zatca-xml` |
+| `ZATCA_NATS_DATA_ROOT` | Persistent JetStream directory mounted at `/data/nats` |
+
+The daemon account must be granted by the operator. A typical least-privilege
+shape is `SELECT` on `${MYSQL_MASTER_DB}.tenant`, plus the read/column-level
+update permissions required by the daemon on the `tenant_%` databases.
+Onboarding may use the optional `ZATCA_ADMIN_DB_USER` and
+`ZATCA_ADMIN_DB_PASSWORD` account. Use the actual values for the installation;
+do not place passwords in this repository.
+
+The compose health contract is an authenticated GET to the daemon monitor's
+`/healthz`; the monitor host port is loopback-only while the NATS client port
+is reachable by Dokku containers through `host.docker.internal`.
 
 ## Backups, restore & rollback
 

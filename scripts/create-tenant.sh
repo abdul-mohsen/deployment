@@ -497,7 +497,7 @@ dokku config:set --no-restart "$BACKEND_APP" \
     TENANT_ID="$TENANT_NAME" \
     PORT="$BACKEND_PORT" \
     SERVER_PORT="$BACKEND_PORT" \
-    NATS_URL="${NATS_URL:-nats://host.docker.internal:4222}" \
+    NATS_URL="${NATS_URL:-${ZATCA_NATS_URL:-nats://host.docker.internal:4222}}" \
     BASEURL="${BASEURL:-/api/v2}" \
     JWT_SECERT_KEY="${JWT_SECERT_KEY:-$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48)}"
 

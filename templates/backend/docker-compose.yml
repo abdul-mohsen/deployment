@@ -30,6 +30,8 @@ services:
       args:
         APP_VERSION: ${APP_VERSION:-v0.0.1}
     image: ${IMAGE_NAME:-local/api}:${APP_VERSION:-v0.0.1}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       mysql:
         condition: service_healthy
@@ -38,6 +40,7 @@ services:
       DB_HOST: mysql
       DB_PORT: 3306
       DATABASE_URL: mysql://root:${DB_PASSWORD:-devpass}@mysql:3306/${DB_NAME:-app_dev}
+      NATS_URL: ${NATS_URL:-nats://host.docker.internal:4222}
     ports:
       - "${API_PORT:-3000}:3000"
     volumes:

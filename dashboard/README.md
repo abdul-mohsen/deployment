@@ -127,6 +127,23 @@ cd /opt/dashboard
 docker compose -f docker-compose.prod.yml up -d --build
 ```
 
+The ZATCA daemon is a separate, optional compose overlay so dashboard-only
+installations do not need daemon secrets. After filling the private deployment
+`config.env` with the approved `ZATCA_DAEMON_IMAGE`, dedicated DB account,
+encryption/monitoring secrets, and persistent XML/JetStream paths, start it
+through the deployment command:
+
+```sh
+sudo /opt/deployment/scripts/deployctl.sh \
+  --config /opt/deployment/config.env setup zatca
+```
+
+The daemon image must already contain the Go worker, Java runtime, and approved
+Fatoora SDK artifact. It owns the single embedded NATS/JetStream instance;
+tenant backends use `ZATCA_NATS_URL` (normally
+`nats://host.docker.internal:4222`). The monitor's authenticated `GET
+/healthz` is the readiness contract and its host port is loopback-only.
+
 Then expose it via Dokku just like any other app, e.g. as `admin-prod`:
 
 ```sh

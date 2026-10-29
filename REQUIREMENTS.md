@@ -38,8 +38,8 @@ tenant frontend  ──/api──▶  tenant backend
 | Linux + Docker | tested with Docker Engine on Ubuntu |
 | Dokku container | run with `-p 8080:80` (do **not** publish 443) and `--hostname dokku` |
 | External MySQL on host | **single MySQL server hosts both dev and prod tenants** — isolation is per-database (`tenant_<name>`) and per-user. Reachable from containers as `host.docker.internal:3306` (containers get `--add-host=host.docker.internal:host-gateway`). |
-| NATS on host | exposed at `nats://host.docker.internal:4222` (backend fatals without it) |
-| ZATCA submitter on host | separate process running on the host that reads tenant DBs from MySQL and submits invoices to ZATCA. Not deployed by this repo — must already be running. The `zatca_env` column in the master `tenant` table (default `production`, also accepts `sandbox`, `simulation`) tells the submitter which ZATCA endpoint to use per tenant. |
+| NATS / JetStream | The optional first-class ZATCA daemon owns embedded JetStream and publishes the configured client port (normally `nats://host.docker.internal:4222`) for backend tenants. Legacy `setup-nats.sh` remains available while the daemon is disabled. |
+| ZATCA daemon | Approved daemon image containing the Go worker, Java runtime, and Fatoora SDK; reads the master registry and tenant DBs, persists signed XML, and exposes authenticated monitor readiness. |
 | Wildcard DNS | `*.BASE_DOMAIN` → server IP |
 | Host nginx wildcard vhost | template ready in [templates/nginx/host-shared.conf](templates/nginx/host-shared.conf); points to `127.0.0.1:DOKKU_PORT` |
 
@@ -71,6 +71,9 @@ Copy from [config.env.example](config.env.example) and fill:
 - `MYSQL_HOST=host.docker.internal`, `MYSQL_PORT=3306`,
   `MYSQL_ROOT_USER`, `MYSQL_ROOT_PASSWORD`
 - `MYSQL_MASTER_DB=zatca_master` — registry table `tenant(name, db_name, enabled)`
+- Optional daemon: `ZATCA_DAEMON_ENABLED=1`, `ZATCA_DAEMON_IMAGE`,
+  dedicated `ZATCA_DB_USER`/`ZATCA_DB_PASSWORD`, `ZATCA_ENCRYPT_KEY`,
+  `ZATCA_MONITOR_PASSWORD`, `ZATCA_XML_ROOT`, and `ZATCA_NATS_DATA_ROOT`.
 - `MYSQL_TENANT_HOST=172.%` — docker bridge subnet; **must match** the host
   pattern used in [scripts/remove-tenant.sh](scripts/remove-tenant.sh)
 - `DOCKERHUB_USERNAME`, optional `BACKEND_IMAGE` / `FRONTEND_IMAGE`,
@@ -170,13 +173,15 @@ Modern duplicates (`DATABASE_URL`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`,
 
 ---
 
-## 9. Out of scope (do NOT add back)
+## 9. Out of scope
 
 - TLS certificates, Let's Encrypt, cert renewal.
 - Per-tenant host port allocation.
 - Multiple `NGINX_MODE` values — single mode only.
 - "Standalone" Dokku where Dokku owns :443 — operator nginx is mandatory.
-- Deploying or managing the on-host ZATCA submitter — it lives outside this repo.
+- ZATCA provider semantics, XML construction, signing, or worker behavior;
+  those belong to the ZATCA daemon repository. This repo only deploys and
+  health-checks the approved daemon image.
 
 ---
 

@@ -547,6 +547,27 @@ MYSQL_APP_HOST="$(mysql_host_for_container "${MYSQL_HOST:-host.docker.internal}"
 TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
 TENANT_DB_USER="usr_${TENANT_NAME//-/_}"
 DB_PROVISIONED=false
+TENANT_REGISTERED=false
+
+verify_zatca_tenant_registration() {
+    local enabled
+    enabled="$(
+        run_mysql "$MYSQL_MASTER_DB" -N -B -e \
+            "SELECT enabled FROM tenant WHERE name='${TENANT_NAME}' AND db_name='${TENANT_DB_NAME}' LIMIT 1;" |
+        awk 'NF { print $1; exit }'
+    )"
+    [ "$enabled" = "1" ] || {
+        error "Tenant '$TENANT_NAME' was not registered as enabled in ${MYSQL_MASTER_DB}.tenant."
+        return 1
+    }
+}
+
+zatca_daemon_enabled() {
+    case "${ZATCA_DAEMON_ENABLED:-0}" in
+        1|true|yes) return 0 ;;
+        *)          return 1 ;;
+    esac
+}
 
 if ! $NO_DATABASE; then
     if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
@@ -599,6 +620,8 @@ INSERT INTO tenant (name, db_name)
 VALUES ('${TENANT_NAME}', '${TENANT_DB_NAME}')
 ON DUPLICATE KEY UPDATE enabled=1;
 SQLEOF
+        verify_zatca_tenant_registration
+        TENANT_REGISTERED=true
 
         # Inject DB env vars into the backend container.
         # Both naming conventions: modern (DB_HOST/DB_USER/...) and legacy
@@ -724,6 +747,24 @@ if [ -n "$MIGRATE_CMD" ] && [ -n "$BACKEND_IMAGE" ]; then
 elif [ -n "$MIGRATE_CMD" ] && [ -z "$BACKEND_IMAGE" ]; then
     warn "--migrate specified but no backend image deployed yet. Skipping migration."
     warn "Run manually after deploy: dokku run $BACKEND_APP $MIGRATE_CMD"
+fi
+
+# ---- 13. Refresh daemon tenant discovery -----------------------------------
+# The T009 daemon loads enabled tenants and active branches at startup. Keep
+# the registry write above as the source of truth, then refresh only after the
+# tenant database and apps are provisioned. Disabled-daemon installations keep
+# the existing tenant lifecycle with no daemon side effects.
+if $TENANT_REGISTERED; then
+    if zatca_daemon_enabled; then
+        log "Refreshing ZATCA daemon tenant discovery..."
+        bash "$SCRIPT_DIR/reload-zatca-daemon.sh" \
+            --tenant "$TENANT_NAME" \
+            --config "$CONFIG_FILE"
+    else
+        info "ZATCA daemon disabled; tenant registry will be discovered on the next enabled daemon start."
+    fi
+elif zatca_daemon_enabled; then
+    warn "ZATCA daemon is enabled, but this tenant has no verified master-registry row; skipping daemon reload."
 fi
 
 # ---- DNS wildcard check ----

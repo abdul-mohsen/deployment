@@ -465,6 +465,10 @@ func Catalog() []Script {
 			Summary: "Run a NATS JetStream server on the host (idempotent). Backends connect via host.docker.internal:4222.",
 		},
 		{
+			Name: "health-zatca-daemon.sh", Title: "ZATCA queue health",
+			Summary: "Check authenticated daemon readiness plus ZATCA stream, consumers, and pending backlog.",
+		},
+		{
 			Name: "discover-dokku-nginx.sh", Title: "Discover Dokku nginx",
 			Summary: "Print the IP/port Dokku nginx is reachable on, plus a ready-to-paste edge-nginx wildcard server block.",
 		},

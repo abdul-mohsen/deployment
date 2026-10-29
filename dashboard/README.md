@@ -142,7 +142,32 @@ The daemon image must already contain the Go worker, Java runtime, and approved
 Fatoora SDK artifact. It owns the single embedded NATS/JetStream instance;
 tenant backends use `ZATCA_NATS_URL` (normally
 `nats://host.docker.internal:4222`). The monitor's authenticated `GET
-/healthz` is the readiness contract and its host port is loopback-only.
+/healthz` is the readiness contract and its host port is loopback-only. Tenant
+creation reads back the enabled master-registry row and refreshes daemon
+discovery when the daemon is enabled; it does not invent or copy daemon
+credentials.
+
+Set finite T033 operational values in the private deployment config:
+
+```text
+ZATCA_MAX_WORKERS_PER_TENANT=1
+ZATCA_MAX_WORKERS_PER_BRANCH=1
+ZATCA_MAX_PENDING=1000
+ZATCA_MAX_ACK_PENDING=100
+```
+
+Check the authenticated readiness and JetStream queue state with:
+
+```sh
+sudo /opt/deployment/scripts/deployctl.sh \
+  --config /opt/deployment/config.env setup zatca-health --json
+```
+
+The command reports the `ZATCA` stream, consumer count, pending,
+acknowledgement-pending, and redelivery counts, and exits non-zero when the
+configured backlog thresholds are exceeded. Worker-limit values are forwarded
+to compatible daemon images; the T009 image retains its existing sequential
+per-branch worker behavior.
 
 Then expose it via Dokku just like any other app, e.g. as `admin-prod`:
 

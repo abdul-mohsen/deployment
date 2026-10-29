@@ -62,6 +62,28 @@ if { [ -n "${ZATCA_ADMIN_DB_USER:-}" ] && [ -z "${ZATCA_ADMIN_DB_PASSWORD:-}" ];
     fail "ZATCA_ADMIN_DB_USER and ZATCA_ADMIN_DB_PASSWORD must be set together"
 fi
 
+is_positive_integer() {
+    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -gt 0 ]
+}
+
+is_integer() {
+    [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+ZATCA_MAX_WORKERS_PER_TENANT="${ZATCA_MAX_WORKERS_PER_TENANT:-1}"
+ZATCA_MAX_WORKERS_PER_BRANCH="${ZATCA_MAX_WORKERS_PER_BRANCH:-1}"
+ZATCA_MAX_PENDING="${ZATCA_MAX_PENDING:-1000}"
+ZATCA_MAX_ACK_PENDING="${ZATCA_MAX_ACK_PENDING:-100}"
+
+is_positive_integer "$ZATCA_MAX_WORKERS_PER_TENANT" \
+    || fail "ZATCA_MAX_WORKERS_PER_TENANT must be a positive integer"
+is_positive_integer "$ZATCA_MAX_WORKERS_PER_BRANCH" \
+    || fail "ZATCA_MAX_WORKERS_PER_BRANCH must be a positive integer"
+is_positive_integer "$ZATCA_MAX_PENDING" \
+    || fail "ZATCA_MAX_PENDING must be a positive integer"
+is_integer "$ZATCA_MAX_ACK_PENDING" \
+    || fail "ZATCA_MAX_ACK_PENDING must be a non-negative integer"
+
 COMPOSE_FILE="${ZATCA_DAEMON_COMPOSE_FILE:-${REPO_DIR}/dashboard/docker-compose.zatca.yml}"
 CONTAINER="${ZATCA_DAEMON_CONTAINER:-zatca-daemon}"
 XML_ROOT="${ZATCA_XML_ROOT:-/opt/zatca-xml}"
@@ -91,7 +113,13 @@ for _ in $(seq 1 "$HEALTH_TIMEOUT_SECONDS"); do
     status="$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER" 2>/dev/null || true)"
     case "$status" in
         healthy)
-            info "ZATCA daemon is healthy; NATS client port is ${NATS_PORT}."
+            if ! bash "${SCRIPT_DIR}/health-zatca-daemon.sh" \
+                --config "$CONFIG_FILE" --json >/dev/null; then
+                error "ZATCA daemon is ready but queue health is outside configured bounds. Recent logs:"
+                docker logs --tail 100 "$CONTAINER" >&2 || true
+                exit 1
+            fi
+            info "ZATCA daemon is healthy; NATS client port is ${NATS_PORT} and queue health is within bounds."
             exit 0
             ;;
         unhealthy)

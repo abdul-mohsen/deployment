@@ -74,6 +74,10 @@ Copy from [config.env.example](config.env.example) and fill:
 - Optional daemon: `ZATCA_DAEMON_ENABLED=1`, `ZATCA_DAEMON_IMAGE`,
   dedicated `ZATCA_DB_USER`/`ZATCA_DB_PASSWORD`, `ZATCA_ENCRYPT_KEY`,
   `ZATCA_MONITOR_PASSWORD`, `ZATCA_XML_ROOT`, and `ZATCA_NATS_DATA_ROOT`.
+- Optional T033 bounds: finite `ZATCA_MAX_WORKERS_PER_TENANT`,
+  `ZATCA_MAX_WORKERS_PER_BRANCH`, `ZATCA_MAX_PENDING`, and
+  `ZATCA_MAX_ACK_PENDING` values. Worker values are forwarded to compatible
+  daemon images; pending values are enforced by deployment health.
 - `MYSQL_TENANT_HOST=172.%` — docker bridge subnet; **must match** the host
   pattern used in [scripts/remove-tenant.sh](scripts/remove-tenant.sh)
 - `DOCKERHUB_USERNAME`, optional `BACKEND_IMAGE` / `FRONTEND_IMAGE`,
@@ -124,6 +128,10 @@ Rules learned the hard way:
   snippets for this.
 - MySQL: db `tenant_<name>`, user `usr_<name>@'172.%'`, registered in
   `zatca_master.tenant`.
+- When the daemon is enabled, the master row is read back as `enabled=1`, then
+  `reload-zatca-daemon.sh` recreates the daemon and waits for authenticated
+  readiness plus scoped JetStream queue health. This is safe to retry after a
+  partial create and does not run when `ZATCA_DAEMON_ENABLED=0`.
 - Storage mounts:
   `$STORAGE_ROOT/<tenant>/{uploads,data}` → `/app/{uploads,data}`.
 - CHECKS files seeded: backend `/api/health`, frontend `/`.

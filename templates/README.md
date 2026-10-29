@@ -84,7 +84,22 @@ The runtime account needs access to the master tenant registry and the
 tenant-database pattern. Optional onboarding credentials are configured with
 `ZATCA_ADMIN_DB_USER` / `ZATCA_ADMIN_DB_PASSWORD`. Signed XML and JetStream
 data are persisted on the configured host paths, and readiness is the
-authenticated daemon monitor `GET /healthz`.
+authenticated daemon monitor `GET /healthz`. Creating a tenant reads back its
+enabled master-registry row and refreshes daemon discovery when the daemon is
+enabled; disabled-daemon installations retain the legacy path.
+
+Set finite T033 operational values in the private deployment config:
+
+- `ZATCA_MAX_WORKERS_PER_TENANT`
+- `ZATCA_MAX_WORKERS_PER_BRANCH`
+- `ZATCA_MAX_PENDING`
+- `ZATCA_MAX_ACK_PENDING`
+
+Use `deployctl setup zatca-health --json` to inspect the `ZATCA` stream,
+consumer count, pending, acknowledgement-pending, and redelivery counts. The
+pending thresholds are enforced by deployment health. Worker limits are
+forwarded to compatible daemon images; no credential or secret is supplied by
+these templates.
 
 ## Release notes
 

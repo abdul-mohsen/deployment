@@ -62,6 +62,8 @@ scripts/                    # ops automation (run on the server)
   webhook-deploy.service    # systemd unit
   Dockerfile.webhook
   setup-zatca-daemon.sh     # optional first-class ZATCA daemon
+  reload-zatca-daemon.sh    # refresh daemon tenant/branch discovery
+  health-zatca-daemon.sh    # authenticated stream/consumer/backlog health
   lib.sh                    # shared helpers
 templates/                  # COPY these into your backend / frontend repos
   README.md
@@ -137,7 +139,8 @@ does not download, copy, or license the SDK.
 | Restore / rollback | `sudo ./scripts/deployctl.sh tenant restore acme --from acme_20250101_120000` |
 | Restart platform | `sudo ./scripts/deployctl.sh stack restart --env all` |
 | Start/verify ZATCA daemon | `sudo ./scripts/deployctl.sh --config /opt/deployment/config.env setup zatca` |
-| Check daemon health | `docker inspect --format '{{.State.Health.Status}}' zatca-daemon` |
+| Check daemon/queue health | `sudo ./scripts/deployctl.sh --config /opt/deployment/config.env setup zatca-health` |
+| Reload daemon tenant discovery | `sudo ./scripts/deployctl.sh --config /opt/deployment/config.env setup zatca-reload --tenant acme` |
 
 The old `scripts/*.sh` files remain as readable implementation units and compatibility entrypoints. New operations should be exposed through `deployctl.sh` first.
 
@@ -148,7 +151,11 @@ it stops the daemon before Dokku, then starts the daemon and waits for its
 authenticated readiness check before starting dashboards. The daemon owns one
 embedded NATS/JetStream instance; tenant backends connect through
 `ZATCA_NATS_URL` (normally `nats://host.docker.internal:4222`). Do not run a
-second NATS service on the same port.
+second NATS service on the same port. `create-tenant.sh` reads back the enabled
+master-registry row and, when the daemon is enabled, performs a controlled
+daemon recreation so the new tenant and its active branches are discovered
+without an unrelated full-stack restart. The operation is safe to retry after
+a partial tenant create.
 
 Required operator inputs are intentionally blank in `config.env.example`:
 
@@ -160,6 +167,10 @@ Required operator inputs are intentionally blank in `config.env.example`:
 | `ZATCA_MONITOR_PASSWORD` | Protects the daemon/NATS monitoring endpoint |
 | `ZATCA_XML_ROOT` | Persistent host directory mounted at `/data/zatca-xml` |
 | `ZATCA_NATS_DATA_ROOT` | Persistent JetStream directory mounted at `/data/nats` |
+| `ZATCA_MAX_WORKERS_PER_TENANT` | Finite worker bound forwarded to compatible daemon images |
+| `ZATCA_MAX_WORKERS_PER_BRANCH` | Finite per-branch worker bound forwarded to compatible daemon images |
+| `ZATCA_MAX_PENDING` | Maximum reported pending messages before queue health fails |
+| `ZATCA_MAX_ACK_PENDING` | Maximum reported acknowledgement-pending messages before queue health fails |
 
 The daemon account must be granted by the operator. A typical least-privilege
 shape is `SELECT` on `${MYSQL_MASTER_DB}.tenant`, plus the read/column-level
@@ -170,7 +181,19 @@ do not place passwords in this repository.
 
 The compose health contract is an authenticated GET to the daemon monitor's
 `/healthz`; the monitor host port is loopback-only while the NATS client port
-is reachable by Dokku containers through `host.docker.internal`.
+is reachable by Dokku containers through `host.docker.internal`. The
+`zatca-health` command also reads the scoped
+`/jsz?accounts=true&streams=true&consumers=true` snapshot and reports the
+`ZATCA` stream, consumer count, pending,
+acknowledgement-pending, and redelivery counts. It exits non-zero when the
+configured pending thresholds are exceeded and never prints monitor
+credentials.
+
+The T009 daemon image creates one sequential worker per document type and
+branch. The T033 worker-limit variables are additive inputs for compatible
+daemon images; the deployment does not alter the T009 command line or claim
+that an older image consumes unknown variables. Queue pending limits are
+enforced by the deployment health gate.
 
 ## Backups, restore & rollback
 

@@ -39,6 +39,14 @@ services:
       ENCRYPT_KEY: ${ZATCA_ENCRYPT_KEY:?ZATCA_ENCRYPT_KEY must be set}
       MONITOR_PASS: ${ZATCA_MONITOR_PASSWORD:?ZATCA_MONITOR_PASSWORD must be set}
 
+      # T033 operational bounds. These are finite operator inputs; compatible
+      # daemon images consume the worker limits and deployment health always
+      # enforces the pending limits.
+      MAX_WORKERS_PER_TENANT: ${ZATCA_MAX_WORKERS_PER_TENANT:-1}
+      MAX_WORKERS_PER_BRANCH: ${ZATCA_MAX_WORKERS_PER_BRANCH:-1}
+      MAX_PENDING: ${ZATCA_MAX_PENDING:-1000}
+      MAX_ACK_PENDING: ${ZATCA_MAX_ACK_PENDING:-100}
+
       # Optional failure-alert delivery.
       SMTP_HOST: ${ZATCA_SMTP_HOST:-host.docker.internal}
       SMTP_PORT: ${ZATCA_SMTP_PORT:-25}

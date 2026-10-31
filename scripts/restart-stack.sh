@@ -15,6 +15,7 @@
 #   sudo bash scripts/restart-stack.sh --env all      # dev + prod dashboards + dokku
 #   sudo bash scripts/restart-stack.sh --env prod --dokku-only
 #   sudo bash scripts/restart-stack.sh --env dev --dashboard-only
+#   sudo bash scripts/restart-stack.sh --config /opt/deployment/config.env
 # =============================================================================
 
 set -euo pipefail
@@ -35,10 +36,12 @@ DOKKU_ONLY=false
 DASHBOARD_ONLY=false
 DOKKU_STOP_SECONDS="${DOKKU_STOP_SECONDS:-20}"
 COMMAND_TIMEOUT_SECONDS="${COMMAND_TIMEOUT_SECONDS:-60}"
+CONFIG_FILE="${CONFIG_FILE:-${REPO_DIR}/config.env}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --env)            ENV_NAME="$2"; shift 2 ;;
+        --config)         CONFIG_FILE="$2"; shift 2 ;;
         --dokku-only)     DOKKU_ONLY=true; shift ;;
         --dashboard-only) DASHBOARD_ONLY=true; shift ;;
         -h|--help)        sed -n '1,28p' "$0"; exit 0 ;;
@@ -65,7 +68,7 @@ load_stack_env() {
     local caller_dokku_port="${DOKKU_PORT:-}"
     local caller_dokku_hostname="${DOKKU_HOSTNAME:-}"
     local env_file
-    for env_file in "${REPO_DIR}/config.env" "${REPO_DIR}/install.env"; do
+    for env_file in "$CONFIG_FILE" "${REPO_DIR}/install.env"; do
         if [ -f "$env_file" ]; then
             # shellcheck disable=SC1090
             set -a; . "$env_file"; set +a
@@ -75,6 +78,26 @@ load_stack_env() {
     [ -n "$caller_dokku_hostname" ] && DOKKU_HOSTNAME="$caller_dokku_hostname"
     DOKKU_PORT="${DOKKU_PORT:-8080}"
     DOKKU_HOSTNAME="${DOKKU_HOSTNAME:-${BASE_DOMAIN:-localtest.me}}"
+}
+
+zatca_daemon_enabled() {
+    case "${ZATCA_DAEMON_ENABLED:-0}" in
+        1|true|yes) return 0 ;;
+        *)          return 1 ;;
+    esac
+}
+
+start_zatca_daemon() {
+    if ! zatca_daemon_enabled; then
+        return 0
+    fi
+    log "Starting ZATCA daemon..."
+    if ! bash "${SCRIPT_DIR}/setup-zatca-daemon.sh" --config "$CONFIG_FILE"; then
+        error "  ZATCA daemon did not become ready. Recent logs:"
+        docker logs --tail 200 "${ZATCA_DAEMON_CONTAINER:-zatca-daemon}" 2>&1 \
+            | sed 's/^/    /' >&2 || true
+        exit 1
+    fi
 }
 
 dashboard_envs() {
@@ -273,6 +296,7 @@ fi
 if ! $DASHBOARD_ONLY; then
     stop_dokku_if_present
     start_or_recreate_dokku
+    start_zatca_daemon
 fi
 
 if ! $DOKKU_ONLY; then

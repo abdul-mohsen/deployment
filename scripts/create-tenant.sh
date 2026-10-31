@@ -56,6 +56,13 @@ mysql_password_sql_literal() {
     printf "'%s'" "$password"
 }
 
+zatca_daemon_enabled() {
+    case "${ZATCA_DAEMON_ENABLED:-0}" in
+        1|true|yes) return 0 ;;
+        *)          return 1 ;;
+    esac
+}
+
 # ---- Load config ----
 CONFIG_FILE="${CONFIG_FILE:-$PROJECT_DIR/config.env}"
 for i in $(seq 1 $#); do
@@ -598,6 +605,7 @@ MYSQL_APP_HOST="$(mysql_host_for_container "${MYSQL_HOST:-host.docker.internal}"
 
 TENANT_DB_USER="usr_${TENANT_NAME//-/_}"
 DB_PROVISIONED=false
+TENANT_REGISTERED=false
 
 if ! $NO_DATABASE; then
     if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
@@ -652,6 +660,7 @@ INSERT INTO tenant (name, db_name)
 VALUES ('${TENANT_NAME}', '${TENANT_DB_NAME}')
 ON DUPLICATE KEY UPDATE enabled=1;
 SQLEOF
+        TENANT_REGISTERED=true
 
         # Inject DB env vars into the backend container.
         # Both naming conventions: modern (DB_HOST/DB_USER/...) and legacy
@@ -676,11 +685,7 @@ SQLEOF
             bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
                 --schema-only \
                 --backend-image "$BACKEND_IMAGE" \
-                --config "$CONFIG_FILE" \
-                --env "DB_HOST=$MYSQL_APP_HOST" \
-                --env "DB_PORT=$MYSQL_PORT" \
-                --env "DB_USER=$TENANT_DB_USER" \
-                --env "DB_PASSWORD=$TENANT_DB_PASS"
+                --config "$CONFIG_FILE"
             DB_PROVISIONED=true
         else
             warn "No backend image supplied; skipping schema initialization."
@@ -754,11 +759,7 @@ if $DB_PROVISIONED && ! $GIT_ONLY; then
     if [ -n "$ADMIN_USER$ADMIN_PASSWORD$MANAGER_USER$MANAGER_PASSWORD" ]; then
         if [ -n "$BACKEND_IMAGE" ] && [ -n "$FRONTEND_IMAGE" ]; then
             log "Seeding tenant users..."
-            seed_args=("$TENANT_NAME" --seed-only --config "$CONFIG_FILE" \
-                --env "DB_HOST=$MYSQL_APP_HOST" \
-                --env "DB_PORT=$MYSQL_PORT" \
-                --env "DB_USER=$TENANT_DB_USER" \
-                --env "DB_PASSWORD=$TENANT_DB_PASS")
+            seed_args=("$TENANT_NAME" --seed-only --config "$CONFIG_FILE")
             [ -n "$ADMIN_USER" ] && seed_args+=(--env "ADMIN_USER=$ADMIN_USER")
             [ -n "$ADMIN_PASSWORD" ] && seed_args+=(--env "ADMIN_PASSWORD=$ADMIN_PASSWORD")
             [ -n "$MANAGER_USER" ] && seed_args+=(--env "MANAGER_USER=$MANAGER_USER")
@@ -777,6 +778,15 @@ fi
 # ---- 11. External nginx ----
 info "Host nginx (operator-managed) wildcards *.${BASE_DOMAIN} → 127.0.0.1:${DOKKU_PORT}; nothing to do per-tenant."
 info "Verify once on the host that the wildcard vhost forwards with 'Host \$host' preserved, then: sudo nginx -t && sudo systemctl reload nginx"
+
+# The daemon loads enabled tenant rows and branch workers in memory. Refresh it
+# only after the registry row and tenant database have been committed.
+if $TENANT_REGISTERED && zatca_daemon_enabled; then
+    log "Refreshing ZATCA daemon tenant discovery..."
+    bash "$SCRIPT_DIR/reload-zatca-daemon.sh" \
+        --config "$CONFIG_FILE" \
+        --tenant "$TENANT_NAME"
+fi
 
 # ---- DNS wildcard check ----
 # Fail loudly if *.BASE_DOMAIN doesn't resolve — the tenant URL below will

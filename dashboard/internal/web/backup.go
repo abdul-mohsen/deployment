@@ -470,8 +470,7 @@ func (s *server) handleAccountingExport(w http.ResponseWriter, r *http.Request) 
 	user := strings.TrimSpace(s.cfg.MySQLAdminUser)
 	password := s.cfg.MySQLAdminPassword
 
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&timeout=30s",
-		user, password, host, port, dbName)
+	dsn := mysqlDSN(user, password, host, port, dbName, 30*time.Second, true)
 
 	f, err := buildAccountingExcel(r.Context(), dsn, tenant)
 	if err != nil {

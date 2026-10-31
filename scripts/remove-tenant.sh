@@ -24,6 +24,13 @@ log()   { echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[✗]${NC} $*" >&2; }
 
+zatca_daemon_enabled() {
+    case "${ZATCA_DAEMON_ENABLED:-0}" in
+        1|true|yes) return 0 ;;
+        *)          return 1 ;;
+    esac
+}
+
 # Parse --config early (before sourcing)
 CONFIG_FILE="$PROJECT_DIR/config.env"
 for i in $(seq 1 $#); do
@@ -68,6 +75,7 @@ MYSQL_PORT="${MYSQL_PORT:-3306}"
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
 BACKEND_APP="${TENANT_NAME}-backend"
 FRONTEND_APP="${TENANT_NAME}-frontend"
+TENANT_REGISTRY_CHANGED=false
 
 # Check apps exist
 BACKEND_EXISTS=false
@@ -119,9 +127,20 @@ SQLEOF
     run_mysql "$DEPLOY_STATE_DB" <<SQLEOF 2>/dev/null || true
 DELETE FROM tenant_image WHERE name='${TENANT_NAME}';
 SQLEOF
+    TENANT_REGISTRY_CHANGED=true
     log "Tenant removed from master database."
 else
     warn "MYSQL_ADMIN_PASSWORD not set — skipping database cleanup."
+fi
+
+# The daemon keeps tenant DB handles and branch workers in memory. Refresh it
+# immediately after the registry/database mutation so it drops removed tenants
+# before their Dokku apps are destroyed.
+if $TENANT_REGISTRY_CHANGED && zatca_daemon_enabled; then
+    log "Refreshing ZATCA daemon tenant discovery..."
+    bash "$SCRIPT_DIR/reload-zatca-daemon.sh" \
+        --config "$CONFIG_FILE" \
+        --tenant "$TENANT_NAME"
 fi
 
 # ---- Remove host nginx vhost (NGINX_MODE=behind-nginx) ----

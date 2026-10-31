@@ -1,0 +1,59 @@
+# Optional ZATCA daemon overlay.
+#
+# The daemon owns the embedded NATS/JetStream server. Start it explicitly with:
+#   docker compose --env-file ../config.env \
+#     -f docker-compose.zatca.yml --profile zatca up -d zatca-daemon
+#
+# This deployment consumes the daemon's existing contract. Worker concurrency
+# is fixed by the daemon (one ordered fetch per active branch); backlog values
+# are checked by scripts/health-zatca-daemon.sh, not passed as unsupported
+# daemon environment variables.
+services:
+  zatca-daemon:
+    profiles: ["zatca"]
+    image: ${ZATCA_DAEMON_IMAGE:?ZATCA_DAEMON_IMAGE must be set}
+    container_name: ${ZATCA_DAEMON_CONTAINER:-zatca-daemon}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${ZATCA_NATS_PORT:-4222}:4222"
+      - "127.0.0.1:${ZATCA_NATS_MONITOR_PORT:-8222}:8222"
+    volumes:
+      - "${ZATCA_XML_ROOT:-/opt/zatca-xml}:/data/zatca-xml"
+      - "${ZATCA_NATS_DATA_ROOT:-/opt/zatca-nats}:/data/nats"
+    environment:
+      DB_USER: ${ZATCA_DB_USER:?ZATCA_DB_USER must be set}
+      DB_PASS: ${ZATCA_DB_PASSWORD:?ZATCA_DB_PASSWORD must be set}
+      DB_HOST: ${MYSQL_HOST:-host.docker.internal}
+      DB_PORT: ${MYSQL_PORT:-3306}
+      MASTER_DB: ${MYSQL_MASTER_DB:-zatca_master}
+      ADMIN_DB_USER: ${ZATCA_ADMIN_DB_USER:-}
+      ADMIN_DB_PASS: ${ZATCA_ADMIN_DB_PASSWORD:-}
+      ADMIN_DB_HOST: ${ZATCA_ADMIN_DB_HOST:-}
+      ENCRYPT_KEY: ${ZATCA_ENCRYPT_KEY:?ZATCA_ENCRYPT_KEY must be set}
+      MONITOR_PASS: ${ZATCA_MONITOR_PASSWORD:?ZATCA_MONITOR_PASSWORD must be set}
+      SMTP_HOST: ${ZATCA_SMTP_HOST:-host.docker.internal}
+      SMTP_PORT: ${ZATCA_SMTP_PORT:-25}
+      SMTP_USER: ${ZATCA_SMTP_USER:-}
+      SMTP_PASS: ${ZATCA_SMTP_PASSWORD:-}
+      SMTP_FROM: ${ZATCA_SMTP_FROM:-zatca-daemon@localhost}
+    command:
+      - "--nats-port=4222"
+      - "--nats-monitor=8222"
+      - "--nats-data=/data/nats"
+      - "--xml-dir=/data/zatca-xml"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'wget -qO- --user=health --password="$${MONITOR_PASS}" http://127.0.0.1:8222/healthz >/dev/null'
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

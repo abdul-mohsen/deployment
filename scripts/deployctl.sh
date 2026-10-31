@@ -40,7 +40,8 @@ Areas:
   fleet auto-pull [flags]            Run one auto-pull cycle
 
   stack restart [flags]              Restart Dokku/dashboard stack
-  setup all|dokku|nats|dev-tenant    Bootstrap server pieces
+  setup all|dokku|nats|zatca-daemon|zatca-health|zatca-reload|dev-tenant
+                                     Bootstrap server pieces and daemon checks
   db verify                          Check MySQL connectivity
   dokku fix-hostname|discover-nginx|traffic
   webhook serve|tls
@@ -67,7 +68,7 @@ need_arg() {
 
 script_accepts_config() {
     case "$1" in
-        auto-pull.sh|backup-tenant.sh|cleanup-broken-tenant.sh|create-tenant.sh|deploy-all.sh|init-tenant-db.sh|list-tenants.sh|manage-backups.sh|remove-tenant.sh|restore-tenant.sh|rollback-tenant.sh|set-tenant-image.sh|setup-dev-tenant.sh|setup.sh|status.sh|update-tenant.sh|webhook-server.sh)
+        auto-pull.sh|backup-tenant.sh|cleanup-broken-tenant.sh|create-tenant.sh|deploy-all.sh|health-zatca-daemon.sh|init-tenant-db.sh|list-tenants.sh|manage-backups.sh|remove-tenant.sh|reload-zatca-daemon.sh|restore-tenant.sh|restart-stack.sh|rollback-tenant.sh|set-tenant-image.sh|setup-dev-tenant.sh|setup-nats.sh|setup-zatca-daemon.sh|setup.sh|status.sh|update-tenant.sh|webhook-server.sh)
             return 0
             ;;
         *)
@@ -234,6 +235,9 @@ setup_cmd() {
         all) run_script setup.sh "$@" ;;
         dokku) run_script setup-dokku.sh "$@" ;;
         nats) run_script setup-nats.sh "$@" ;;
+        zatca-daemon|zatca) run_script setup-zatca-daemon.sh "$@" ;;
+        zatca-health|health) run_script health-zatca-daemon.sh "$@" ;;
+        zatca-reload|reload) run_script reload-zatca-daemon.sh "$@" ;;
         dev-tenant|tenant) run_script setup-dev-tenant.sh "$@" ;;
         *) die "unknown setup target: $target" ;;
     esac

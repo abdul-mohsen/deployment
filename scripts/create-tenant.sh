@@ -51,6 +51,13 @@ warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[✗]${NC} $*" >&2; }
 info()  { echo -e "${BLUE}[i]${NC} $*"; }
 
+zatca_daemon_enabled() {
+    case "${ZATCA_DAEMON_ENABLED:-0}" in
+        1|true|yes) return 0 ;;
+        *)          return 1 ;;
+    esac
+}
+
 # ---- Load config ----
 CONFIG_FILE="${CONFIG_FILE:-$PROJECT_DIR/config.env}"
 for i in $(seq 1 $#); do
@@ -497,7 +504,7 @@ dokku config:set --no-restart "$BACKEND_APP" \
     TENANT_ID="$TENANT_NAME" \
     PORT="$BACKEND_PORT" \
     SERVER_PORT="$BACKEND_PORT" \
-    NATS_URL="${NATS_URL:-nats://host.docker.internal:4222}" \
+    NATS_URL="${NATS_URL:-${ZATCA_NATS_URL:-nats://host.docker.internal:${ZATCA_NATS_PORT:-4222}}}" \
     BASEURL="${BASEURL:-/api/v2}" \
     JWT_SECERT_KEY="${JWT_SECERT_KEY:-$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48)}"
 
@@ -547,6 +554,7 @@ MYSQL_APP_HOST="$(mysql_host_for_container "${MYSQL_HOST:-host.docker.internal}"
 TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
 TENANT_DB_USER="usr_${TENANT_NAME//-/_}"
 DB_PROVISIONED=false
+TENANT_REGISTERED=false
 
 if ! $NO_DATABASE; then
     if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
@@ -599,6 +607,7 @@ INSERT INTO tenant (name, db_name)
 VALUES ('${TENANT_NAME}', '${TENANT_DB_NAME}')
 ON DUPLICATE KEY UPDATE enabled=1;
 SQLEOF
+        TENANT_REGISTERED=true
 
         # Inject DB env vars into the backend container.
         # Both naming conventions: modern (DB_HOST/DB_USER/...) and legacy
@@ -724,6 +733,17 @@ if [ -n "$MIGRATE_CMD" ] && [ -n "$BACKEND_IMAGE" ]; then
 elif [ -n "$MIGRATE_CMD" ] && [ -z "$BACKEND_IMAGE" ]; then
     warn "--migrate specified but no backend image deployed yet. Skipping migration."
     warn "Run manually after deploy: dokku run $BACKEND_APP $MIGRATE_CMD"
+fi
+
+# ---- 13. Refresh daemon tenant discovery -----------------------------------
+# The daemon contract loads the enabled tenant registry at startup. Recreate it
+# only after the tenant database and registry write are complete, preserving
+# its XML and JetStream volumes across the restart.
+if $TENANT_REGISTERED && zatca_daemon_enabled; then
+    log "Refreshing ZATCA daemon tenant discovery..."
+    bash "$SCRIPT_DIR/reload-zatca-daemon.sh" \
+        --config "$CONFIG_FILE" \
+        --tenant "$TENANT_NAME"
 fi
 
 # ---- DNS wildcard check ----

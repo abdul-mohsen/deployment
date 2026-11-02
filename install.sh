@@ -80,7 +80,6 @@ fi
 : "${WEBHOOK_SECRET:=}"
 : "${STORAGE_ROOT:=/opt/tenant-data}"
 : "${BACKUP_DIR:=/opt/tenant-backups}"
-: "${MIGRATE_CMD:=atlas migrate apply --dir file:///app/migrations --url \"\$DATABASE_URL\"}"
 
 DEV_ONLY=true
 SKIP_DEV_TENANT=false
@@ -165,10 +164,6 @@ APP_IMAGE_frontend=${APP_IMAGE_frontend}
 
 DEV_TENANT=${DEV_TENANT}
 DEV_TAG=${DEV_TAG}
-
-# Single-quoted: \$DATABASE_URL must stay literal here. It's expanded inside
-# the backend container by Dokku at run time, not when config.env is sourced.
-MIGRATE_CMD='${MIGRATE_CMD}'
 
 WEBHOOK_SECRET=${WEBHOOK_SECRET}
 EOF

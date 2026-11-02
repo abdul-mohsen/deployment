@@ -118,6 +118,9 @@ SQLEOF
     run_mysql "$MYSQL_MASTER_DB" <<SQLEOF 2>/dev/null || true
 DELETE FROM tenant WHERE db_name='${TENANT_DB_NAME}';
 SQLEOF
+    run_mysql "$DEPLOY_STATE_DB" <<SQLEOF 2>/dev/null || true
+DELETE FROM tenant_image WHERE name='${TENANT_NAME}';
+SQLEOF
     log "Tenant removed from master database."
 else
     warn "MYSQL_ROOT_PASSWORD not set — skipping database cleanup."

@@ -63,7 +63,6 @@ fi
 SUFFIX="-${APP_TYPE}"
 BASE_DOMAIN="${BASE_DOMAIN:-app.example.com}"
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
-MIGRATE_CMD="${MIGRATE_CMD:-}"
 IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"
 
 ensure_deploy_image_available() {
@@ -107,8 +106,8 @@ get_tenant_override() {
     local col="${APP_TYPE}_image"
     [ -z "${MYSQL_ROOT_PASSWORD:-}" ] && { echo ""; return; }
     run_mysql -N -B "$MYSQL_MASTER_DB" -e \
-        "SELECT $col FROM tenant WHERE name='${tenant}' AND enabled=1 LIMIT 1;" 2>/dev/null \
-        | head -1 || echo ""
+        "SELECT i.$col FROM \`${DEPLOY_STATE_DB}\`.tenant_image i JOIN \`${MYSQL_MASTER_DB}\`.tenant t ON t.name = i.name WHERE i.name='${tenant}' AND t.enabled=1 LIMIT 1;" \
+        | head -1
 }
 
 # Deploy one app, honoring per-tenant override and running migrations
@@ -119,10 +118,23 @@ deploy_one() {
 
     # Per-tenant override (only for backend; frontend rarely needs pinning)
     local override
-    override=$(get_tenant_override "$tenant")
+    if ! override=$(get_tenant_override "$tenant"); then
+        error "${tenant}: cannot read the image pin from ${DEPLOY_STATE_DB}.tenant_image; not deploying"
+        return 1
+    fi
     if [ -n "$override" ] && [ "$override" != "$IMAGE" ]; then
         warn "${tenant}: pinned to '${override}' — skipping global deploy"
         return 0
+    fi
+
+    # Goose runs from the new image before anything is deployed. A failed
+    # migration fails this app and leaves the running release untouched.
+    if [ "$APP_TYPE" = "backend" ]; then
+        log "  Running migrations on ${app} (goose, from ${image})"
+        if ! migrate_backend_tenant "$app" "$image"; then
+            error "  Migration failed on ${app}; not deploying ${image}"
+            return 1
+        fi
     fi
 
     if ! dokku config:set --no-restart "$app" \
@@ -133,12 +145,6 @@ deploy_one() {
 
     if ! dokku_git_from_image "$app" "$image"; then
         return 1
-    fi
-
-    # Run DB migration if configured (backend only)
-    if [ "$APP_TYPE" = "backend" ] && [ -n "$MIGRATE_CMD" ]; then
-        log "  Running migration on ${app}: ${MIGRATE_CMD}"
-        dokku run "$app" $MIGRATE_CMD || warn "  Migration failed on ${app}"
     fi
     return 0
 }

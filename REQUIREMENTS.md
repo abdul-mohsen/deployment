@@ -70,13 +70,18 @@ Copy from [config.env.example](config.env.example) and fill:
 - `STORAGE_ROOT=/opt/tenant-data`
 - `MYSQL_HOST=host.docker.internal`, `MYSQL_PORT=3306`,
   `MYSQL_ROOT_USER`, `MYSQL_ROOT_PASSWORD`
-- `MYSQL_MASTER_DB=zatca_master` — registry table `tenant(name, db_name, enabled)`
+- `MYSQL_MASTER_DB=zatca_master` — registry table `tenant(name, db_name, enabled, tenant_key)`,
+  owned by the zatca_master schema; deployment only writes rows there. `DEPLOY_STATE_DB`
+  (default `deployment_state`) holds per-tenant image pins in `tenant_image`, created by `setup.sh`.
 - `MYSQL_TENANT_HOST=172.%` — docker bridge subnet; **must match** the host
   pattern used in [scripts/remove-tenant.sh](scripts/remove-tenant.sh)
 - `DOCKERHUB_USERNAME`, optional `BACKEND_IMAGE` / `FRONTEND_IMAGE`,
   `PULL_TAG=latest`
-- `MIGRATE_CMD` — Atlas:
-  `atlas migrate apply --dir file:///app/migrations --url "$DATABASE_URL"`
+- Tenant DB schema: goose only. Every backend deploy runs `/app/migrate up` from the
+  backend image against the tenant DB before that image is deployed. A failed migration
+  fails the deploy. The command is fixed, not configurable.
+- The backend refuses to start without `company.tenant_key`. Deploy copies
+  `zatca_master.tenant.tenant_key` into `company` after goose and before the image starts.
 - Optional: `PUBLIC_PROTOCOL=https|http` (controls only the `API_URL` string),
   `NGINX_CLIENT_MAX_BODY_SIZE=50m`
 

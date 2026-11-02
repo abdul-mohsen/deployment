@@ -287,12 +287,12 @@ func Catalog() []Script {
 					Help: "Only use this if the backend can boot without a DB, or if you provide DATABASE_URL/DB_* in Env vars."},
 				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
 				{Name: "envs", Label: "Env vars", Flag: "--env", Type: "kv",
-					Help: "One KEY=VALUE per line; each becomes a separate --env flag. Use this for DATABASE_URL or DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD when not provisioning MySQL from this script."},
+					Help: "One KEY=VALUE per line; each becomes a separate --env flag. DATABASE_URL and DB_* are set by MySQL provisioning, which backend tenants require."},
 			},
 		},
 		{
 			Name: "init-tenant-db.sh", Title: "Initialize tenant DB",
-			Summary: "Apply schema/migrations from the backend image and seed tenant users.",
+			Summary: "Run goose migrations from the backend image and seed tenant users.",
 			Danger:  true,
 			Fields: []Field{
 				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true, Placeholder: "acme"},

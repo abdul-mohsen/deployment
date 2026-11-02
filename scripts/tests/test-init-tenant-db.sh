@@ -100,4 +100,19 @@ else
 fi
 
 echo ""
+echo "=== dry-run --schema-only plans goose from the backend image ==="
+output=$(bash scripts/init-tenant-db.sh acme --schema-only --dry-run \
+    --config "$tmpcfg" \
+    --backend-image example/api:v1 2>&1 || true)
+
+if echo "$output" | grep -qF "/app/migrate up from example/api:v1"; then
+    pass "dry-run schema prints the goose command"
+else
+    echo "--- output ---"
+    echo "$output"
+    echo "--- end ---"
+    fail "dry-run schema did not plan goose migrations"
+fi
+
+echo ""
 echo "=== all tests passed ==="

@@ -24,7 +24,6 @@
 #   --env KEY=VALUE           Set env var (repeatable)
 #   --git-only                Create apps without deploying (deploy via git push)
 #   --dry-run                 Show plan without executing
-#   --migrate <cmd>           Run migration after initial deploy (e.g. "npm run migrate")
 #   --config <path>           Path to config.env file (default: ../config.env)
 #
 # Examples:
@@ -83,19 +82,7 @@ NO_DATABASE=false
 GIT_ONLY=false
 DRY_RUN=false
 FORCE_UPDATE=false
-MIGRATE_CMD=""
 declare -a ENV_VARS=()
-
-has_env_var() {
-    local key="$1"
-    local ev
-    for ev in "${ENV_VARS[@]+${ENV_VARS[@]}}"; do
-        if [[ "$ev" == "$key="* ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
 
 env_value() {
     local key="$1"
@@ -221,7 +208,6 @@ while [[ $# -gt 0 ]]; do
         --git-only)       GIT_ONLY=true; shift ;;
         --dry-run)        DRY_RUN=true; shift ;;
         --update)         FORCE_UPDATE=true; shift ;;
-        --migrate)        MIGRATE_CMD="$2"; shift 2 ;;
         --config)         CONFIG_FILE="$2"; shift 2 ;;
         -*)               error "Unknown option: $1"; exit 1 ;;
         *)
@@ -265,14 +251,6 @@ BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
 
 MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
-HAS_DATABASE_URL=false
-HAS_DB_PARTS=false
-if has_env_var "DATABASE_URL"; then
-    HAS_DATABASE_URL=true
-fi
-if has_env_var "DB_HOST" && has_env_var "DB_PORT" && has_env_var "DB_NAME" && has_env_var "DB_USER" && has_env_var "DB_PASSWORD"; then
-    HAS_DB_PARTS=true
-fi
 
 BACKEND_APP="${TENANT_NAME}-backend"
 FRONTEND_APP="${TENANT_NAME}-frontend"
@@ -284,15 +262,16 @@ TENANT_NETWORK="${TENANT_APP_NETWORK:-web}"
 export TENANT_NETWORK
 export BACKEND_PORT
 
-if [ -n "$BACKEND_IMAGE" ] && ! $HAS_DATABASE_URL && ! $HAS_DB_PARTS; then
+# A backend tenant needs goose migrations and the registry tenant_key, so it
+# needs MySQL provisioning. External DB env vars cannot replace it.
+if [ -n "$BACKEND_IMAGE" ]; then
     if $NO_DATABASE; then
-        error "Backend image deploy requires database settings, but --no-database was set and no DATABASE_URL/DB_* env vars were provided."
-        error "Either remove --no-database and configure MySQL, or provide explicit DB env vars."
+        error "Backend image deploy requires MySQL provisioning (goose migrations and tenant_key), but --no-database was set."
         exit 1
     fi
     if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
-        error "Backend image deploy requires database provisioning, but MYSQL_ROOT_PASSWORD is not configured in config.env."
-        error "Set MYSQL_ROOT_PASSWORD, run scripts/verify-mysql.sh, then retry; or provide DATABASE_URL/DB_* via --env; or use --git-only."
+        error "Backend image deploy requires MySQL provisioning, but MYSQL_ROOT_PASSWORD is not configured in config.env."
+        error "Set MYSQL_ROOT_PASSWORD, run scripts/verify-mysql.sh, then retry; or use --git-only."
         exit 1
     fi
 fi
@@ -619,7 +598,7 @@ SQLEOF
         log "Database ready: $TENANT_DB_NAME"
 
         if [ -n "$BACKEND_IMAGE" ]; then
-            log "Initializing tenant database schema from backend image..."
+            log "Running goose migrations from backend image..."
             bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
                 --schema-only \
                 --backend-image "$BACKEND_IMAGE" \
@@ -711,20 +690,6 @@ fi
 # ---- 11. External nginx ----
 info "Host nginx (operator-managed) wildcards *.${BASE_DOMAIN} → 127.0.0.1:${DOKKU_PORT}; nothing to do per-tenant."
 info "Verify once on the host that the wildcard vhost forwards with 'Host \$host' preserved, then: sudo nginx -t && sudo systemctl reload nginx"
-
-# ---- 12. Run database migration ----
-if [ -n "$MIGRATE_CMD" ] && [ -n "$BACKEND_IMAGE" ]; then
-    log "Running database migration: $MIGRATE_CMD"
-    if dokku run "$BACKEND_APP" $MIGRATE_CMD; then
-        log "Migration completed successfully."
-    else
-        warn "Migration failed. You may need to run it manually:"
-        warn "  dokku run $BACKEND_APP $MIGRATE_CMD"
-    fi
-elif [ -n "$MIGRATE_CMD" ] && [ -z "$BACKEND_IMAGE" ]; then
-    warn "--migrate specified but no backend image deployed yet. Skipping migration."
-    warn "Run manually after deploy: dokku run $BACKEND_APP $MIGRATE_CMD"
-fi
 
 # ---- DNS wildcard check ----
 # Fail loudly if *.BASE_DOMAIN doesn't resolve — the tenant URL below will

@@ -408,3 +408,85 @@ write_backup_manifest() {
 }
 EOF
 }
+
+# =============================================================================
+# Tenant migrations and registry key
+# =============================================================================
+# Goose is the only migration path: a tenant DB is built by the backend image's
+# /app/migrate command (`up`), run before the new image is deployed. Deployment
+# writes rows only; it never ALTERs or CREATEs tables in zatca_master or in a
+# tenant DB. The backend refuses to start without company.tenant_key, which is
+# copied from zatca_master.tenant.tenant_key and never generated here.
+: "${DEPLOY_STATE_DB:=deployment_state}"
+
+# goose_migrate <image> <host> <port> <db> <user> <password>
+#   Runs /app/migrate up from <image> against one tenant DB. The settings use the
+#   same names create-tenant.sh puts on the backend app.
+goose_migrate() {
+    local image="$1" host="$2" port="$3" db="$4" user="$5" password="$6"
+    docker run --rm --add-host=host.docker.internal:host-gateway \
+        -e "DATABASE_URL=mysql://${user}:${password}@${host}:${port}/${db}" \
+        -e "DB_HOST=${host}" -e "DB_PORT=${port}" -e "DB_NAME=${db}" \
+        -e "DB_USER=${user}" -e "DB_PASSWORD=${password}" \
+        -e "HOST=${host}:${port}" -e "DBUSER=${user}" -e "PASSWORD=${password}" \
+        -e "DBNAME=${db}" \
+        --entrypoint /app/migrate "$image" up
+}
+
+# tenant_registry_key <db>
+#   Prints zatca_master.tenant.tenant_key for the tenant DB. Fails if it is empty.
+tenant_registry_key() {
+    local db="$1" key db_sql
+    db_sql="${db//\'/\'\'}"
+    key="$(run_mysql -N -B "${MYSQL_MASTER_DB:-zatca_master}" -e \
+        "SELECT IFNULL(tenant_key, '') FROM tenant WHERE db_name='${db_sql}' LIMIT 1;")" || key=""
+    if [ -z "$key" ]; then
+        echo "[✗] No tenant_key in ${MYSQL_MASTER_DB:-zatca_master}.tenant for ${db}." >&2
+        return 1
+    fi
+    printf '%s' "$key"
+}
+
+# write_tenant_key <db>
+#   Copies the registry tenant_key into company (id 1) and checks that it landed.
+#   Must run after goose and before the backend image is deployed.
+write_tenant_key() {
+    local db="$1" key key_sql matched
+    key="$(tenant_registry_key "$db")" || return 1
+    key_sql="${key//\'/\'\'}"
+    run_mysql "$db" <<SQLEOF || return 1
+UPDATE company SET tenant_key='${key_sql}' WHERE id=1;
+SQLEOF
+    matched="$(run_mysql -N -B "$db" <<SQLEOF
+SELECT COUNT(*) FROM company WHERE id=1 AND tenant_key='${key_sql}';
+SQLEOF
+)"
+    if [ "$matched" != "1" ]; then
+        echo "[✗] company row 1 in ${db} does not carry tenant_key; the backend will not start." >&2
+        return 1
+    fi
+}
+
+# backend_app_setting <app> <key>
+#   Prints one Dokku config value for the app, or nothing.
+backend_app_setting() {
+    dokku config:get "$1" "$2" 2>/dev/null | awk 'NF { print; exit }' || true
+}
+
+# migrate_backend_tenant <app> <image>
+#   Runs goose from <image> against the tenant DB named in the app's Dokku config,
+#   then writes the registry key. Callers deploy <image> only if this succeeds.
+migrate_backend_tenant() {
+    local app="$1" image="$2" host port db user password
+    host="$(backend_app_setting "$app" DB_HOST)"
+    port="$(backend_app_setting "$app" DB_PORT)"
+    db="$(backend_app_setting "$app" DB_NAME)"
+    user="$(backend_app_setting "$app" DB_USER)"
+    password="$(backend_app_setting "$app" DB_PASSWORD)"
+    if [ -z "$host" ] || [ -z "$port" ] || [ -z "$db" ] || [ -z "$user" ] || [ -z "$password" ]; then
+        echo "[✗] DB_HOST, DB_PORT, DB_NAME, DB_USER and DB_PASSWORD must all be set on ${app}; cannot run migrations." >&2
+        return 1
+    fi
+    goose_migrate "$image" "$host" "$port" "$db" "$user" "$password" || return 1
+    write_tenant_key "$db"
+}

@@ -120,6 +120,11 @@ rollback_app() {
     info "  From: $current_image"
     info "  To:   $image"
 
+    if [ "$APP_TYPE" = "backend" ] && ! migrate_backend_tenant "$app" "$image"; then
+        error "$app rollback FAILED: migration failed, image not deployed"
+        return 1
+    fi
+
     if dokku_git_from_image "$app" "$image"; then
         log "$app rolled back successfully ✓"
     else

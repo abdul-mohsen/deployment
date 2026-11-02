@@ -118,6 +118,10 @@ done
 if [ -n "$BACKEND_IMAGE" ]; then
     log "Deploying backend: $BACKEND_IMAGE"
     ensure_update_image_available "$BACKEND_IMAGE"
+    if ! migrate_backend_tenant "$BACKEND_APP" "$BACKEND_IMAGE"; then
+        error "Migration failed on $BACKEND_APP; not deploying $BACKEND_IMAGE."
+        exit 1
+    fi
     dokku config:set --no-restart "$BACKEND_APP" \
         APP_IMAGE_VERSION="$(image_tag "$BACKEND_IMAGE")" \
         APP_IMAGE_REF="$BACKEND_IMAGE"

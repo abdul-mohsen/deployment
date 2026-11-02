@@ -2,7 +2,8 @@
 # =============================================================================
 # init-tenant-db.sh - Initialize or repair a tenant database
 # =============================================================================
-# Applies schema/migrations from the backend image used for the tenant. The
+# Builds the tenant DB with goose: runs /app/migrate up from the backend image
+# (the only migration path), then seeds company/store and the seed users. The
 # deployment repo intentionally does not own or copy database schema files.
 # =============================================================================
 
@@ -28,20 +29,17 @@ usage() {
 Usage: $0 <tenant-name> [options]
 
 Options:
-  --backend-image <image> Backend image containing schema/migrations
+  --backend-image <image> Backend image whose /app/migrate runs goose
   --env KEY=VALUE         Seed value; supports ADMIN_USER, ADMIN_PASSWORD,
                           MANAGER_USER, MANAGER_PASSWORD, COMPANY_NAME
-  --schema-only           Apply schema/migrations only
+  --schema-only           Run goose migrations and the company seed only
   --seed-only             Seed users/company only
   --dry-run               Show planned work without executing
   --config <path>         Path to config.env file (default: ../config.env)
 
 Environment overrides:
-    BACKEND_IMAGE                Backend image containing schema/migrations
+    BACKEND_IMAGE                Backend image whose /app/migrate runs goose
     TENANT_IMAGE_PULL_POLICY     always | missing | never (default: always)
-    TENANT_SCHEMA_IMAGE_PATH     Schema path inside backend image
-    TENANT_MIGRATIONS_IMAGE_DIR  Migrations directory inside backend image
-    TENANT_IGNORED_SCHEMA_FILES  Comma-separated schema files to skip
 EOF
 }
 
@@ -99,10 +97,7 @@ TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"
 DOKKU_PORT="${DOKKU_PORT:-8080}"
 MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
-TENANT_SCHEMA_IMAGE_PATH="${TENANT_SCHEMA_IMAGE_PATH:-/app/db/schema/schema.sql}"
-TENANT_MIGRATIONS_IMAGE_DIR="${TENANT_MIGRATIONS_IMAGE_DIR:-/app/db/migrations}"
 TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"
-TENANT_IGNORED_SCHEMA_FILES="${TENANT_IGNORED_SCHEMA_FILES:-car_part.sql}"
 
 if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
     error "MYSQL_ROOT_PASSWORD is not configured; cannot initialize tenant DB."
@@ -135,26 +130,6 @@ sql_identifier_escape() {
 
 json_escape() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
-}
-
-shell_quote() {
-    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
-}
-
-tenant_table_count() {
-    if $DRY_RUN; then
-        echo 0
-        return 0
-    fi
-    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE();" | awk 'NF { print $1; exit }'
-}
-
-tenant_required_table_count() {
-    if $DRY_RUN; then
-        echo 0
-        return 0
-    fi
-    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name IN ('company','branches','store','user');" | awk 'NF { print $1; exit }'
 }
 
 tenant_missing_required_tables() {
@@ -211,7 +186,7 @@ resolve_backend_image() {
         return 0
     fi
 
-    error "Backend image is required to apply schema from image. Pass --backend-image <image>."
+    error "Backend image is required to run goose migrations. Pass --backend-image <image>."
     exit 1
 }
 
@@ -243,45 +218,6 @@ ensure_backend_image_available() {
             error "TENANT_IMAGE_PULL_POLICY must be 'always', 'missing', or 'never' (got: $TENANT_IMAGE_PULL_POLICY)"
             exit 1
             ;;
-    esac
-}
-
-image_has_file() {
-    local image="$1" path="$2"
-    docker run --rm --entrypoint sh "$image" -c "test -f $(shell_quote "$path")" >/dev/null 2>&1
-}
-
-image_has_dir() {
-    local image="$1" path="$2"
-    docker run --rm --entrypoint sh "$image" -c "test -d $(shell_quote "$path")" >/dev/null 2>&1
-}
-
-find_image_file() {
-    local image="$1" path
-    shift
-    if $DRY_RUN; then
-        echo "$TENANT_SCHEMA_IMAGE_PATH"
-        return 0
-    fi
-    for path in "$@"; do
-        if image_has_file "$image" "$path"; then
-            if schema_file_is_ignored "$path"; then
-                warn "Ignoring backend schema file: $path"
-                continue
-            fi
-            echo "$path"
-            return 0
-        fi
-    done
-    return 1
-}
-
-schema_file_is_ignored() {
-    local base
-    base="$(basename "$1")"
-    case ",$TENANT_IGNORED_SCHEMA_FILES," in
-        *,"$base",*) return 0 ;;
-        *) return 1 ;;
     esac
 }
 
@@ -348,20 +284,32 @@ resolve_mysql_host_for_client() {
     esac
 }
 
+tenant_db_user() {
+    local user
+    user="$(tenant_db_setting DB_USER "")"
+    [ -n "$user" ] || user="$(tenant_db_setting DBUSER "usr_${TENANT_NAME//-/_}")"
+    printf '%s' "$user"
+}
+
+tenant_db_password() {
+    local password
+    password="$(tenant_db_setting DB_PASSWORD "")"
+    [ -n "$password" ] || password="$(tenant_db_setting PASSWORD "")"
+    printf '%s' "$password"
+}
+
 run_tenant_mysql() {
     local db="${1:-$TENANT_DB_NAME}"
     shift || true
 
     local user password host port
-    user="$(tenant_db_setting DB_USER "")"
-    [ -n "$user" ] || user="$(tenant_db_setting DBUSER "usr_${TENANT_NAME//-/_}")"
-    password="$(tenant_db_setting DB_PASSWORD "")"
-    [ -n "$password" ] || password="$(tenant_db_setting PASSWORD "")"
+    user="$(tenant_db_user)"
+    password="$(tenant_db_password)"
     host="$(tenant_db_host)"
     port="$(tenant_db_port)"
 
     if [ -z "$password" ]; then
-        error "Tenant DB password is missing from ${BACKEND_APP} config; cannot import schema as tenant user."
+        error "Tenant DB password is missing from ${BACKEND_APP} config; cannot connect as tenant user."
         exit 1
     fi
 
@@ -376,97 +324,26 @@ run_tenant_mysql() {
     fi
 }
 
-find_image_dir() {
-    local image="$1" path
-    shift
-    if $DRY_RUN; then
-        echo "$TENANT_MIGRATIONS_IMAGE_DIR"
-        return 0
-    fi
-    for path in "$@"; do
-        if image_has_dir "$image" "$path"; then
-            echo "$path"
-            return 0
-        fi
-    done
-    return 1
-}
-
-apply_image_sql_file() {
-    local image="$1" path="$2" label="$3"
-    log "Applying ${label}: ${image}:${path}"
-    if $DRY_RUN; then
-        info "Would stream ${image}:${path} into ${TENANT_DB_NAME}"
-        return 0
-    fi
-    # Import with the tenant DB user so schema setup uses the same scoped
-    # permissions as the app runtime connection.
-    docker run --rm --entrypoint sh "$image" -c "cat $(shell_quote "$path")" \
-        | run_tenant_mysql "$TENANT_DB_NAME"
-}
-
-list_image_migrations() {
-    local image="$1" dir="$2"
-    docker run --rm --entrypoint sh "$image" -c "find $(shell_quote "$dir") -maxdepth 1 -type f -name '*.sql' | sort"
-}
-
 apply_schema() {
     ensure_tenant_database
 
-    local image count required_count schema_path migrations_dir migration migrations_found missing
+    local image
     image="$(resolve_backend_image)"
     ensure_backend_image_available "$image"
 
-    count="$(tenant_table_count)"
-    required_count="$(tenant_required_table_count)"
-    if [ "$required_count" = "4" ]; then
-        info "Tenant DB already has required base schema tables; skipping base schema."
+    log "Running goose migrations from ${image}: /app/migrate up"
+    if $DRY_RUN; then
+        info "Would run /app/migrate up from ${image} against ${TENANT_DB_NAME}"
     else
-        if [ "$count" != "0" ]; then
-            missing="$(tenant_missing_required_tables)"
-            warn "Tenant DB has $count tables but is missing required base schema tables: $missing"
-            warn "Reapplying base schema from backend image."
-        fi
-        schema_path="$(find_image_file "$image" \
-            "$TENANT_SCHEMA_IMAGE_PATH" \
-            /app/pkg/db/schema/schema.sql \
-            /app/schema.sql)" || {
-            error "Backend image does not contain a tenant schema file."
-            error "Expected ${TENANT_SCHEMA_IMAGE_PATH} (or set TENANT_SCHEMA_IMAGE_PATH)."
-            error "Fix the backend Dockerfile to copy schema into the runtime image."
+        goose_migrate "$image" "$(tenant_db_host)" "$(tenant_db_port)" "$TENANT_DB_NAME" \
+            "$(tenant_db_user)" "$(tenant_db_password)" || {
+            error "goose migrations failed for ${TENANT_DB_NAME}; tenant DB is not initialized."
             exit 1
         }
-        apply_image_sql_file "$image" "$schema_path" "base schema"
-    fi
-
-    migrations_dir="$(find_image_dir "$image" \
-        "$TENANT_MIGRATIONS_IMAGE_DIR" \
-        /app/pkg/db/migrations \
-        /app/migrations)" || true
-    if [ -z "$migrations_dir" ]; then
-        warn "Backend image has no migrations directory; skipping migrations."
-        validate_tenant_schema
-        return 0
-    fi
-
-    migrations_found=false
-    if $DRY_RUN; then
-        log "Applying migrations from ${image}:${migrations_dir}"
-        info "Would apply all *.sql files in sorted order"
-        return 0
-    fi
-
-    while IFS= read -r migration; do
-        [ -n "$migration" ] || continue
-        migrations_found=true
-        apply_image_sql_file "$image" "$migration" "migration $(basename "$migration")"
-    done < <(list_image_migrations "$image" "$migrations_dir")
-
-    if ! $migrations_found; then
-        warn "No *.sql migrations found in ${image}:${migrations_dir}."
     fi
 
     validate_tenant_schema
+    seed_company_defaults
 }
 
 seed_company_defaults() {
@@ -482,10 +359,16 @@ seed_company_defaults() {
         return 0
     fi
 
+    # The backend refuses to start without company.tenant_key. Copy it from the
+    # zatca_master registry; it is never generated here.
+    local tenant_key tenant_key_sql
+    tenant_key="$(tenant_registry_key "$TENANT_DB_NAME")" || exit 1
+    tenant_key_sql="$(sql_escape "$tenant_key")"
+
     run_tenant_mysql "$TENANT_DB_NAME" <<SQLEOF
-INSERT INTO company (id, state, name, vat_number, vat_registration_number, commercial_registration_number, name_ar, business_category)
-VALUES (1, 0, '${company_sql}', '300000000000003', '300000000000003', '1010000000', '${company_sql}', 'Supply activities')
-ON DUPLICATE KEY UPDATE name=VALUES(name), name_ar=VALUES(name_ar);
+INSERT INTO company (id, state, name, vat_number, vat_registration_number, commercial_registration_number, name_ar, business_category, tenant_key)
+VALUES (1, 0, '${company_sql}', '300000000000003', '300000000000003', '1010000000', '${company_sql}', 'Supply activities', '${tenant_key_sql}')
+ON DUPLICATE KEY UPDATE name=VALUES(name), name_ar=VALUES(name_ar), tenant_key=VALUES(tenant_key);
 
 INSERT INTO branches (id, name, company_id, is_active)
 VALUES (1, 'Main', 1, 1)

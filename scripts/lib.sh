@@ -420,16 +420,13 @@ EOF
 : "${DEPLOY_STATE_DB:=deployment_state}"
 
 # goose_migrate <image> <host> <port> <db> <user> <password>
-#   Runs /app/migrate up from <image> against one tenant DB. The settings use the
-#   same names create-tenant.sh puts on the backend app.
+#   Runs /app/migrate up from <image> against one tenant DB. cmd/migrate reads only
+#   HOST (host:port), DBNAME, DBUSER and PASSWORD (ifritah-go cmd/migrate/main.go).
 goose_migrate() {
     local image="$1" host="$2" port="$3" db="$4" user="$5" password="$6"
     docker run --rm --add-host=host.docker.internal:host-gateway \
-        -e "DATABASE_URL=mysql://${user}:${password}@${host}:${port}/${db}" \
-        -e "DB_HOST=${host}" -e "DB_PORT=${port}" -e "DB_NAME=${db}" \
-        -e "DB_USER=${user}" -e "DB_PASSWORD=${password}" \
-        -e "HOST=${host}:${port}" -e "DBUSER=${user}" -e "PASSWORD=${password}" \
-        -e "DBNAME=${db}" \
+        -e "HOST=${host}:${port}" -e "DBNAME=${db}" \
+        -e "DBUSER=${user}" -e "PASSWORD=${password}" \
         --entrypoint /app/migrate "$image" up
 }
 
@@ -445,6 +442,23 @@ tenant_registry_key() {
         return 1
     fi
     printf '%s' "$key"
+}
+
+# require_registry_tenant_key
+#   Refuses to create tenant rows unless ZATCA's zatca_master migrations are applied:
+#   tenant.tenant_key must exist and the BEFORE INSERT trigger tenant_key_default must
+#   fill it (zatca_integration migrations/zatca_master/00002_tenant_key.sql). Read-only:
+#   deployment never runs that DDL.
+require_registry_tenant_key() {
+    local master="${MYSQL_MASTER_DB:-zatca_master}" has_column has_trigger
+    has_column="$(run_mysql -N -B -e "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='${master}' AND table_name='tenant' AND column_name='tenant_key';" | awk 'NF { print $1; exit }')"
+    has_trigger="$(run_mysql -N -B -e "SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema='${master}' AND event_object_table='tenant' AND trigger_name='tenant_key_default' AND action_timing='BEFORE' AND event_manipulation='INSERT';" | awk 'NF { print $1; exit }')"
+    if [ "$has_column" != "1" ] || [ "$has_trigger" != "1" ]; then
+        echo "[✗] ${master}.tenant is not ready: it needs column tenant_key and trigger tenant_key_default." >&2
+        echo "    Apply ZATCA's zatca_master migrations first (zatca_integration: migrations/zatca_master, goose)." >&2
+        echo "    This script does not run that DDL." >&2
+        return 1
+    fi
 }
 
 # write_tenant_key <db>

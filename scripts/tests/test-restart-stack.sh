@@ -368,6 +368,9 @@ grep -q 'migrate_backend_tenant "\$app" "\$image"' scripts/deploy-all.sh \
 grep -qF "UPDATE company SET tenant_key='\${key_sql}' WHERE id=1;" scripts/lib.sh \
     && PASS "tenant_key is written with UPDATE ... WHERE" \
     || FAIL "tenant_key write must be an UPDATE with a WHERE clause"
+grep -q 'require_registry_tenant_key' scripts/create-tenant.sh \
+    && PASS "create-tenant refuses to create a tenant until zatca_master has tenant_key" \
+    || FAIL "create-tenant must call require_registry_tenant_key before provisioning"
 if grep -q 'MIGRATE_CMD=atlas' config.env.example; then
     FAIL "config example must not point to an unavailable Atlas command"
 else

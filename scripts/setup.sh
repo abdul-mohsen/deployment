@@ -361,10 +361,10 @@ if [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" != "changeme" ]; th
     run_mysql <<SQLEOF
 CREATE DATABASE IF NOT EXISTS \`${MYSQL_MASTER_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 SQLEOF
-    if run_mysql "$MYSQL_MASTER_DB" -e "SELECT 1 FROM tenant LIMIT 0;" >/dev/null 2>&1; then
-        log "Registry table found: ${MYSQL_MASTER_DB}.tenant"
+    if require_registry_tenant_key; then
+        log "Registry ready: ${MYSQL_MASTER_DB}.tenant has tenant_key and trigger tenant_key_default"
     else
-        warn "Registry table ${MYSQL_MASTER_DB}.tenant is missing; create it from the zatca_master schema before creating tenants."
+        warn "Create tenants only after ZATCA's zatca_master migrations are applied (see above)."
     fi
 
     # Deployment-owned state (per-tenant image pins). Not zatca_master, not a tenant DB.

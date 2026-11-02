@@ -16,8 +16,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
+# Scaffold placeholder: ifritah-go has no cmd/server (its server is the root main.go).
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/server ./cmd/server
-# Goose runner: `/app/migrate up` builds the tenant DB; deployment runs it before each release.
+# Goose runner. `/app/migrate up` builds the tenant DB; its SQL is embedded (pkg/db/goose, go:embed).
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/migrate ./cmd/migrate
 
 # ---- Runtime stage ----
@@ -34,7 +35,6 @@ WORKDIR /app
 
 COPY --from=builder /app/server .
 COPY --from=builder /app/migrate .
-COPY --from=builder /src/migrations /app/migrations
 
 RUN mkdir -p /app/uploads /app/data && chown -R app:app /app
 

@@ -73,6 +73,8 @@ Copy from [config.env.example](config.env.example) and fill:
 - `MYSQL_MASTER_DB=zatca_master` — registry table `tenant(name, db_name, enabled, tenant_key)`,
   owned by the zatca_master schema; deployment only writes rows there. `DEPLOY_STATE_DB`
   (default `deployment_state`) holds per-tenant image pins in `tenant_image`, created by `setup.sh`.
+  Apply ZATCA's zatca_master goose migrations first (zatca_integration README section 1a).
+  `create-tenant.sh` refuses to run until `tenant.tenant_key` and trigger `tenant_key_default` exist.
 - `MYSQL_TENANT_HOST=172.%` — docker bridge subnet; **must match** the host
   pattern used in [scripts/remove-tenant.sh](scripts/remove-tenant.sh)
 - `DOCKERHUB_USERNAME`, optional `BACKEND_IMAGE` / `FRONTEND_IMAGE`,

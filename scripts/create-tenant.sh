@@ -383,6 +383,12 @@ if $DRY_RUN; then
     exit 0
 fi
 
+# The registry row below gets its tenant_key from ZATCA's trigger. Refuse before
+# anything is created if zatca_master is not migrated yet.
+if ! $NO_DATABASE && [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" != "changeme" ]; then
+    require_registry_tenant_key || exit 1
+fi
+
 # =============================================================================
 # PROVISION
 # =============================================================================

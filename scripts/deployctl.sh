@@ -3,6 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+deployment_init_logging
 
 PROGRAM="${0##*/}"
 CONFIG_FILE="${CONFIG_FILE:-}"
@@ -30,6 +32,7 @@ Areas:
   tenant rollback <name> [flags]     Roll back to a previous image
   tenant pin [name] [flags]          Pin or list desired images
   tenant init-db <name> [flags]      Initialize schema and seed users
+  tenant migration-status [name]     Check applied/pending/failed migrations
   tenant cleanup <name> [flags]      Repair/remove a half-created tenant
 
   fleet status [flags]               Full health overview
@@ -47,14 +50,15 @@ Areas:
   cleanup old-files
 
 Examples:
-  deployctl tenant create acme --backend-image repo/api:v1 --frontend-image repo/web:v1
+  deployctl tenant create acme --backend-image repo/ifritah-api:v1 --frontend-image repo/ifritah-web:v1
   deployctl tenant update acme --restart
-  deployctl fleet sync repo/api:v2 --type backend --tenant acme
+  deployctl fleet sync repo/ifritah-api:v2 --type backend --tenant acme
   deployctl --plan --config /opt/deployment/config.prod.env tenant status acme --json
 USAGE
 }
 
 die() {
+    deployment_log ERROR "$PROGRAM: $*"
     echo "$PROGRAM: $*" >&2
     exit 1
 }
@@ -67,7 +71,7 @@ need_arg() {
 
 script_accepts_config() {
     case "$1" in
-        auto-pull.sh|backup-tenant.sh|cleanup-broken-tenant.sh|create-tenant.sh|deploy-all.sh|init-tenant-db.sh|list-tenants.sh|manage-backups.sh|remove-tenant.sh|restore-tenant.sh|rollback-tenant.sh|set-tenant-image.sh|setup-dev-tenant.sh|setup.sh|status.sh|update-tenant.sh|webhook-server.sh)
+        auto-pull.sh|backup-tenant.sh|cleanup-broken-tenant.sh|create-tenant.sh|deploy-all.sh|init-tenant-db.sh|list-tenants.sh|manage-backups.sh|migration-status.sh|remove-tenant.sh|restore-tenant.sh|rollback-tenant.sh|set-tenant-image.sh|setup-dev-tenant.sh|setup.sh|status.sh|update-tenant.sh|webhook-server.sh)
             return 0
             ;;
         *)
@@ -174,6 +178,16 @@ tenant_cmd() {
             local name="${1:-}"; need_arg "$name" "tenant name"; shift
             run_script init-tenant-db.sh "$name" "$@"
             ;;
+        migration-status|migrations|schema-status)
+            local name
+            name="$(optional_name_arg "$@")"
+            if [ -n "$name" ]; then
+                shift
+                run_script migration-status.sh --tenant "$name" "$@"
+                return
+            fi
+            run_script migration-status.sh "$@"
+            ;;
         cleanup|repair)
             local name="${1:-}"; need_arg "$name" "tenant name"; shift
             run_script cleanup-broken-tenant.sh "$name" "$@"
@@ -210,6 +224,9 @@ fleet_cmd() {
             ;;
         auto-pull|pull)
             run_script auto-pull.sh "$@"
+            ;;
+        migration-status|migrations|schema-status)
+            run_script migration-status.sh "$@"
             ;;
         *)
             die "unknown fleet command: $verb"

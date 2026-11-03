@@ -83,8 +83,20 @@ grep -q 'proxy:disable "$BACKEND_APP"' scripts/create-tenant.sh \
     || FAIL "create-tenant must disable backend proxy"
 grep -q 'domains:clear "$be"' scripts/post-merge-cleanup.sh \
     && grep -q 'proxy:disable "$be"' scripts/post-merge-cleanup.sh \
-    && PASS "cleanup removes existing backend public proxy" \
+    && grep -q 'API_URL="\${public_url}/api"' scripts/post-merge-cleanup.sh \
+    && PASS "cleanup removes existing backend public proxy and refreshes frontend URL" \
     || FAIL "cleanup must remove existing backend public proxy"
+grep -q 'BASE_DOMAIN="\${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"' scripts/update-tenant.sh \
+    && grep -q 'reconcile_tenant_routing "\$TENANT_NAME"' scripts/update-tenant.sh \
+    && grep -q 'domains:clear "\$backend_app"' scripts/lib.sh \
+    && grep -q 'APP_DOMAIN="\$tenant_domain"' scripts/lib.sh \
+    && grep -q 'API_URL="\${public_url_value}/api"' scripts/lib.sh \
+    && PASS "tenant update reconciles persisted routing values" \
+    || FAIL "tenant update must reconcile persisted routing values"
+grep -q 'reconcile_tenant_routing "\$tenant"' scripts/deploy-all.sh \
+    && grep -q 'routing-only' dashboard/internal/web/web.go \
+    && PASS "fleet and lifecycle actions reconcile routing before deploy" \
+    || FAIL "fleet and lifecycle actions must reconcile routing before deploy"
 grep -q 'ensure_tenant_network "$TENANT_NETWORK"' scripts/create-tenant.sh \
     && grep -q 'docker network inspect \$network' scripts/create-tenant.sh \
     && grep -q 'docker network create \$network' scripts/create-tenant.sh \
@@ -282,8 +294,8 @@ else
     PASS "deployment repo does not bundle backend schema/migrations"
 fi
 grep -q -- '--backend-image' scripts/init-tenant-db.sh \
-    && grep -q 'goose_migrate "\$image"' scripts/init-tenant-db.sh \
-    && grep -q '/app/migrate up' scripts/lib.sh \
+    && grep -q 'goose_run "\$image" up' scripts/init-tenant-db.sh \
+    && grep -q -- '--entrypoint /app/migrate' scripts/lib.sh \
     && PASS "init-tenant-db runs goose (/app/migrate up) from the backend image" \
     || FAIL "init-tenant-db must run goose from the backend image"
 grep -q 'TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"' scripts/init-tenant-db.sh \
@@ -357,16 +369,18 @@ if grep -q 'ALTER TABLE tenant\|CREATE TABLE IF NOT EXISTS tenant ' scripts/setu
 else
     PASS "setup.sh does not ALTER or CREATE the zatca_master registry"
 fi
-grep -q 'tenant_image (' scripts/setup.sh \
-    && PASS "setup.sh creates the deployment-owned tenant_image table" \
-    || FAIL "setup.sh must create the deployment-owned tenant_image table"
-grep -q 'migrate_backend_tenant "\$app" "\$image"' scripts/deploy-all.sh \
-    && grep -q 'migrate_backend_tenant "\$BACKEND_APP" "\$BACKEND_IMAGE"' scripts/update-tenant.sh \
-    && grep -q 'migrate_backend_tenant "\$app" "\$image"' scripts/rollback-tenant.sh \
+grep -q 'ensure_deployment_state_schema' scripts/setup.sh \
+    && grep -q 'tenant_image (' scripts/lib.sh \
+    && grep -q 'tenant_identity (' scripts/lib.sh \
+    && PASS "setup.sh creates the deployment-owned state tables" \
+    || FAIL "setup.sh must create the deployment-owned state tables"
+grep -q 'init-tenant-db.sh" "\$tenant" --schema-only' scripts/deploy-all.sh \
+    && grep -q 'init-tenant-db.sh" "\$TENANT_NAME" \\' scripts/update-tenant.sh \
+    && grep -q 'init-tenant-db.sh" "\${app%-backend}" --schema-only' scripts/rollback-tenant.sh \
     && PASS "every backend deploy path runs goose before the image is deployed" \
     || FAIL "deploy-all, update-tenant and rollback-tenant must run goose before deploying a backend image"
-grep -qF "UPDATE company SET tenant_key='\${key_sql}' WHERE id=1;" scripts/lib.sh \
-    && PASS "tenant_key is written with UPDATE ... WHERE" \
+grep -qF "UPDATE company SET tenant_key = '\${tenant_key_sql}' WHERE id = 1;" scripts/init-tenant-db.sh \
+    && PASS "tenant_key is written with UPDATE ... WHERE id" \
     || FAIL "tenant_key write must be an UPDATE with a WHERE clause"
 grep -q 'require_registry_tenant_key' scripts/create-tenant.sh \
     && PASS "create-tenant refuses to create a tenant until zatca_master has tenant_key" \

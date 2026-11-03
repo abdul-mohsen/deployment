@@ -1,0 +1,28 @@
+apiVersion: 1
+
+# Copy this file to:
+#   dashboard/observability/grafana/provisioning/alerting/contact-points.yml
+# Then remove every receiver whose destination is not configured. The target
+# file is ignored by git because webhook URLs, SMTP usernames, and addresses
+# are operator configuration.
+#
+# Grafana expands $OBS_ALERT_SLACK_WEBHOOK_URL and $OBS_ALERT_EMAIL_TO from
+# observability/.env at startup. Do not put those values in this repository.
+contactPoints:
+  - orgId: 1
+    name: ifritah-ops
+    receivers:
+      - uid: ifritah-slack
+        type: slack
+        settings:
+          url: $OBS_ALERT_SLACK_WEBHOOK_URL
+          title: '{{ template "slack.default.title" . }}'
+          text: '{{ template "slack.default.text" . }}'
+        disableResolveMessage: false
+      - uid: ifritah-email
+        type: email
+        settings:
+          addresses: $OBS_ALERT_EMAIL_TO
+          subject: '{{ template "default.title" . }}'
+          message: '{{ template "default.message" . }}'
+        disableResolveMessage: false

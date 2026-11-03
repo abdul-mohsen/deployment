@@ -1,7 +1,7 @@
 // Package retention runs the backup retention policy on a schedule.
 //
 // Policy:
-//   - Auto-origin backups older than RetentionDays (default 7) are pruned.
+//   - Auto-origin backups older than RetentionDays (default 30) are pruned.
 //   - User-origin backups are never auto-deleted by this policy.
 //   - User-origin backups are capped at MaxUserBackups (default 50) per tenant;
 //     a warning is logged when the limit is reached (deletion is the user's job).
@@ -12,15 +12,17 @@ package retention
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
 	"time"
+
+	"github.com/abdul-mohsen/deployment/dashboard/internal/logging"
 )
 
 const (
-	DefaultRetentionDays = 7
+	DefaultRetentionDays = 30
 	MaxUserBackups       = 50
 )
 
@@ -29,7 +31,9 @@ type Runner struct {
 	dockerBin       string
 	runnerImage     string
 	scriptsHostPath string
+	backupDir       string
 	retentionDays   int
+	logger          *slog.Logger
 	stop            chan struct{}
 }
 
@@ -43,8 +47,22 @@ func New(dockerBin, runnerImage, scriptsHostPath string, retentionDays int) *Run
 		runnerImage:     runnerImage,
 		scriptsHostPath: scriptsHostPath,
 		retentionDays:   retentionDays,
+		logger:          slog.Default(),
 		stop:            make(chan struct{}),
 	}
+}
+
+// SetLogger replaces the logger used by background retention runs.
+func (r *Runner) SetLogger(logger *slog.Logger) {
+	if logger != nil {
+		r.logger = logger
+	}
+}
+
+// SetBackupDir configures the host backup directory mounted into retention
+// sidecars so pruning operates on persisted artifacts.
+func (r *Runner) SetBackupDir(dir string) {
+	r.backupDir = dir
 }
 
 // Start begins the daily retention run. Call Stop to shut it down cleanly.
@@ -76,21 +94,7 @@ func (r *Runner) Stop() {
 	}
 }
 
-// run executes manage-backups.sh prune --retention-days N.
-func (r *Runner) run(ctx context.Context) {
-	if r.scriptsHostPath == "" {
-		log.Println("[retention] SCRIPTS_HOST_PATH not set — skipping")
-		return
-	}
-	log.Printf("[retention] running auto-backup prune (retention=%d days)", r.retentionDays)
-
-	dockerSocket := "/var/run/docker.sock:/var/run/docker.sock"
-	if _, err := os.Stat(`\\.\pipe\dockerDesktopLinuxEngine`); err == nil {
-		dockerSocket = `//./pipe/dockerDesktopLinuxEngine://./pipe/dockerDesktopLinuxEngine`
-	} else if _, err := os.Stat(`\\.\pipe\docker_engine`); err == nil {
-		dockerSocket = `//./pipe/docker_engine://./pipe/docker_engine`
-	}
-
+func (r *Runner) dockerArgs(dockerSocket string) []string {
 	bashScript := `set -e
 mkdir -p /tmp/dep-ret
 cp -r /opt/deployment/scripts /tmp/dep-ret/
@@ -104,20 +108,45 @@ exec bash scripts/manage-backups.sh prune --retention-days "$1"`
 		"-v", dockerSocket,
 		"-v", r.scriptsHostPath + ":/opt/deployment:ro",
 		"--network", "host",
+	}
+	if r.backupDir != "" {
+		args = append(args, "-v", r.backupDir+":"+r.backupDir, "-e", "BACKUP_DIR="+r.backupDir)
+	}
+	return append(args,
 		r.runnerImage,
 		"bash", "-c", bashScript,
 		"--", strconv.Itoa(r.retentionDays),
+	)
+}
+
+// run executes manage-backups.sh prune --retention-days N.
+func (r *Runner) run(ctx context.Context) {
+	logger := r.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if r.scriptsHostPath == "" {
+		logger.WarnContext(ctx, "retention run skipped", "reason", "scripts_host_path_not_set")
+		return
+	}
+	logger.InfoContext(ctx, "retention prune started", "retention_days", r.retentionDays)
+
+	dockerSocket := "/var/run/docker.sock:/var/run/docker.sock"
+	if _, err := os.Stat(`\\.\pipe\dockerDesktopLinuxEngine`); err == nil {
+		dockerSocket = `//./pipe/dockerDesktopLinuxEngine://./pipe/dockerDesktopLinuxEngine`
+	} else if _, err := os.Stat(`\\.\pipe\docker_engine`); err == nil {
+		dockerSocket = `//./pipe/docker_engine://./pipe/docker_engine`
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, r.dockerBin, args...)
+	cmd := exec.CommandContext(runCtx, r.dockerBin, r.dockerArgs(dockerSocket)...)
 	cmd.Env = append(os.Environ(), "TERM=dumb")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("[retention] prune error: %v\noutput: %s", err, out)
+		logger.ErrorContext(ctx, "retention prune failed", logging.ErrorAttr(err), "output_bytes", len(out))
 	} else {
-		log.Printf("[retention] prune complete\noutput: %s", out)
+		logger.InfoContext(ctx, "retention prune completed", "output_bytes", len(out))
 	}
 }

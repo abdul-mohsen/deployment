@@ -13,9 +13,9 @@
 #
 # Examples:
 #   ./scripts/rollback-tenant.sh acme --list
-#   ./scripts/rollback-tenant.sh acme --to myuser/api:abc1234
-#   ./scripts/rollback-tenant.sh acme --type frontend --to myuser/web:prev
-#   ./scripts/rollback-tenant.sh --all --to myuser/api:abc1234
+#   ./scripts/rollback-tenant.sh acme --to myuser/ifritah-api:abc1234
+#   ./scripts/rollback-tenant.sh acme --type frontend --to myuser/ifritah-web:prev
+#   ./scripts/rollback-tenant.sh --all --to myuser/ifritah-api:abc1234
 # =============================================================================
 
 set -euo pipefail
@@ -120,8 +120,9 @@ rollback_app() {
     info "  From: $current_image"
     info "  To:   $image"
 
-    if [ "$APP_TYPE" = "backend" ] && ! migrate_backend_tenant "$app" "$image"; then
-        error "$app rollback FAILED: migration failed, image not deployed"
+    if [ "$APP_TYPE" = "backend" ] && ! "$SCRIPT_DIR/init-tenant-db.sh" "${app%-backend}" --schema-only \
+        --backend-image "$image" --config "$CONFIG_FILE"; then
+        error "$app rollback FAILED: goose migration failed, image not deployed"
         return 1
     fi
 
@@ -154,6 +155,9 @@ if $ALL_TENANTS; then
 
     FAILED=0
     while IFS= read -r app; do
+        tenant="${app%${APP_SUFFIX}}"
+        log "Synchronizing tenant routing: ${tenant}.${BASE_DOMAIN:-<unset>}"
+        reconcile_tenant_routing "$tenant"
         if ! rollback_app "$app" "$ROLLBACK_IMAGE"; then
             FAILED=$((FAILED + 1))
         fi
@@ -169,6 +173,8 @@ if $ALL_TENANTS; then
 else
     # Rollback single tenant
     APP_NAME="${TENANT_NAME}${APP_SUFFIX}"
+    log "Synchronizing tenant routing: ${TENANT_NAME}.${BASE_DOMAIN:-<unset>}"
+    reconcile_tenant_routing "$TENANT_NAME"
     echo ""
     rollback_app "$APP_NAME" "$ROLLBACK_IMAGE"
     echo ""

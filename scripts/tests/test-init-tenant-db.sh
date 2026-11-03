@@ -40,7 +40,7 @@ else
 fi
 
 echo ""
-echo "=== install.env is sourced (so MYSQL_ROOT_PASSWORD is available) ==="
+echo "=== install.env is sourced (so MYSQL_ADMIN_PASSWORD is available) ==="
 if grep -qE 'INSTALL_ENV_FILE=.*install\.env' scripts/init-tenant-db.sh; then
     pass "install.env is sourced after config.env"
 else
@@ -52,7 +52,7 @@ echo ""
 echo "=== dry-run --seed-only prints correct URL ==="
 # Set up minimum env for the script to run --dry-run without touching anything
 export BASE_DOMAIN=test.example.com
-export MYSQL_ROOT_PASSWORD=stub
+export MYSQL_ADMIN_PASSWORD=stub
 export DOKKU_PORT=8080
 export BASEURL=/api/v2
 # Use a temp config file since --dry-run still requires --config or config.env
@@ -60,7 +60,7 @@ tmpcfg=$(mktemp)
 trap 'rm -f "$tmpcfg"' EXIT
 cat > "$tmpcfg" <<EOF
 BASE_DOMAIN=$BASE_DOMAIN
-MYSQL_ROOT_PASSWORD=$MYSQL_ROOT_PASSWORD
+MYSQL_ADMIN_PASSWORD=$MYSQL_ADMIN_PASSWORD
 DOKKU_PORT=$DOKKU_PORT
 BASEURL=$BASEURL
 EOF
@@ -77,6 +77,16 @@ else
     echo "$output"
     echo "--- end ---"
     fail "dry-run seed did not use /api/v2/register"
+fi
+
+echo ""
+echo "=== existing-tenant schema replay does not require admin credentials ==="
+if grep -qF 'goose_run "$image" up' scripts/init-tenant-db.sh &&
+    grep -qF '"$(tenant_db_user)" "$(tenant_db_password)"' scripts/init-tenant-db.sh &&
+    ! grep -qF 'run_migration_mysql' scripts/init-tenant-db.sh; then
+    pass "schema replay is goose (/app/migrate up) as the tenant account"
+else
+    fail "schema replay must be goose (/app/migrate up) as the tenant account"
 fi
 
 if echo "$output" | grep -qF "Would POST /api/register "; then

@@ -21,15 +21,16 @@
 #   --backend-port <port>     Port the backend listens on (default: 3000)
 #   --frontend-port <port>    Port the frontend listens on (default: 80)
 #   --no-database             Skip database creation
-#   --env KEY=VALUE           Set env var (repeatable)
+#   --env KEY=VALUE           Set application env var (repeatable; reserved
+#                             deployment keys are rejected; see REQUIREMENTS.md)
 #   --git-only                Create apps without deploying (deploy via git push)
 #   --dry-run                 Show plan without executing
 #   --config <path>           Path to config.env file (default: ../config.env)
 #
 # Examples:
 #   ./scripts/create-tenant.sh acme --git-only
-#   ./scripts/create-tenant.sh acme --backend-image myregistry/api:v1
-#   ./scripts/create-tenant.sh acme --backend-image myregistry/api:v1 --env SECRET_KEY=abc123
+#   ./scripts/create-tenant.sh acme --backend-image myregistry/ifritah-api:v1
+#   ./scripts/create-tenant.sh acme --backend-image myregistry/ifritah-api:v1 --env SECRET_KEY=abc123
 #   ./scripts/create-tenant.sh acme --config /opt/deployment/config.dev.env
 # =============================================================================
 
@@ -38,6 +39,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/lib.sh"
+source "$SCRIPT_DIR/tenant-provenance.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -49,6 +51,15 @@ log()   { echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[✗]${NC} $*" >&2; }
 info()  { echo -e "${BLUE}[i]${NC} $*"; }
+
+# MySQL's CLI has no bind-parameter mode for CREATE USER/ALTER USER. Keep the
+# password in a SQL string literal, doubling quotes and disabling backslash
+# escapes for this connection so existing passwords are passed byte-for-byte.
+mysql_password_sql_literal() {
+    local password="$1"
+    password="${password//\'/\'\'}"
+    printf "'%s'" "$password"
+}
 
 # ---- Load config ----
 CONFIG_FILE="${CONFIG_FILE:-$PROJECT_DIR/config.env}"
@@ -82,6 +93,11 @@ NO_DATABASE=false
 GIT_ONLY=false
 DRY_RUN=false
 FORCE_UPDATE=false
+DB_BACKUP_ID=""
+DB_BACKUP_ARTIFACT=""
+VERIFY_RETRIES="${TENANT_VERIFY_RETRIES:-15}"
+VERIFY_DELAY="${TENANT_VERIFY_DELAY:-2}"
+declare -A COMPONENT_IDENTITY=()
 declare -a ENV_VARS=()
 
 env_value() {
@@ -94,6 +110,31 @@ env_value() {
         fi
     done
     return 0
+}
+
+redact_env_var() {
+    local entry="$1" key value normalized_key
+    if [[ "$entry" != *=* ]]; then
+        printf '%s' "$entry"
+        return 0
+    fi
+
+    key="${entry%%=*}"
+    value="${entry#*=}"
+    normalized_key="${key^^}"
+    case "$normalized_key" in
+        *PASSWORD*|*PASSWD*|*TOKEN*|*SECRET*|*KEY*|*CREDENTIAL*|*AUTH*|*COOKIE*|*SESSION*|*DSN*|*DATABASE_URL*)
+            # Keep the dashboard's existing *** redaction marker.
+            printf '%s=***' "$key"
+            ;;
+        *)
+            if [[ "$value" == *"://"*"@"* ]]; then
+                printf '%s=***' "$key"
+            else
+                printf '%s' "$entry"
+            fi
+            ;;
+    esac
 }
 
 validate_docker_network_name() {
@@ -140,6 +181,16 @@ image_tag() {
     if [[ "$tail" == *:* ]]; then
         printf '%s' "${tail##*:}"
     fi
+}
+
+preflight_tenant_image() {
+    local component="$1" image="$2"
+    ensure_tenant_image_available "$image"
+    if ! resolve_build_identity "$image"; then
+        error "${image}: missing or inconsistent OCI BuildIdentity labels"
+        exit 1
+    fi
+    COMPONENT_IDENTITY["$component"]="$(provenance_identity_tsv)"
 }
 
 find_existing_tenant_network() {
@@ -204,7 +255,11 @@ while [[ $# -gt 0 ]]; do
         --backend-port)   BACKEND_PORT="$2"; shift 2 ;;
         --frontend-port)  FRONTEND_PORT="$2"; shift 2 ;;
         --no-database)    NO_DATABASE=true; shift ;;
-        --env)            ENV_VARS+=("$2"); shift 2 ;;
+        --env)
+            [ "$#" -ge 2 ] || { error "--env requires KEY=VALUE"; exit 1; }
+            ENV_VARS+=("$2")
+            shift 2
+            ;;
         --git-only)       GIT_ONLY=true; shift ;;
         --dry-run)        DRY_RUN=true; shift ;;
         --update)         FORCE_UPDATE=true; shift ;;
@@ -221,6 +276,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if ! validate_tenant_env_overrides "${ENV_VARS[@]}"; then
+    error "Refusing invalid or reserved --env override."
+    exit 1
+fi
 
 # ---- Validate ----
 if [ -z "$TENANT_NAME" ]; then
@@ -250,28 +310,43 @@ fi
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
 
-MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
-
 BACKEND_APP="${TENANT_NAME}-backend"
 FRONTEND_APP="${TENANT_NAME}-frontend"
 TENANT_DOMAIN="${TENANT_NAME}.${BASE_DOMAIN}"
 TENANT_NETWORK="${TENANT_APP_NETWORK:-web}"
+public_protocol >/dev/null || exit 1
+PUBLIC_TENANT_URL="$(public_tenant_url "$TENANT_NAME")" || exit 1
 # Export so init-tenant-db.sh (invoked as child bash) inherits these — it uses
 # them to reach the backend container directly over the tenant network for
 # seed user registration (bypasses the frontend proxy CSRF).
 export TENANT_NETWORK
 export BACKEND_PORT
 
-# A backend tenant needs goose migrations and the registry tenant_key, so it
-# needs MySQL provisioning. External DB env vars cannot replace it.
+# The registry row (step 7) takes its tenant_key from ZATCA's trigger. Refuse before
+# anything is created if zatca_master has not been migrated by ZATCA.
+if ! $NO_DATABASE && mysql_admin_configured; then
+    require_registry_tenant_key || exit 1
+fi
+
+if [ -n "$BACKEND_IMAGE" ] || [ -n "$FRONTEND_IMAGE" ]; then
+    if ! ensure_deployment_state_schema; then
+        error "Deployment state schema is unavailable; refusing an untracked image deployment."
+        exit 1
+    fi
+    [ -z "$BACKEND_IMAGE" ] || preflight_tenant_image backend "$BACKEND_IMAGE"
+    [ -z "$FRONTEND_IMAGE" ] || preflight_tenant_image frontend "$FRONTEND_IMAGE"
+fi
+
+# A backend tenant needs goose migrations and the registry tenant_key, so it needs
+# MySQL provisioning. External DB env vars cannot replace it.
 if [ -n "$BACKEND_IMAGE" ]; then
     if $NO_DATABASE; then
         error "Backend image deploy requires MySQL provisioning (goose migrations and tenant_key), but --no-database was set."
         exit 1
     fi
-    if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
-        error "Backend image deploy requires MySQL provisioning, but MYSQL_ROOT_PASSWORD is not configured in config.env."
-        error "Set MYSQL_ROOT_PASSWORD, run scripts/verify-mysql.sh, then retry; or use --git-only."
+    if ! mysql_admin_configured; then
+        error "Backend image deploy requires database provisioning, but MYSQL_ADMIN_PASSWORD is not configured in config.env."
+        error "Set MYSQL_ADMIN_USER/MYSQL_ADMIN_PASSWORD for the deployment account, run scripts/verify-mysql.sh, then retry; or use --git-only."
         exit 1
     fi
 fi
@@ -331,6 +406,82 @@ fi
 " 2>&1 || warn "Could not fix nginx upstream for ${app} — tenant may not be accessible until next deploy"
 }
 
+deploy_verified_component() {
+    local component="$1" image="$2" app="${TENANT_NAME}-${1}"
+    local values="${COMPONENT_IDENTITY[$component]}"
+    local channel version commit_sha commit_short workflow workflow_url image_ref digest built_at
+    local resolved_ref=""
+    IFS=$'\t' read -r channel version commit_sha commit_short workflow workflow_url image_ref digest built_at <<< "$values"
+    resolved_ref="${image%@*}@${digest}"
+
+    if ! tenant_record_audit "$TENANT_NAME" "$component" "$image" "$resolved_ref" "$digest" \
+        "$channel" "$version" "$commit_sha" "$commit_short" "$workflow" "$workflow_url" "$built_at" \
+        "" "" "started" "" "$DB_BACKUP_ID" "$DB_BACKUP_ARTIFACT"; then
+        error "${app}: deployment audit is unavailable; refusing an untracked swap"
+        return 1
+    fi
+
+    dokku config:set --no-restart "$app" \
+        APP_VERSION="$version" \
+        APP_COMMIT="$commit_sha" \
+        APP_COMMIT_SHORT="$commit_short" \
+        APP_BUILD_CHANNEL="$channel" \
+        APP_IMAGE_CHANNEL="$channel" \
+        APP_BUILD_WORKFLOW_RUN="$workflow" \
+        APP_WORKFLOW_RUN="$workflow" \
+        APP_WORKFLOW_RUN_ID="$workflow" \
+        APP_WORKFLOW_RUN_URL="$workflow_url" \
+        APP_BUILT_AT="$built_at" \
+        APP_BUILD_AT="$built_at" \
+        APP_IMAGE_VERSION="$version" \
+        APP_IMAGE_TAG="$(image_tag "$image")" \
+        APP_IMAGE_COMMIT="$commit_sha" \
+        APP_IMAGE_COMMIT_SHORT="$commit_short" \
+        APP_IMAGE_REF="$image_ref" \
+        APP_IMAGE_DIGEST="$digest" \
+        APP_IMAGE_RESOLVED_REF="$resolved_ref"
+
+    if ! dokku_git_from_image "$app" "$image"; then
+        tenant_record_failure "$TENANT_NAME" "$component" "image swap failed" 2>/dev/null || true
+        tenant_record_audit "$TENANT_NAME" "$component" "$image" "$resolved_ref" "$digest" \
+            "$channel" "$version" "$commit_sha" "$commit_short" "$workflow" "$workflow_url" "$built_at" \
+            "" "" "failed" "image swap failed" "$DB_BACKUP_ID" "$DB_BACKUP_ARTIFACT" 2>/dev/null || true
+        return 1
+    fi
+
+    local attempt
+    for ((attempt=1; attempt<=VERIFY_RETRIES; attempt++)); do
+        if verify_runtime_identity "$app" "$version" "$commit_sha" "$digest" \
+            "$image_ref" "$channel" "$workflow" "$workflow_url" "$built_at"; then
+            break
+        fi
+        if [ "$attempt" -eq "$VERIFY_RETRIES" ]; then
+            error "${app}: /version did not report the expected BuildIdentity"
+            error "${app}: automatic rollback is refused; restore backup ${DB_BACKUP_ID:-<none>} explicitly if migrations ran."
+            tenant_record_failure "$TENANT_NAME" "$component" \
+                "post-deploy /version identity verification failed" 2>/dev/null || true
+            tenant_record_audit "$TENANT_NAME" "$component" "$image" "$resolved_ref" "$digest" \
+                "$channel" "$version" "$commit_sha" "$commit_short" "$workflow" "$workflow_url" "$built_at" \
+                "" "" "failed" "post-deploy /version identity verification failed" \
+                "$DB_BACKUP_ID" "$DB_BACKUP_ARTIFACT" 2>/dev/null || true
+            return 1
+        fi
+        sleep "$VERIFY_DELAY"
+    done
+
+    if ! tenant_record_identity "$TENANT_NAME" "$component" "$image" "$image_ref" \
+        "$digest" "$channel" "$version" "$commit_sha" "$commit_short" \
+        "$workflow" "$workflow_url" "$built_at"; then
+        error "${app}: failed to persist verified deployment identity"
+        tenant_record_failure "$TENANT_NAME" "$component" \
+            "failed to persist verified deployment identity" 2>/dev/null || true
+        return 1
+    fi
+    tenant_record_audit "$TENANT_NAME" "$component" "$image" "$resolved_ref" "$digest" \
+        "$channel" "$version" "$commit_sha" "$commit_short" "$workflow" "$workflow_url" "$built_at" \
+        "" "" "verified" "" "$DB_BACKUP_ID" "$DB_BACKUP_ARTIFACT" || return 1
+}
+
 create_dokku_app() {
     local app="$1"
     log "Creating app: $app"
@@ -356,6 +507,7 @@ info "  Domain:         $TENANT_DOMAIN"
 info "  Backend app:    $BACKEND_APP  → internal only (${BACKEND_APP}.web:${BACKEND_PORT})"
 info "  Frontend app:   $FRONTEND_APP → $TENANT_DOMAIN"
 info "  Docker network: $TENANT_NETWORK"
+info "  OpenObserve telemetry: ${OPENOBSERVE_TENANT_TELEMETRY_ENABLED:-false}"
 info "  Backend port:   $BACKEND_PORT"
 info "  Frontend port:  $FRONTEND_PORT"
 info "  Storage:        $STORAGE_ROOT/$TENANT_NAME/{uploads,data}"
@@ -374,19 +526,13 @@ if $GIT_ONLY; then
     info "  Deploy method:  git push (no image deploy now)"
 fi
 for ev in "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; do
-    info "  Env var:        $ev"
+    info "  Env var:        $(redact_env_var "$ev")"
 done
 echo ""
 
 if $DRY_RUN; then
     warn "Dry run — no changes made."
     exit 0
-fi
-
-# The registry row below gets its tenant_key from ZATCA's trigger. Refuse before
-# anything is created if zatca_master is not migrated yet.
-if ! $NO_DATABASE && [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" != "changeme" ]; then
-    require_registry_tenant_key || exit 1
 fi
 
 # =============================================================================
@@ -486,10 +632,6 @@ dokku config:set --no-restart "$BACKEND_APP" \
     BASEURL="${BASEURL:-/api/v2}" \
     JWT_SECERT_KEY="${JWT_SECERT_KEY:-$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48)}"
 
-# Public URL scheme is set by the operator's host nginx (TLS is external).
-# Default to http; override with PUBLIC_PROTOCOL=https when host nginx terminates TLS.
-PROTOCOL="${PUBLIC_PROTOCOL:-http}"
-
 # Frontend speaks to backend over the per-tenant docker network. Dokku exposes
 # each web container under the alias "<app>.web" inside attached networks.
 dokku config:set --no-restart "$FRONTEND_APP" \
@@ -497,7 +639,7 @@ dokku config:set --no-restart "$FRONTEND_APP" \
     PORT="$FRONTEND_PORT" \
     APP_DOMAIN="$TENANT_DOMAIN" \
     BACKEND_URL="http://${BACKEND_APP}.web:${BACKEND_PORT}" \
-    API_URL="${PROTOCOL}://${TENANT_DOMAIN}/api"
+    API_URL="${PUBLIC_TENANT_URL}/api"
 
 # Message service (if configured)
 MSG_HOST="${MSG_HOST:-}"
@@ -534,8 +676,8 @@ TENANT_DB_USER="usr_${TENANT_NAME//-/_}"
 DB_PROVISIONED=false
 
 if ! $NO_DATABASE; then
-    if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
-        warn "MYSQL_ROOT_PASSWORD not set in config.env — skipping database creation."
+    if ! mysql_admin_configured; then
+        warn "MYSQL_ADMIN_PASSWORD not set in config.env — skipping database creation."
     else
         # Generate a random password — but if the tenant backend already has a
         # DB_PASSWORD in Dokku config (re-run scenario), reuse it so the running
@@ -547,23 +689,27 @@ if ! $NO_DATABASE; then
         if [ -z "$TENANT_DB_PASS" ]; then
             TENANT_DB_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)
         fi
+        TENANT_DB_PASS_SQL="$(mysql_password_sql_literal "$TENANT_DB_PASS")"
 
         log "Creating MySQL database: $TENANT_DB_NAME (user: $TENANT_DB_USER@'$MYSQL_TENANT_HOST')"
 
         # dev-only diag
         if [ "${DASHBOARD_ENV:-}" = "dev" ]; then
             info "[dev-diag] MYSQL_CLIENT_MODE=${MYSQL_CLIENT_MODE:-<unset>} _MYSQL_VIA=${_MYSQL_VIA:-<unset>}"
-            info "[dev-diag] MYSQL_HOST=${MYSQL_HOST:-<unset>} MYSQL_PORT=${MYSQL_PORT:-<unset>} MYSQL_ROOT_USER=${MYSQL_ROOT_USER:-<unset>}"
+            info "[dev-diag] MYSQL_HOST=${MYSQL_HOST:-<unset>} MYSQL_PORT=${MYSQL_PORT:-<unset>} MYSQL_ADMIN_USER=$(mysql_admin_user)"
             info "[dev-diag] MYSQL_TENANT_HOST='${MYSQL_TENANT_HOST}' MYSQL_APP_HOST=${MYSQL_APP_HOST}"
             info "[dev-diag] TENANT_DB_USER=${TENANT_DB_USER} TENANT_DB_NAME=${TENANT_DB_NAME}"
             info "[dev-diag] SQL: DROP @'localhost'; CREATE/ALTER @'${MYSQL_TENANT_HOST}'; GRANT ON ${TENANT_DB_NAME}.*"
             set +e
         fi
-        run_mysql <<SQLEOF
+        # Binary mode prevents the mysql batch client from interpreting
+        # backslash commands if a reused password contains them.
+        run_mysql --binary-mode <<SQLEOF
+SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'NO_BACKSLASH_ESCAPES');
 CREATE DATABASE IF NOT EXISTS \`${TENANT_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 DROP USER IF EXISTS '${TENANT_DB_USER}'@'localhost';
-CREATE USER IF NOT EXISTS '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY '${TENANT_DB_PASS}';
-ALTER USER '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY '${TENANT_DB_PASS}';
+CREATE USER IF NOT EXISTS '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY ${TENANT_DB_PASS_SQL};
+ALTER USER '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY ${TENANT_DB_PASS_SQL};
 GRANT ALL PRIVILEGES ON \`${TENANT_DB_NAME}\`.* TO '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}';
 SQLEOF
         _mysql_rc=$?
@@ -604,6 +750,20 @@ SQLEOF
         log "Database ready: $TENANT_DB_NAME"
 
         if [ -n "$BACKEND_IMAGE" ]; then
+            log "Creating verified pre-migration database backup for ${TENANT_NAME}"
+            if ! DB_BACKUP_INFO="$(create_verified_tenant_db_backup "$TENANT_NAME" "$CONFIG_FILE")"; then
+                error "Verified tenant DB backup could not be created; refusing schema initialization."
+                tenant_record_failure "$TENANT_NAME" backend \
+                    "verified pre-migration database backup unavailable" 2>/dev/null || true
+                exit 1
+            fi
+            IFS=$'\t' read -r DB_BACKUP_ID DB_BACKUP_ARTIFACT _ <<< "$DB_BACKUP_INFO"
+            if [ -z "$DB_BACKUP_ID" ] || [ -z "$DB_BACKUP_ARTIFACT" ]; then
+                error "Pre-migration backup identity is incomplete; refusing schema initialization."
+                tenant_record_failure "$TENANT_NAME" backend \
+                    "pre-migration backup identity incomplete" 2>/dev/null || true
+                exit 1
+            fi
             log "Running goose migrations from backend image..."
             bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
                 --schema-only \
@@ -621,6 +781,12 @@ SQLEOF
     fi
 fi
 
+# ---- 7b. Optional OpenObserve application wiring --------------------------
+# This is deliberately after the normal tenant/database environment setup so
+# an enabled pilot wins over a user-supplied OTEL endpoint, while the helper
+# still fails open if Docker or the collector network is unavailable.
+openobserve_reconcile_tenant_apps "$TENANT_NAME" "$BACKEND_APP" "$FRONTEND_APP" || true
+
 # ---- 8. Health checks ----
 # Modern Dokku (>= 0.30) uses an app-root CHECKS file or app.json for HTTP
 # path checks; the legacy `checks:set <app> web http-path=...` form was
@@ -628,30 +794,31 @@ fi
 # CHECKS file into each app's working dir on the dokku host so health checks
 # are configured before first deploy.
 log "Configuring health checks..."
-dokku_shell "mkdir -p /home/dokku/${BACKEND_APP} && echo '/api/health' > /home/dokku/${BACKEND_APP}/CHECKS" || warn "could not seed backend CHECKS"
+dokku_shell "mkdir -p /home/dokku/${BACKEND_APP} && echo '/healthz' > /home/dokku/${BACKEND_APP}/CHECKS" || warn "could not seed backend CHECKS"
 dokku_shell "mkdir -p /home/dokku/${FRONTEND_APP} && echo '/' > /home/dokku/${FRONTEND_APP}/CHECKS" || warn "could not seed frontend CHECKS"
 
 # ---- 9. Deploy (if images provided) ----
 if ! $GIT_ONLY; then
     if [ -n "$BACKEND_IMAGE" ]; then
         log "Deploying backend from image: $BACKEND_IMAGE"
-        ensure_tenant_image_available "$BACKEND_IMAGE"
-        dokku config:set --no-restart "$BACKEND_APP" \
-            APP_IMAGE_VERSION="$(image_tag "$BACKEND_IMAGE")" \
-            APP_IMAGE_REF="$BACKEND_IMAGE"
-        dokku_git_from_image "$BACKEND_APP" "$BACKEND_IMAGE"
+        if ! deploy_verified_component backend "$BACKEND_IMAGE"; then
+            error "Backend deployment failed; tenant is marked failed and no automatic rollback was attempted."
+            exit 1
+        fi
     else
         info "No backend image — deploy later with: git push dokku@${BASE_DOMAIN}:${BACKEND_APP} main"
     fi
 
     if [ -n "$FRONTEND_IMAGE" ]; then
         log "Deploying frontend from image: $FRONTEND_IMAGE"
-        ensure_tenant_image_available "$FRONTEND_IMAGE"
-        dokku config:set --no-restart "$FRONTEND_APP" \
-            APP_IMAGE_VERSION="$(image_tag "$FRONTEND_IMAGE")" \
-            APP_IMAGE_REF="$FRONTEND_IMAGE" \
-            COOKIE_SECURE=false
-        dokku_git_from_image "$FRONTEND_APP" "$FRONTEND_IMAGE"
+        if ! dokku config:set --no-restart "$FRONTEND_APP" COOKIE_SECURE=false; then
+            tenant_record_failure "$TENANT_NAME" frontend "failed to set frontend config" 2>/dev/null || true
+            exit 1
+        fi
+        if ! deploy_verified_component frontend "$FRONTEND_IMAGE"; then
+            error "Frontend deployment failed; tenant is degraded and backend identity was preserved."
+            exit 1
+        fi
 
         # Dokku's nginx config uses the bridge network IP which changes on every container
         # restart. Fix it immediately to use the Docker service hostname on the web network,
@@ -720,8 +887,8 @@ echo ""
 log "============================================"
 log "  Tenant '$TENANT_NAME' created!"
 log ""
-log "  Frontend: ${PROTOCOL}://${TENANT_DOMAIN}"
-log "  API:      ${PROTOCOL}://${TENANT_DOMAIN}/api"
+log "  Frontend: ${PUBLIC_TENANT_URL}"
+log "  API:      ${PUBLIC_TENANT_URL}/api"
 log "  Storage:  ${STORAGE_ROOT}/${TENANT_NAME}/"
 log ""
 if ! $dns_ok; then

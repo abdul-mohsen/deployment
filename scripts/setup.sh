@@ -118,6 +118,8 @@ if [ -f "$CONFIG_FILE" ]; then
     fi
 fi
 
+PUBLIC_PROTOCOL="${PUBLIC_PROTOCOL:-https}"
+
 if $NEED_CONFIG; then
     echo ""
     info "I'll ask a few questions to generate your config.env."
@@ -144,13 +146,13 @@ if $NEED_CONFIG; then
     info "MySQL connection (your existing MySQL server on this machine)."
     MYSQL_HOST=$(prompt_val "MySQL host (use host.docker.internal to reach host)" "host.docker.internal")
     MYSQL_PORT=$(prompt_val "MySQL port" "3306")
-    MYSQL_ROOT_USER=$(prompt_val "MySQL root user" "root")
+    MYSQL_ADMIN_USER=$(prompt_val "MySQL deployment account" "dokku_admin")
 
-    MYSQL_ROOT_PASSWORD=""
-    while [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; do
-        MYSQL_ROOT_PASSWORD=$(prompt_val "MySQL root password")
-        if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
-            warn "Please enter your real MySQL root password."
+    MYSQL_ADMIN_PASSWORD=""
+    while [ -z "$MYSQL_ADMIN_PASSWORD" ] || [ "$MYSQL_ADMIN_PASSWORD" = "changeme" ]; do
+        MYSQL_ADMIN_PASSWORD=$(prompt_val "MySQL deployment account password")
+        if [ -z "$MYSQL_ADMIN_PASSWORD" ] || [ "$MYSQL_ADMIN_PASSWORD" = "changeme" ]; then
+            warn "Please enter the password for the deployment account."
         fi
     done
 
@@ -186,6 +188,8 @@ if $NEED_CONFIG; then
     # ---- Storage ----
     STORAGE_ROOT=$(prompt_val "Tenant data directory" "/opt/tenant-data")
     BACKUP_DIR=$(prompt_val "Backup directory" "/opt/tenant-backups")
+    TENANT_STATE_DIR="/opt/tenant-state"
+    LOG_DIR="/opt/dashboard-logs"
     NGINX_CONF_DIR="/etc/nginx/dokku-tenants"
 
     # ---- Write config.env ----
@@ -197,6 +201,7 @@ if $NEED_CONFIG; then
 # =============================================================================
 
 BASE_DOMAIN=${BASE_DOMAIN}
+PUBLIC_PROTOCOL=${PUBLIC_PROTOCOL}
 ACME_EMAIL=${ACME_EMAIL}
 NGINX_MODE=${NGINX_MODE}
 DOKKU_PORT=${DOKKU_PORT}
@@ -204,17 +209,19 @@ DOKKU_HOSTNAME=${DOKKU_HOSTNAME}
 NGINX_CONF_DIR=${NGINX_CONF_DIR}
 STORAGE_ROOT=${STORAGE_ROOT}
 BACKUP_DIR=${BACKUP_DIR}
+TENANT_STATE_DIR=${TENANT_STATE_DIR}
+LOG_DIR=${LOG_DIR}
 
 # External MySQL
 MYSQL_HOST=${MYSQL_HOST}
 MYSQL_PORT=${MYSQL_PORT}
-MYSQL_ROOT_USER=${MYSQL_ROOT_USER}
-MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+MYSQL_ADMIN_USER=${MYSQL_ADMIN_USER}
+MYSQL_ADMIN_PASSWORD=${MYSQL_ADMIN_PASSWORD}
 MYSQL_MASTER_DB=${MYSQL_MASTER_DB}
 
 # Docker Hub
 DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME}
-PULL_TAG=latest
+PULL_TAG=dev
 ENVFILE
 
     # Optional sections
@@ -241,6 +248,7 @@ fi
 
 # Re-read all config values with defaults
 BASE_DOMAIN="${BASE_DOMAIN:?}"
+PUBLIC_PROTOCOL="${PUBLIC_PROTOCOL:-https}"
 ACME_EMAIL="${ACME_EMAIL:-}"
 NGINX_MODE="${NGINX_MODE:-behind-nginx}"
 if [ "$NGINX_MODE" = "behind-nginx-shared" ]; then
@@ -255,10 +263,20 @@ DOKKU_HOSTNAME="${DOKKU_HOSTNAME:-$BASE_DOMAIN}"
 NGINX_CONF_DIR="${NGINX_CONF_DIR:-/etc/nginx/dokku-tenants}"
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
 BACKUP_DIR="${BACKUP_DIR:-/opt/tenant-backups}"
+TENANT_STATE_DIR="${TENANT_STATE_DIR:-/opt/tenant-state}"
+LOG_DIR="${LOG_DIR:-/opt/dashboard-logs}"
 MYSQL_HOST="${MYSQL_HOST:-host.docker.internal}"
 MYSQL_PORT="${MYSQL_PORT:-3306}"
-MYSQL_ROOT_USER="${MYSQL_ROOT_USER:-root}"
-MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
+if [ -z "${MYSQL_ADMIN_USER:-}" ]; then
+    if [ -n "${MYSQL_ROOT_USER:-}" ]; then
+        MYSQL_ADMIN_USER="$MYSQL_ROOT_USER"
+    elif [ -n "${MYSQL_ROOT_PASSWORD:-}" ] && [ -z "${MYSQL_ADMIN_PASSWORD:-}" ]; then
+        MYSQL_ADMIN_USER="root"
+    else
+        MYSQL_ADMIN_USER="dokku_admin"
+    fi
+fi
+MYSQL_ADMIN_PASSWORD="${MYSQL_ADMIN_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}"
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
 DOCKERHUB_USERNAME="${DOCKERHUB_USERNAME:-}"
 WEBHOOK_SECRET="${WEBHOOK_SECRET:-}"
@@ -269,6 +287,7 @@ echo "==========================================="
 echo "  Configuration"
 echo "==========================================="
 echo "  Domain:     *.${BASE_DOMAIN}"
+echo "  Public URL: ${PUBLIC_PROTOCOL}://${BASE_DOMAIN}"
 echo "  Email:      ${ACME_EMAIL:-not set}"
 echo "  Nginx:      ${NGINX_MODE}"
 echo "  Dokku:      ${DOKKU_HOSTNAME}:${DOKKU_PORT}"
@@ -351,36 +370,26 @@ log "Skipping Dokku TLS plugins — TLS is handled by the operator's host nginx.
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
 log "Creating storage root: ${STORAGE_ROOT}"
 mkdir -p "${STORAGE_ROOT}"
+log "Creating backup/state/log directories"
+mkdir -p "${BACKUP_DIR}" "${TENANT_STATE_DIR}" "${LOG_DIR}"
 
-# ---- Step 5b: External MySQL — master database ----
-if [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" != "changeme" ]; then
-    log "Setting up master database: ${MYSQL_MASTER_DB}"
-
-    # zatca_master.tenant (the registry, incl. tenant_key) belongs to the zatca_master
-    # schema. This repo writes rows there but never creates or alters its tables.
-    run_mysql <<SQLEOF
-CREATE DATABASE IF NOT EXISTS \`${MYSQL_MASTER_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-SQLEOF
+# ---- Step 5b: External MySQL: deployment state and registry check ----
+# zatca_master is owned by ZATCA (zatca_integration migrations/zatca_master). This
+# repo writes rows there and never creates or alters its tables. Deployment-owned
+# state (pins, verified identity, deploy audit) lives in ${DEPLOY_STATE_DB}.
+if mysql_admin_configured; then
+    log "Setting up deployment state: ${DEPLOY_STATE_DB}"
+    if ! ensure_deployment_state_schema; then
+        error "Could not create the ${DEPLOY_STATE_DB} tables; check the deployment account grants."
+        exit 1
+    fi
     if require_registry_tenant_key; then
         log "Registry ready: ${MYSQL_MASTER_DB}.tenant has tenant_key and trigger tenant_key_default"
     else
         warn "Create tenants only after ZATCA's zatca_master migrations are applied (see above)."
     fi
-
-    # Deployment-owned state (per-tenant image pins). Not zatca_master, not a tenant DB.
-    run_mysql <<SQLEOF
-CREATE DATABASE IF NOT EXISTS \`${DEPLOY_STATE_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE TABLE IF NOT EXISTS \`${DEPLOY_STATE_DB}\`.tenant_image (
-    name            VARCHAR(100)  NOT NULL PRIMARY KEY COMMENT 'Tenant name, as in zatca_master.tenant.name',
-    backend_image   VARCHAR(255)  NOT NULL DEFAULT '' COMMENT 'Per-tenant override (empty = use global latest)',
-    frontend_image  VARCHAR(255)  NOT NULL DEFAULT '' COMMENT 'Per-tenant override (empty = use global latest)',
-    updated_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB;
-SQLEOF
-
-    log "Master database ready: ${MYSQL_MASTER_DB}; deployment state: ${DEPLOY_STATE_DB}.tenant_image"
 else
-    warn "MYSQL_ROOT_PASSWORD not configured. Skipping master DB setup."
+    warn "MYSQL_ADMIN_PASSWORD not configured. Skipping master DB setup."
     warn "Edit config.env and re-run setup.sh to create master database."
 fi
 
@@ -430,14 +439,14 @@ if [ -n "$DOCKERHUB_USERNAME" ]; then
     log "Setting up auto-deploy from Docker Hub..."
 
     # ---- 8a: Polling cron (safety net, checks every 2 min) ----
-    CRON_LINE="*/2 * * * * $SCRIPT_DIR/auto-pull.sh --config $CONFIG_FILE >> /var/log/auto-pull.log 2>&1"
-    if crontab -l 2>/dev/null | grep -qF "auto-pull.sh"; then
-        log "Auto-pull cron already installed."
+    mkdir -p "$(auto_pull_state_dir)"
+    if ensure_auto_pull_schedule "$SCRIPT_DIR/auto-pull.sh" "$CONFIG_FILE"; then
+        log "Auto-pull cron installed and verified (checks Docker Hub every 2 min)."
     else
-        (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -
-        log "Auto-pull cron installed (checks Docker Hub every 2 min)."
+        error "Auto-pull cron could not be installed or verified."
+        error "Run: sudo bash $SCRIPT_DIR/setup.sh --config $CONFIG_FILE"
+        exit 1
     fi
-    mkdir -p /var/lib/auto-pull
 
     # ---- 8c: Daily backup cron (3am) ----
     BACKUP_CRON="0 3 * * * $SCRIPT_DIR/backup-tenant.sh --all --config $CONFIG_FILE >> /var/log/tenant-backup.log 2>&1"
@@ -484,16 +493,17 @@ if prompt_yn "Create your first tenant now?" "y"; then
         TENANT_CMD="$SCRIPT_DIR/create-tenant.sh $TENANT_NAME --config $CONFIG_FILE"
 
         if [ -n "$DOCKERHUB_USERNAME" ]; then
-            RELEASE_TAG="${APP_IMAGE_VERSION_DEFAULT:-${PULL_TAG:-v0.0.1}}"
-            BACKEND_IMG="${DOCKERHUB_USERNAME}/api:${RELEASE_TAG}"
-            FRONTEND_IMG="${DOCKERHUB_USERNAME}/web:${RELEASE_TAG}"
+            RELEASE_TAG="${APP_IMAGE_VERSION_DEFAULT:-${PULL_TAG:-dev}}"
+            BACKEND_IMG="${BACKEND_IMAGE:-${DOCKERHUB_USERNAME}/ifritah-api}:${RELEASE_TAG}"
+            FRONTEND_IMG="${FRONTEND_IMAGE:-${DOCKERHUB_USERNAME}/ifritah-web}:${RELEASE_TAG}"
 
             info "Will deploy from: $BACKEND_IMG + $FRONTEND_IMG"
             if prompt_yn "Are images already pushed to Docker Hub?" "n"; then
                 TENANT_CMD="$TENANT_CMD --backend-image $BACKEND_IMG --frontend-image $FRONTEND_IMG"
             else
                 info "Creating tenant without images. Deploy later:"
-                info "  bash scripts/update-tenant.sh ${TENANT_NAME} --backend-image $BACKEND_IMG --frontend-image $FRONTEND_IMG"
+                info "  dokku git:from-image ${TENANT_NAME}-backend $BACKEND_IMG"
+                info "  dokku git:from-image ${TENANT_NAME}-frontend $FRONTEND_IMG"
                 TENANT_CMD="$TENANT_CMD --git-only"
             fi
         else
@@ -527,9 +537,9 @@ if [ -n "$DOCKERHUB_USERNAME" ]; then
         log "  DOCKERHUB_USERNAME = $DOCKERHUB_USERNAME"
         log "  DOCKERHUB_TOKEN    = <your Docker Hub access token>"
         log "  WEBHOOK_SECRET     = $WEBHOOK_SECRET"
-        SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "<server-ip>")
-        log "  WEBHOOK_URL_DEV    = http://${SERVER_IP}:9999/deploy"
-        log "  WEBHOOK_URL_PROD   = http://${SERVER_IP}:9999/deploy"
+        WEBHOOK_URL="$(public_url "deploy.${BASE_DOMAIN}")/deploy"
+        log "  WEBHOOK_URL_DEV    = ${WEBHOOK_URL}"
+        log "  WEBHOOK_URL_PROD   = ${WEBHOOK_URL}"
     fi
     log ""
     log "  ── CI workflow files ──"
@@ -538,7 +548,7 @@ if [ -n "$DOCKERHUB_USERNAME" ]; then
 fi
 log ""
 log "  Create more tenants:"
-log "    sudo ./scripts/create-tenant.sh <name> --backend-image ${DOCKERHUB_USERNAME:-youruser}/api:${APP_IMAGE_VERSION_DEFAULT:-v0.0.1} --frontend-image ${DOCKERHUB_USERNAME:-youruser}/web:${APP_IMAGE_VERSION_DEFAULT:-v0.0.1}"
+log "    sudo ./scripts/create-tenant.sh <name> --backend-image ${BACKEND_IMAGE:-${DOCKERHUB_USERNAME:-youruser}/ifritah-api}:${APP_IMAGE_VERSION_DEFAULT:-dev} --frontend-image ${FRONTEND_IMAGE:-${DOCKERHUB_USERNAME:-youruser}/ifritah-web}:${APP_IMAGE_VERSION_DEFAULT:-dev}"
 log ""
 log "==========================================="
 echo ""

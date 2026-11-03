@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/abdul-mohsen/deployment/dashboard/internal/config"
 	"github.com/abdul-mohsen/deployment/dashboard/internal/scripts"
@@ -55,6 +54,48 @@ func TestBuildArgv_CreateTenant_FullFlow(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("argv missing %q\nfull: %s", want, joined)
 		}
+	}
+}
+
+func TestBuildArgv_InitTenantDB_StatusOnly(t *testing.T) {
+	setVersionTestEnv(t)
+	sc := scripts.Find("init-tenant-db.sh")
+	if sc == nil {
+		t.Fatal("init-tenant-db.sh not in catalog")
+	}
+	form := url.Values{
+		"_pos_name":     {"acme"},
+		"image_version": {"v0.0.2"},
+		"status":        {"on"},
+	}
+	argv, err := buildArgv(sc, form)
+	if err != nil {
+		t.Fatalf("buildArgv: %v", err)
+	}
+	joined := strings.Join(argv, " ")
+	if !strings.Contains(joined, "--status") {
+		t.Fatalf("status flag missing: %s", joined)
+	}
+	if strings.Contains(joined, "--schema-only") || strings.Contains(joined, "--seed-only") {
+		t.Fatalf("status form unexpectedly applies schema or seeds data: %s", joined)
+	}
+}
+
+func TestBuildArgv_MigrationStatus(t *testing.T) {
+	sc := scripts.Find("migration-status.sh")
+	if sc == nil {
+		t.Fatal("migration-status.sh not in catalog")
+	}
+	argv, err := buildArgv(sc, url.Values{
+		"tenant": {"hockun"},
+		"json":   {"on"},
+	})
+	if err != nil {
+		t.Fatalf("buildArgv: %v", err)
+	}
+	joined := strings.Join(argv, " ")
+	if !strings.Contains(joined, "--tenant hockun") || !strings.Contains(joined, "--json") {
+		t.Fatalf("unexpected migration status argv: %s", joined)
 	}
 }
 
@@ -139,6 +180,42 @@ func TestBuildArgv_UpdateTenant_VersionExpandsPair(t *testing.T) {
 	}
 }
 
+func TestBuildArgv_UpdateTenant_SelectsComponentsIndependently(t *testing.T) {
+	setVersionTestEnv(t)
+	sc := scripts.Find("update-tenant.sh")
+	form := url.Values{
+		"_pos_name":              {"fresh"},
+		"backend_image_version":  {"v0.0.2"},
+		"frontend_image_version": {"dev"},
+	}
+	argv, err := buildArgv(sc, form)
+	if err != nil {
+		t.Fatalf("buildArgv: %v", err)
+	}
+	joined := strings.Join(argv, " ")
+	if !strings.Contains(joined, "--backend-image ssdawweq/ifritah-api:v0.0.2") ||
+		!strings.Contains(joined, "--frontend-image ssdawweq/ifritah-web:dev") {
+		t.Fatalf("expected independent component images, got %s", joined)
+	}
+}
+
+func TestBuildArgv_DefaultsBothComponentsToDev(t *testing.T) {
+	t.Setenv("BACKEND_IMAGE", "ssdawweq/ifritah-api")
+	t.Setenv("FRONTEND_IMAGE", "ssdawweq/ifritah-web")
+	t.Setenv("APP_IMAGE_VERSIONS", "")
+	t.Setenv("APP_IMAGE_VERSION_DEFAULT", "")
+	sc := scripts.Find("update-tenant.sh")
+	argv, err := buildArgv(sc, url.Values{"_pos_name": {"fresh"}})
+	if err != nil {
+		t.Fatalf("buildArgv: %v", err)
+	}
+	joined := strings.Join(argv, " ")
+	if !strings.Contains(joined, "--backend-image ssdawweq/ifritah-api:dev") ||
+		!strings.Contains(joined, "--frontend-image ssdawweq/ifritah-web:dev") {
+		t.Fatalf("expected dev defaults, got %s", joined)
+	}
+}
+
 func TestBuildArgv_DeployAll_FrontendVersionExpandsPosImage(t *testing.T) {
 	setVersionTestEnv(t)
 	sc := scripts.Find("deploy-all.sh")
@@ -161,16 +238,34 @@ func TestBuildArgv_DeployAll_FrontendVersionExpandsPosImage(t *testing.T) {
 			t.Errorf("argv missing %q\nfull: %s", want, joined)
 		}
 	}
+
+}
+
+func TestBuildArgv_SetTenantImageHonorsSelectedRole(t *testing.T) {
+	setVersionTestEnv(t)
+	sc := scripts.Find("set-tenant-image.sh")
+	if sc == nil {
+		t.Fatal("set-tenant-image.sh not in catalog")
+	}
+	argv, err := buildArgv(sc, url.Values{
+		"_pos_name":     {"fresh"},
+		"type":          {"backend"},
+		"image_version": {"v0.0.2"},
+	})
+	if err != nil {
+		t.Fatalf("buildArgv: %v", err)
+	}
+	joined := strings.Join(argv, " ")
+	if !strings.Contains(joined, "--backend ssdawweq/ifritah-api:v0.0.2") {
+		t.Fatalf("backend pin missing: %s", joined)
+	}
+	if strings.Contains(joined, "--frontend ") {
+		t.Fatalf("frontend pin should not be emitted for backend selection: %s", joined)
+	}
 }
 
 func TestDashboardTemplatesParse(t *testing.T) {
-	funcs := template.FuncMap{
-		"join":     strings.Join,
-		"now":      func() string { return time.Now().Format("2006-01-02 15:04:05") },
-		"stateClr": stateClass,
-		"httpClr":  httpClass,
-		"json":     templateJSON,
-	}
+	funcs := templateFuncs()
 	for _, name := range []string{"index.html", "app.html", "tenant.html", "scripts.html", "script.html", "releases.html", "password.html"} {
 		if _, err := template.New("").Funcs(funcs).ParseFS(tplFS,
 			"templates/_layout.html",

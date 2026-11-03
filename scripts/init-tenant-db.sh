@@ -2,9 +2,10 @@
 # =============================================================================
 # init-tenant-db.sh - Initialize or repair a tenant database
 # =============================================================================
-# Builds the tenant DB with goose: runs /app/migrate up from the backend image
-# (the only migration path), then seeds company/store and the seed users. The
-# deployment repo intentionally does not own or copy database schema files.
+# Builds the tenant DB with goose: /app/migrate up from the backend image is the
+# only migration path. Then the company row gets the registry tenant_key, and the
+# seed (--seed-only) adds company/store defaults and the seed users. Deployment
+# never ALTERs or CREATEs tables in a tenant database.
 # =============================================================================
 
 set -euo pipefail
@@ -12,6 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/lib.sh"
+deployment_init_logging
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -19,10 +21,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-log()   { echo -e "${GREEN}[+]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-error() { echo -e "${RED}[x]${NC} $*" >&2; }
-info()  { echo -e "${BLUE}[i]${NC} $*"; }
+log()   { deployment_log INFO "$*"; echo -e "${GREEN}[+]${NC} $*"; }
+warn()  { deployment_log WARN "$*"; echo -e "${YELLOW}[!]${NC} $*"; }
+error() { deployment_log ERROR "$*"; echo -e "${RED}[x]${NC} $*" >&2; }
+info()  { deployment_log INFO "$*"; echo -e "${BLUE}[i]${NC} $*"; }
 
 usage() {
     cat <<EOF
@@ -32,8 +34,9 @@ Options:
   --backend-image <image> Backend image whose /app/migrate runs goose
   --env KEY=VALUE         Seed value; supports ADMIN_USER, ADMIN_PASSWORD,
                           MANAGER_USER, MANAGER_PASSWORD, COMPANY_NAME
-  --schema-only           Run goose migrations and the company seed only
+  --schema-only           Run goose migrations and set company.tenant_key only
   --seed-only             Seed users/company only
+  --status                Report goose migration status without applying changes
   --dry-run               Show planned work without executing
   --config <path>         Path to config.env file (default: ../config.env)
 
@@ -48,6 +51,7 @@ TENANT_NAME=""
 BACKEND_IMAGE="${BACKEND_IMAGE:-}"
 SCHEMA_ONLY=false
 SEED_ONLY=false
+STATUS_ONLY=false
 DRY_RUN=false
 declare -a ENV_VARS=()
 
@@ -57,6 +61,7 @@ while [[ $# -gt 0 ]]; do
         --env)           ENV_VARS+=("$2"); shift 2 ;;
         --schema-only)   SCHEMA_ONLY=true; shift ;;
         --seed-only)     SEED_ONLY=true; shift ;;
+        --status)        STATUS_ONLY=true; shift ;;
         --dry-run)       DRY_RUN=true; shift ;;
         --config)        CONFIG_FILE="$2"; shift 2 ;;
         --help|-h)       usage; exit 0 ;;
@@ -75,7 +80,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 if $SCHEMA_ONLY && $SEED_ONLY; then
-    error "Use only one of --schema-only or --seed-only."
+    error "Use only one of --schema-only, --seed-only, or --status."
+    exit 1
+fi
+if $STATUS_ONLY && $SCHEMA_ONLY; then
+    error "Use only one of --schema-only, --seed-only, or --status."
+    exit 1
+fi
+if $STATUS_ONLY && $SEED_ONLY; then
+    error "Use only one of --schema-only, --seed-only, or --status."
     exit 1
 fi
 
@@ -93,16 +106,11 @@ else
 fi
 
 TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
+deployment_set_tenant "$TENANT_NAME"
 
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"
 DOKKU_PORT="${DOKKU_PORT:-8080}"
-MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
 TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"
-
-if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
-    error "MYSQL_ROOT_PASSWORD is not configured; cannot initialize tenant DB."
-    exit 1
-fi
 
 BACKEND_APP="${TENANT_NAME}-backend"
 TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
@@ -133,8 +141,11 @@ json_escape() {
 }
 
 tenant_missing_required_tables() {
-    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT required.name FROM (SELECT 'company' AS name UNION ALL SELECT 'branches' UNION ALL SELECT 'store' UNION ALL SELECT 'user') required LEFT JOIN information_schema.tables existing ON existing.table_schema=DATABASE() AND existing.table_name=required.name WHERE existing.table_name IS NULL;" \
-        | paste -sd ',' -
+    local missing
+    missing="$(run_tenant_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT required.name FROM (SELECT 'company' AS name UNION ALL SELECT 'branches' UNION ALL SELECT 'store' UNION ALL SELECT 'user') required LEFT JOIN information_schema.tables existing ON existing.table_schema=DATABASE() AND existing.table_name=required.name WHERE existing.table_name IS NULL;")" \
+        || return 1
+    printf '%s\n' "$missing" | paste -sd ',' -
 }
 
 validate_tenant_schema() {
@@ -154,6 +165,18 @@ ensure_tenant_database() {
     if $DRY_RUN; then
         info "Would ensure database exists: $TENANT_DB_NAME"
         return 0
+    fi
+
+    # goose needs the database to exist; the tenant account reaches it once it does.
+    if run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT 1" >/dev/null 2>&1; then
+        info "Tenant database is reachable with the tenant account: $TENANT_DB_NAME"
+        return 0
+    fi
+
+    if ! mysql_admin_configured; then
+        error "Tenant database '$TENANT_DB_NAME' is not reachable with the backend DB_USER/DB_PASSWORD."
+        error "MYSQL_ADMIN_USER/MYSQL_ADMIN_PASSWORD is required when the database itself is missing."
+        exit 1
     fi
 
     run_mysql <<SQLEOF
@@ -186,7 +209,7 @@ resolve_backend_image() {
         return 0
     fi
 
-    error "Backend image is required to run goose migrations. Pass --backend-image <image>."
+    error "Backend image is required to apply schema from image. Pass --backend-image <image>."
     exit 1
 }
 
@@ -284,6 +307,34 @@ resolve_mysql_host_for_client() {
     esac
 }
 
+run_tenant_mysql() {
+    local db="${1:-$TENANT_DB_NAME}"
+    shift || true
+
+    local user password host port
+    user="$(tenant_db_user)"
+    password="$(tenant_db_password)"
+    host="$(tenant_db_host)"
+    port="$(tenant_db_port)"
+
+    if [ -z "$password" ]; then
+        error "Tenant DB password is missing from ${BACKEND_APP} config; cannot connect as tenant user."
+        return 1
+    fi
+
+    if [ "$_MYSQL_VIA" = "host" ]; then
+        MYSQL_PWD="$password" mysql --protocol=TCP -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" "$db" "$@"
+    else
+        docker run --rm -i \
+            --add-host=host.docker.internal:host-gateway \
+            -e "MYSQL_PWD=$password" \
+            mysql:8.0 \
+            mysql --protocol=TCP -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" "$db" "$@"
+    fi
+}
+
+# tenant_db_user / tenant_db_password: the tenant's own database account, the one the
+# app uses. goose runs as this account, which holds the privileges on its database.
 tenant_db_user() {
     local user
     user="$(tenant_db_setting DB_USER "")"
@@ -298,32 +349,8 @@ tenant_db_password() {
     printf '%s' "$password"
 }
 
-run_tenant_mysql() {
-    local db="${1:-$TENANT_DB_NAME}"
-    shift || true
-
-    local user password host port
-    user="$(tenant_db_user)"
-    password="$(tenant_db_password)"
-    host="$(tenant_db_host)"
-    port="$(tenant_db_port)"
-
-    if [ -z "$password" ]; then
-        error "Tenant DB password is missing from ${BACKEND_APP} config; cannot connect as tenant user."
-        exit 1
-    fi
-
-    if [ "$_MYSQL_VIA" = "host" ]; then
-        MYSQL_PWD="$password" mysql --protocol=TCP -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" "$db" "$@"
-    else
-        docker run --rm -i \
-            --add-host=host.docker.internal:host-gateway \
-            -e "MYSQL_PWD=$password" \
-            mysql:8.0 \
-            mysql --protocol=TCP -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" "$db" "$@"
-    fi
-}
-
+# Schema changes are goose migrations from the backend image: /app/migrate up.
+# A failure stops the run before any image is deployed.
 apply_schema() {
     ensure_tenant_database
 
@@ -334,16 +361,84 @@ apply_schema() {
     log "Running goose migrations from ${image}: /app/migrate up"
     if $DRY_RUN; then
         info "Would run /app/migrate up from ${image} against ${TENANT_DB_NAME}"
-    else
-        goose_migrate "$image" "$(tenant_db_host)" "$(tenant_db_port)" "$TENANT_DB_NAME" \
-            "$(tenant_db_user)" "$(tenant_db_password)" || {
-            error "goose migrations failed for ${TENANT_DB_NAME}; tenant DB is not initialized."
-            exit 1
-        }
+        return 0
+    fi
+    if ! goose_run "$image" up "$(tenant_db_host)" "$(tenant_db_port)" \
+        "$TENANT_DB_NAME" "$(tenant_db_user)" "$(tenant_db_password)"; then
+        error "goose migrations failed for ${TENANT_DB_NAME}; the tenant DB is not ready and no image was deployed."
+        return 1
     fi
 
     validate_tenant_schema
-    seed_company_defaults
+    ensure_company_tenant_key
+}
+
+# company.tenant_key is copied from zatca_master.tenant for this tenant. The backend
+# refuses to start without it, so it is written after goose and before the image
+# is deployed. The row is created only when missing (never overwritten), and the key
+# is set by id. The value is never generated here and never printed.
+ensure_company_tenant_key() {
+    local tenant_key tenant_key_sql company_name company_sql matched
+    tenant_key="$(tenant_registry_key "$TENANT_DB_NAME")" || return 1
+    tenant_key_sql="$(sql_escape "$tenant_key")"
+    company_name="$(env_value COMPANY_NAME)"
+    company_name="${company_name:-$TENANT_NAME}"
+    company_sql="$(sql_escape "$company_name")"
+
+    run_tenant_mysql "$TENANT_DB_NAME" <<SQLEOF || return 1
+INSERT INTO company (id, state, name, vat_number, vat_registration_number, commercial_registration_number, name_ar, business_category, tenant_key)
+SELECT 1, 0, '${company_sql}', '300000000000003', '300000000000003', '1010000000', '${company_sql}', 'Supply activities', '${tenant_key_sql}'
+FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM company WHERE id = 1);
+UPDATE company SET tenant_key = '${tenant_key_sql}' WHERE id = 1;
+SQLEOF
+
+    matched="$(run_tenant_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT COUNT(*) FROM company WHERE id = 1 AND tenant_key = '${tenant_key_sql}';" \
+        | awk 'NF { print $1; exit }')"
+    if [ "$matched" != "1" ]; then
+        error "company row 1 in ${TENANT_DB_NAME} does not carry the registry tenant_key; the backend will not start."
+        return 1
+    fi
+    info "company.tenant_key set in ${TENANT_DB_NAME} from ${MYSQL_MASTER_DB:-zatca_master}.tenant."
+}
+
+# Read-only goose status for --status. The dashboard parses these lines; a failed
+# status check is schema_status=unknown with an error line.
+show_migration_status() {
+    local image output rc line path state pending=0
+    image="$(resolve_backend_image)"
+    ensure_backend_image_available "$image"
+    printf 'tenant=%s\nimage=%s\n' "$TENANT_NAME" "$image"
+
+    set +e
+    output="$(goose_run "$image" status "$(tenant_db_host)" "$(tenant_db_port)" \
+        "$TENANT_DB_NAME" "$(tenant_db_user)" "$(tenant_db_password)" 2>&1)"
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        echo "schema_status=unknown"
+        error "goose status failed for ${TENANT_DB_NAME} (exit ${rc})."
+        return 1
+    fi
+
+    while IFS= read -r line; do
+        read -r path state <<< "$line" || true
+        [ -n "$path" ] || continue
+        case "$state" in
+            applied) echo "applied_migration=$(basename "$path")" ;;
+            pending)
+                echo "pending_migration=$(basename "$path")"
+                pending=$((pending + 1))
+                ;;
+        esac
+    done <<< "$output"
+
+    if [ "$pending" -gt 0 ]; then
+        echo "schema_status=pending"
+        return 1
+    fi
+    echo "schema_status=up_to_date"
 }
 
 seed_company_defaults() {
@@ -359,10 +454,8 @@ seed_company_defaults() {
         return 0
     fi
 
-    # The backend refuses to start without company.tenant_key. Copy it from the
-    # zatca_master registry; it is never generated here.
     local tenant_key tenant_key_sql
-    tenant_key="$(tenant_registry_key "$TENANT_DB_NAME")" || exit 1
+    tenant_key="$(tenant_registry_key "$TENANT_DB_NAME")" || return 1
     tenant_key_sql="$(sql_escape "$tenant_key")"
 
     run_tenant_mysql "$TENANT_DB_NAME" <<SQLEOF
@@ -483,7 +576,7 @@ register_seed_user() {
         status="${response##*$'\n'}"
         body="${response%$'\n'$status}"
         if [ "${DASHBOARD_ENV:-}" = "dev" ]; then
-            info "[dev-diag] register attempt=${attempt} status='${status}' body_len=${#body} body_head=$(printf '%.120s' "$body")"
+            info "[dev-diag] register attempt=${attempt} status='${status}' body_len=${#body}"
         fi
 
         if [ "$status" = "201" ] || [ "$status" = "200" ] || [ "$status" = "409" ]; then
@@ -497,7 +590,7 @@ register_seed_user() {
             continue
         fi
 
-        error "Failed to register user '$username' (HTTP $status): $body"
+        error "Failed to register user '$username' (HTTP $status, response_bytes=${#body})"
         exit 1
     done
 
@@ -519,6 +612,11 @@ seed_users() {
     register_seed_user "$admin_user" "$admin_password" "admin" "${company_name} Admin"
     register_seed_user "$manager_user" "$manager_password" "manager" "${company_name} Manager"
 }
+
+if $STATUS_ONLY; then
+    show_migration_status
+    exit $?
+fi
 
 info "Tenant DB init target: $TENANT_NAME ($TENANT_DB_NAME)"
 if ! $SEED_ONLY; then

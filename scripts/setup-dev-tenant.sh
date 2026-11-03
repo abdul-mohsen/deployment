@@ -61,13 +61,16 @@ info "  Name:           ${NAME}"
 info "  Backend image:  ${BACKEND_IMG}"
 $PIN_FRONTEND && info "  Frontend image: ${FRONTEND_IMG}"
 
-# 1) Create the tenant if it doesn't already exist
+# 1) Create the tenant from its Docker Hub images if it doesn't already exist.
+#    create-tenant.sh deploys both images itself.
 APP_BACKEND="${NAME}-backend"
+TENANT_CREATED=false
 if dokku apps:exists "$APP_BACKEND" 2>/dev/null; then
     info "Tenant '${NAME}' already exists — refreshing image pin only."
 else
-    log "Creating tenant '${NAME}' (git-only, will be deployed by auto-pull)..."
-    bash "$SCRIPT_DIR/create-tenant.sh" "$NAME" --git-only --config "$CONFIG_FILE"
+    log "Creating tenant '${NAME}' from ${BACKEND_IMG} and ${FRONTEND_IMG}..."
+    bash "$SCRIPT_DIR/create-tenant.sh" "$NAME" --backend-image "$BACKEND_IMG" --frontend-image "$FRONTEND_IMG" --config "$CONFIG_FILE"
+    TENANT_CREATED=true
 fi
 
 # 2) Pin backend to DEV_TAG in the master DB so global deploys skip it
@@ -79,19 +82,22 @@ if $PIN_FRONTEND; then
     bash "$SCRIPT_DIR/set-tenant-image.sh" "$NAME" --frontend "$FRONTEND_IMG" --config "$CONFIG_FILE"
 fi
 
-# 3) Trigger an initial pull+deploy if the DEV_TAG image already exists on Docker Hub
-log "Triggering initial deploy from ${BACKEND_IMG}..."
-if bash "$SCRIPT_DIR/deploy-all.sh" "$BACKEND_IMG" --type backend --tenant "$NAME" --skip-canary; then
-    log "Initial backend deploy ✓"
-else
-    warn "Initial deploy failed (image may not exist yet). Push to your dev branch — auto-pull will pick it up."
-fi
-
-if $PIN_FRONTEND; then
-    if bash "$SCRIPT_DIR/deploy-all.sh" "$FRONTEND_IMG" --type frontend --tenant "$NAME" --skip-canary; then
-        log "Initial frontend deploy ✓"
+# 3) An existing tenant gets an initial pull+deploy of DEV_TAG. A tenant created above
+#    was deployed by create-tenant.sh already.
+if ! $TENANT_CREATED; then
+    log "Triggering initial deploy from ${BACKEND_IMG}..."
+    if bash "$SCRIPT_DIR/deploy-all.sh" "$BACKEND_IMG" --type backend --tenant "$NAME" --skip-canary; then
+        log "Initial backend deploy ✓"
     else
-        warn "Initial frontend deploy failed — auto-pull will retry."
+        warn "Initial deploy failed (image may not exist yet). Auto-pull deploys it once CI has pushed it to Docker Hub."
+    fi
+
+    if $PIN_FRONTEND; then
+        if bash "$SCRIPT_DIR/deploy-all.sh" "$FRONTEND_IMG" --type frontend --tenant "$NAME" --skip-canary; then
+            log "Initial frontend deploy ✓"
+        else
+            warn "Initial frontend deploy failed — auto-pull will retry."
+        fi
     fi
 fi
 

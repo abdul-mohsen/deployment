@@ -152,7 +152,7 @@ sudo ./scripts/deployctl.sh setup dev-tenant        # creates the one dev tenant
 | Manual prod deploy (one client) | `sudo ./scripts/deployctl.sh fleet sync myuser/ifritah-api:v0.0.1 --tenant acme` |
 | Manual prod deploy (all clients) | `sudo ./scripts/deployctl.sh fleet sync myuser/ifritah-api:v0.0.1` |
 | Pin a tenant to a fixed image | `sudo ./scripts/deployctl.sh tenant pin acme --backend myuser/ifritah-api:v0.0.1` |
-| Rollback | `sudo ./scripts/deployctl.sh tenant rollback acme --to myuser/ifritah-api:abc1234` |
+| Rollback | `sudo ./scripts/deployctl.sh tenant rollback acme --to myuser/ifritah-api:abc1234 --confirm-schema-compatible` |
 | List tenants | `sudo ./scripts/deployctl.sh tenant list` |
 | Tenant status | `sudo ./scripts/deployctl.sh tenant status acme` |
 | Tail logs | `sudo ./scripts/deployctl.sh tenant logs acme --type backend` |
@@ -163,6 +163,8 @@ sudo ./scripts/deployctl.sh setup dev-tenant        # creates the one dev tenant
 | Prune by policy | `sudo ./scripts/deployctl.sh fleet backups prune` |
 | Restore / rollback | `sudo ./scripts/deployctl.sh tenant restore acme --from acme_20250101_120000` |
 | Restart platform | `sudo ./scripts/deployctl.sh stack restart --env all` |
+
+`--confirm-schema-compatible` confirms that no schema change since the target image needs a restore first; without it a backend rollback is refused, because schema changes are forward-only.
 
 The old `scripts/*.sh` files remain as readable implementation units and compatibility entrypoints. New operations should be exposed through `deployctl.sh` first.
 
@@ -292,10 +294,10 @@ readiness uses the same identity validator. Older label aliases are accepted
 only as a migration path.
 
 After the swap, the app's `/version` response must report the same identity.
-The last verified identity is stored per component in `zatca_master.tenant`;
-failed attempts are recorded in `tenant_deployment_audit` without replacing
-the last-known-good fields. Backend updates replay the migrations bundled in
-the target image before the Dokku swap. A migration or verification failure
+The last verified identity is stored per component in `deployment_state.tenant_identity`;
+failed attempts are recorded in `deployment_state.tenant_deployment_audit` without replacing
+the last-known-good fields. Backend updates run goose (`/app/migrate up`) from
+the target image against the tenant DB before the Dokku swap. A migration or verification failure
 therefore cannot be reported as a successful deployment, and a later
 component failure restores earlier components where a prior image exists.
 

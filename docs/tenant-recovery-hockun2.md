@@ -21,9 +21,9 @@ Playwright reproduction against `hockun2` confirmed:
 ## Second-order regression: schema drift on the tenant DB
 
 When hockun2 was upgraded from `:v0.0.1` to `:v0.0.2` via `update-tenant.sh`,
-the container was swapped onto a backend that expects columns added by
-`pkg/db/migrations/0005_purchase_bill_product_item_fields.sql`
-(`cost_price`, `shelf_number` on `purchase_bill_product`, introduced by
+the container was swapped onto a backend that expects columns added by the
+legacy migration `0005_purchase_bill_product_item_fields` (`cost_price`,
+`shelf_number` on `purchase_bill_product`, introduced by
 `ifritah-go#53` on 2026-07-15). The tenant DB was last migrated when the
 tenant was **created** (pre-#53), so those columns were missing. Every
 `INSERT INTO purchase_bill_product` therefore failed with `Error 1054
@@ -33,11 +33,10 @@ renders the fallback toast `"فشل في إنشاء فاتورة الشراء"`.
 breaks the read path (`GET /dashboard/purchase-bills/<id>` returns 500 out
 of `GetPurchaseBillProducts`).
 
-`update-tenant.sh` was extended (see this repo's fix) to re-apply the
-`pkg/db/migrations/*.sql` bundle from the incoming backend image
-automatically before swapping the container. Every migration is idempotent
-(each `ALTER` guarded by `information_schema.columns`), so re-applying the
-full set on already-migrated tenants is a no-op.
+At the time, `update-tenant.sh` re-applied the legacy migration bundle from the
+incoming backend image before swapping the container. DP1 replaced that path:
+tenant DBs are now migrated only by goose (`/app/migrate up` from the image),
+and the legacy bundle and its ledger are gone.
 
 ## Fix (short version)
 
@@ -179,9 +178,9 @@ Any future tenant deploy via `update-tenant.sh` will:
   tenant DB that lags the current schema is auto-repaired before the new
   container is swapped in.
 
-Both checks can be bypassed (`--skip-drift-check`, `--skip-migrations`) for
-targeted rollback investigations, but both bypasses are loud (warning
-banners on stdout and stderr).
+The drift check can be bypassed (`--skip-drift-check`) for targeted
+rollback investigations. The bypass is loud (warning banners on stdout and
+stderr).
 
 ## If `BASE_DOMAIN` changed
 

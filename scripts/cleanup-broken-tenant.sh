@@ -258,6 +258,10 @@ SQLEOF
 UPDATE tenant SET enabled=0 WHERE db_name='${TENANT_DB_NAME}';
 DELETE FROM tenant WHERE db_name='${TENANT_DB_NAME}' AND name='${TENANT_NAME}';
 SQLEOF
+    run_mysql "$DEPLOY_STATE_DB" <<SQLEOF 2>/dev/null || true
+DELETE FROM tenant_image WHERE name='${TENANT_NAME}';
+DELETE FROM tenant_identity WHERE name='${TENANT_NAME}';
+SQLEOF
 }
 
 remove_host_nginx_vhost() {

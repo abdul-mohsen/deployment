@@ -66,7 +66,6 @@ SUFFIX="-${APP_TYPE}"
 BASE_DOMAIN="${BASE_DOMAIN:-app.example.com}"
 public_protocol >/dev/null || exit 1
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
-MIGRATE_CMD="${MIGRATE_CMD:-}"
 IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"
 VERIFY_RETRIES="${TENANT_VERIFY_RETRIES:-15}"
 VERIFY_DELAY="${TENANT_VERIFY_DELAY:-2}"
@@ -112,9 +111,9 @@ get_tenant_override() {
     local tenant="$1"
     local col="${APP_TYPE}_image"
     ! mysql_admin_configured && { echo ""; return; }
-    run_mysql -N -B "$MYSQL_MASTER_DB" -e \
-        "SELECT $col FROM tenant WHERE name='${tenant}' AND enabled=1 LIMIT 1;" 2>/dev/null \
-        | head -1 || echo ""
+    run_mysql -N -B "$DEPLOY_STATE_DB" -e \
+        "SELECT i.$col FROM \`${DEPLOY_STATE_DB}\`.tenant_image i JOIN \`${MYSQL_MASTER_DB}\`.tenant t ON t.name = i.name WHERE i.name='${tenant}' AND t.enabled=1 LIMIT 1;" \
+        | head -1
 }
 
 # Deploy one app, honoring per-tenant override and verifying BuildIdentity.
@@ -128,7 +127,10 @@ deploy_one() {
 
     # Per-tenant override (only for backend; frontend rarely needs pinning)
     local override
-    override=$(get_tenant_override "$tenant")
+    if ! override=$(get_tenant_override "$tenant"); then
+        error "${tenant}: cannot read the image pin from ${DEPLOY_STATE_DB}.tenant_image; not deploying"
+        return 1
+    fi
     if [ -n "$override" ] && [ "$override" != "$IMAGE" ]; then
         warn "${tenant}: pinned to '${override}' — skipping global deploy"
         return 0
@@ -168,7 +170,7 @@ deploy_one() {
 
     if [ "$APP_TYPE" = "backend" ]; then
         migrations_attempted=true
-        log "  Replaying schema/migrations on ${tenant} before image swap"
+        log "  Running goose migrations on ${tenant} before image swap"
         if ! "$SCRIPT_DIR/init-tenant-db.sh" "$tenant" --schema-only \
             --backend-image "$image" --config "$CONFIG_FILE"; then
             error "  Migration failed on ${app}; refusing image swap. Restore backup ${backup_id} before retry."
@@ -179,18 +181,6 @@ deploy_one() {
                 "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$previous_image" \
                 "$(printf '%s' "$previous_identity" | cut -f2)" "failed" \
                 "migration replay failed; restore backup before retry" \
-                "$backup_id" "$backup_artifact" 2>/dev/null || true
-            return 1
-        fi
-        if [ -n "$MIGRATE_CMD" ] && ! dokku run "$app" $MIGRATE_CMD; then
-            error "  Custom migration failed on ${app}; refusing image swap. Restore backup ${backup_id} before retry."
-            tenant_record_failure "$tenant" "$APP_TYPE" \
-                "custom migration failed; restore pre-migration backup before retry" 2>/dev/null || true
-            tenant_record_audit "$tenant" "$APP_TYPE" "$image" "$resolved_ref" "$BUILD_DIGEST" \
-                "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
-                "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$previous_image" \
-                "$(printf '%s' "$previous_identity" | cut -f2)" "failed" \
-                "custom migration failed; restore backup before retry" \
                 "$backup_id" "$backup_artifact" 2>/dev/null || true
             return 1
         fi
@@ -397,8 +387,8 @@ while IFS= read -r app; do
 done <<< "$APPS"
 
 ensure_deploy_image_available "$IMAGE"
-if ! ensure_tenant_provenance_schema; then
-    error "Tenant provenance schema is unavailable; refusing an untracked deployment."
+if ! ensure_deployment_state_schema; then
+    error "Deployment state schema is unavailable; refusing an untracked deployment."
     exit 1
 fi
 if ! resolve_build_identity "$IMAGE"; then

@@ -2,8 +2,10 @@
 # =============================================================================
 # init-tenant-db.sh - Initialize or repair a tenant database
 # =============================================================================
-# Applies schema/migrations from the backend image used for the tenant. The
-# deployment repo intentionally does not own or copy database schema files.
+# Builds the tenant DB with goose: /app/migrate up from the backend image is the
+# only migration path. Then the company row gets the registry tenant_key, and the
+# seed (--seed-only) adds company/store defaults and the seed users. Deployment
+# never ALTERs or CREATEs tables in a tenant database.
 # =============================================================================
 
 set -euo pipefail
@@ -29,21 +31,18 @@ usage() {
 Usage: $0 <tenant-name> [options]
 
 Options:
-  --backend-image <image> Backend image containing schema/migrations
+  --backend-image <image> Backend image whose /app/migrate runs goose
   --env KEY=VALUE         Seed value; supports ADMIN_USER, ADMIN_PASSWORD,
                           MANAGER_USER, MANAGER_PASSWORD, COMPANY_NAME
-  --schema-only           Apply schema/migrations only
+  --schema-only           Run goose migrations and set company.tenant_key only
   --seed-only             Seed users/company only
-  --status                Report migration status without applying changes
+  --status                Report goose migration status without applying changes
   --dry-run               Show planned work without executing
   --config <path>         Path to config.env file (default: ../config.env)
 
 Environment overrides:
-    BACKEND_IMAGE                Backend image containing schema/migrations
+    BACKEND_IMAGE                Backend image whose /app/migrate runs goose
     TENANT_IMAGE_PULL_POLICY     always | missing | never (default: always)
-    TENANT_SCHEMA_IMAGE_PATH     Schema path inside backend image
-    TENANT_MIGRATIONS_IMAGE_DIR  Migrations directory inside backend image
-    TENANT_IGNORED_SCHEMA_FILES  Comma-separated schema files to skip
 EOF
 }
 
@@ -111,10 +110,7 @@ deployment_set_tenant "$TENANT_NAME"
 
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"
 DOKKU_PORT="${DOKKU_PORT:-8080}"
-TENANT_SCHEMA_IMAGE_PATH="${TENANT_SCHEMA_IMAGE_PATH:-/app/db/schema/schema.sql}"
-TENANT_MIGRATIONS_IMAGE_DIR="${TENANT_MIGRATIONS_IMAGE_DIR:-/app/db/migrations}"
 TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"
-TENANT_IGNORED_SCHEMA_FILES="${TENANT_IGNORED_SCHEMA_FILES:-car_part.sql}"
 
 BACKEND_APP="${TENANT_NAME}-backend"
 TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
@@ -144,46 +140,9 @@ json_escape() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-shell_quote() {
-    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
-}
-
-tenant_table_count() {
-    if $DRY_RUN; then
-        echo 0
-        return 0
-    fi
-    local count
-    count="$(run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
-        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE();")" || return 1
-    count="$(printf '%s\n' "$count" | awk 'NF { print $1; exit }')"
-    [[ "$count" =~ ^[0-9]+$ ]] || {
-        error "Could not read tenant table count from ${TENANT_DB_NAME}."
-        return 1
-    }
-    printf '%s\n' "$count"
-}
-
-tenant_required_table_count() {
-    if $DRY_RUN; then
-        echo 0
-        return 0
-    fi
-    local count
-    count="$(run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
-        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name IN ('company','branches','store','user');")" \
-        || return 1
-    count="$(printf '%s\n' "$count" | awk 'NF { print $1; exit }')"
-    [[ "$count" =~ ^[0-9]+$ ]] || {
-        error "Could not read required tenant table count from ${TENANT_DB_NAME}."
-        return 1
-    }
-    printf '%s\n' "$count"
-}
-
 tenant_missing_required_tables() {
     local missing
-    missing="$(run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
+    missing="$(run_tenant_mysql "$TENANT_DB_NAME" -N -B -e \
         "SELECT required.name FROM (SELECT 'company' AS name UNION ALL SELECT 'branches' UNION ALL SELECT 'store' UNION ALL SELECT 'user') required LEFT JOIN information_schema.tables existing ON existing.table_schema=DATABASE() AND existing.table_name=required.name WHERE existing.table_name IS NULL;")" \
         || return 1
     printf '%s\n' "$missing" | paste -sd ',' -
@@ -208,16 +167,14 @@ ensure_tenant_database() {
         return 0
     fi
 
-    # Existing tenants can replay schema with a dedicated migration account,
-    # the deployment account, or the application account as a legacy fallback.
-    if run_migration_mysql "$TENANT_DB_NAME" -N -B -e "SELECT 1" >/dev/null 2>&1; then
-        info "Tenant database is reachable for schema migration: $TENANT_DB_NAME"
+    # goose needs the database to exist; the tenant account reaches it once it does.
+    if run_tenant_mysql "$TENANT_DB_NAME" -N -B -e "SELECT 1" >/dev/null 2>&1; then
+        info "Tenant database is reachable with the tenant account: $TENANT_DB_NAME"
         return 0
     fi
 
     if ! mysql_admin_configured; then
-        error "Tenant database '$TENANT_DB_NAME' is not reachable with migration or application DB credentials."
-        error "Configure MIGRATION_DB_USER/MIGRATION_DB_PASSWORD or DB_USER/DB_PASSWORD and retry."
+        error "Tenant database '$TENANT_DB_NAME' is not reachable with the backend DB_USER/DB_PASSWORD."
         error "MYSQL_ADMIN_USER/MYSQL_ADMIN_PASSWORD is required when the database itself is missing."
         exit 1
     fi
@@ -287,45 +244,6 @@ ensure_backend_image_available() {
     esac
 }
 
-image_has_file() {
-    local image="$1" path="$2"
-    docker run --rm --entrypoint sh "$image" -c "test -f $(shell_quote "$path")" >/dev/null 2>&1
-}
-
-image_has_dir() {
-    local image="$1" path="$2"
-    docker run --rm --entrypoint sh "$image" -c "test -d $(shell_quote "$path")" >/dev/null 2>&1
-}
-
-find_image_file() {
-    local image="$1" path
-    shift
-    if $DRY_RUN; then
-        echo "$TENANT_SCHEMA_IMAGE_PATH"
-        return 0
-    fi
-    for path in "$@"; do
-        if image_has_file "$image" "$path"; then
-            if schema_file_is_ignored "$path"; then
-                warn "Ignoring backend schema file: $path"
-                continue
-            fi
-            echo "$path"
-            return 0
-        fi
-    done
-    return 1
-}
-
-schema_file_is_ignored() {
-    local base
-    base="$(basename "$1")"
-    case ",$TENANT_IGNORED_SCHEMA_FILES," in
-        *,"$base",*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 backend_config_value() {
     local key="$1"
     dokku config:get "$BACKEND_APP" "$key" 2>/dev/null | awk 'NF { print; exit }' || true
@@ -344,13 +262,6 @@ tenant_db_setting() {
         return 0
     fi
     printf '%s' "$fallback"
-}
-
-tenant_db_credentials_configured() {
-    local password
-    password="$(tenant_db_setting DB_PASSWORD "")"
-    [ -n "$password" ] || password="$(tenant_db_setting PASSWORD "")"
-    [ -n "$password" ]
 }
 
 tenant_db_host() {
@@ -401,15 +312,13 @@ run_tenant_mysql() {
     shift || true
 
     local user password host port
-    user="$(tenant_db_setting DB_USER "")"
-    [ -n "$user" ] || user="$(tenant_db_setting DBUSER "usr_${TENANT_NAME//-/_}")"
-    password="$(tenant_db_setting DB_PASSWORD "")"
-    [ -n "$password" ] || password="$(tenant_db_setting PASSWORD "")"
+    user="$(tenant_db_user)"
+    password="$(tenant_db_password)"
     host="$(tenant_db_host)"
     port="$(tenant_db_port)"
 
     if [ -z "$password" ]; then
-        error "Tenant DB password is missing from ${BACKEND_APP} config; cannot import schema as tenant user."
+        error "Tenant DB password is missing from ${BACKEND_APP} config; cannot connect as tenant user."
         return 1
     fi
 
@@ -424,368 +333,112 @@ run_tenant_mysql() {
     fi
 }
 
-# Schema changes must use a control-plane or dedicated migration account.
-# Existing tenants may have application users created before DDL privileges
-# were required. Keep the application account as a compatibility fallback
-# when no migration account is configured.
-run_migration_mysql() {
-    if [ -n "${MIGRATION_DB_USER:-}" ] || [ -n "${MIGRATION_DB_PASSWORD:-}" ]; then
-        if [ -z "${MIGRATION_DB_USER:-}" ] || [ -z "${MIGRATION_DB_PASSWORD:-}" ]; then
-            error "MIGRATION_DB_USER and MIGRATION_DB_PASSWORD must be configured together."
-            return 1
-        fi
-        MYSQL_ADMIN_USER="$MIGRATION_DB_USER" \
-            MYSQL_ADMIN_PASSWORD="$MIGRATION_DB_PASSWORD" \
-            run_mysql "$@"
-        return
-    fi
-
-    if mysql_admin_configured; then
-        run_mysql "$@"
-        return
-    fi
-
-    run_tenant_mysql "$@"
+# tenant_db_user / tenant_db_password: the tenant's own database account, the one the
+# app uses. goose runs as this account, which holds the privileges on its database.
+tenant_db_user() {
+    local user
+    user="$(tenant_db_setting DB_USER "")"
+    [ -n "$user" ] || user="$(tenant_db_setting DBUSER "usr_${TENANT_NAME//-/_}")"
+    printf '%s' "$user"
 }
 
-MIGRATION_LEDGER_TABLE="deployment_schema_migrations"
-
-ensure_migration_ledger() {
-    if ! run_migration_mysql "$TENANT_DB_NAME" <<SQL
-CREATE TABLE IF NOT EXISTS \`${MIGRATION_LEDGER_TABLE}\` (
-    migration_id VARCHAR(255) NOT NULL,
-    checksum CHAR(64) NOT NULL,
-    image_ref VARCHAR(512) NOT NULL,
-    status VARCHAR(16) NOT NULL,
-    started_at DATETIME(6) NOT NULL,
-    applied_at DATETIME(6) NULL,
-    error_message TEXT NULL,
-    PRIMARY KEY (migration_id)
-) ENGINE=InnoDB;
-SQL
-    then
-        error "Could not create migration ledger table '${MIGRATION_LEDGER_TABLE}' in ${TENANT_DB_NAME}."
-        error "Configure MIGRATION_DB_USER/MIGRATION_DB_PASSWORD with DDL access to the tenant database."
-        return 1
-    fi
-
-    local exists
-    if ! exists="$(migration_ledger_exists)"; then
-        error "Could not verify migration ledger table '${MIGRATION_LEDGER_TABLE}' in ${TENANT_DB_NAME}."
-        return 1
-    fi
-    if [ "$exists" != "1" ]; then
-        error "Migration ledger table '${MIGRATION_LEDGER_TABLE}' was not created in ${TENANT_DB_NAME}."
-        return 1
-    fi
-    info "Migration ledger ready: ${TENANT_DB_NAME}.${MIGRATION_LEDGER_TABLE}"
+tenant_db_password() {
+    local password
+    password="$(tenant_db_setting DB_PASSWORD "")"
+    [ -n "$password" ] || password="$(tenant_db_setting PASSWORD "")"
+    printf '%s' "$password"
 }
 
-migration_ledger_exists() {
-    run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
-        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='${MIGRATION_LEDGER_TABLE}';" \
-        </dev/null
-}
-
-hash_stream() {
-    if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum | awk '{print $1}'
-    elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 | awk '{print $1}'
-    else
-        error "sha256sum or shasum is required to track migration checksums."
-        return 1
-    fi
-}
-
-migration_checksum() {
-    local image="$1" path="$2"
-    docker run --rm --entrypoint sh "$image" -c "cat $(shell_quote "$path")" | hash_stream
-}
-
-migration_ledger_row() {
-    local migration_id="$1"
-    local migration_id_sql
-    migration_id_sql="$(sql_escape "$migration_id")"
-    run_migration_mysql "$TENANT_DB_NAME" -N -B -e \
-        "SELECT status, checksum FROM \`${MIGRATION_LEDGER_TABLE}\` WHERE migration_id='${migration_id_sql}' LIMIT 1;" \
-        </dev/null
-}
-
-record_migration_started() {
-    local migration_id="$1" checksum="$2" image="$3"
-    local migration_id_sql checksum_sql image_sql
-    migration_id_sql="$(sql_escape "$migration_id")"
-    checksum_sql="$(sql_escape "$checksum")"
-    image_sql="$(sql_escape "$image")"
-    run_migration_mysql "$TENANT_DB_NAME" -e "
-INSERT INTO \`${MIGRATION_LEDGER_TABLE}\`
-    (migration_id, checksum, image_ref, status, started_at, applied_at, error_message)
-VALUES
-    ('${migration_id_sql}', '${checksum_sql}', '${image_sql}', 'running', NOW(6), NULL, NULL)
-ON DUPLICATE KEY UPDATE
-    checksum=VALUES(checksum),
-    image_ref=VALUES(image_ref),
-    status='running',
-    started_at=VALUES(started_at),
-    applied_at=NULL,
-    error_message=NULL;" </dev/null
-}
-
-record_migration_applied() {
-    local migration_id="$1" checksum="$2" image="$3"
-    local migration_id_sql checksum_sql image_sql
-    migration_id_sql="$(sql_escape "$migration_id")"
-    checksum_sql="$(sql_escape "$checksum")"
-    image_sql="$(sql_escape "$image")"
-    run_migration_mysql "$TENANT_DB_NAME" -e "
-UPDATE \`${MIGRATION_LEDGER_TABLE}\`
-SET checksum='${checksum_sql}',
-    image_ref='${image_sql}',
-    status='applied',
-    applied_at=NOW(6),
-    error_message=NULL
-WHERE migration_id='${migration_id_sql}';" </dev/null
-}
-
-record_migration_failed() {
-    local migration_id="$1" checksum="$2" image="$3" exit_code="$4"
-    local migration_id_sql checksum_sql image_sql error_sql
-    migration_id_sql="$(sql_escape "$migration_id")"
-    checksum_sql="$(sql_escape "$checksum")"
-    image_sql="$(sql_escape "$image")"
-    error_sql="$(sql_escape "migration command exited with status ${exit_code}")"
-    run_migration_mysql "$TENANT_DB_NAME" -e "
-UPDATE \`${MIGRATION_LEDGER_TABLE}\`
-SET checksum='${checksum_sql}',
-    image_ref='${image_sql}',
-    status='failed',
-    applied_at=NULL,
-    error_message='${error_sql}'
-WHERE migration_id='${migration_id_sql}';" </dev/null
-}
-
-apply_image_migration() {
-    local image="$1" path="$2"
-    local migration_id checksum row previous_status previous_checksum rc
-    migration_id="$(basename "$path")"
-
-    checksum="$(migration_checksum "$image" "$path")" || {
-        error "Could not checksum migration ${migration_id} from ${image}."
-        return 1
-    }
-
-    row="$(migration_ledger_row "$migration_id")" || {
-        error "Could not read migration ledger for ${migration_id}."
-        return 1
-    }
-    if [ -n "$row" ]; then
-        IFS=$'\t' read -r previous_status previous_checksum <<< "$row"
-        if [ "$previous_checksum" != "$checksum" ]; then
-            error "Migration ${migration_id} changed after it was recorded; refusing to continue."
-            return 1
-        fi
-        if [ "$previous_status" = "applied" ]; then
-            log "Migration already applied: ${migration_id}"
-            return 0
-        fi
-    fi
-
-    record_migration_started "$migration_id" "$checksum" "$image" || {
-        error "Could not record migration start: ${migration_id}."
-        return 1
-    }
-
-    if apply_image_sql_file "$image" "$path" "migration ${migration_id}"; then
-        record_migration_applied "$migration_id" "$checksum" "$image" || {
-            error "Migration applied but could not be recorded: ${migration_id}."
-            return 1
-        }
-        log "Migration applied: ${migration_id}"
-        return 0
-    else
-        rc=$?
-    fi
-
-    if ! record_migration_failed "$migration_id" "$checksum" "$image" "$rc"; then
-        error "Could not record failed migration: ${migration_id}; schema status is unknown."
-        return 1
-    fi
-    error "Migration failed: ${migration_id} (exit ${rc})."
-    return "$rc"
-}
-
-find_image_dir() {
-    local image="$1" path
-    shift
-    if $DRY_RUN; then
-        echo "$TENANT_MIGRATIONS_IMAGE_DIR"
-        return 0
-    fi
-    for path in "$@"; do
-        if image_has_dir "$image" "$path"; then
-            echo "$path"
-            return 0
-        fi
-    done
-    return 1
-}
-
-apply_image_sql_file() {
-    local image="$1" path="$2" label="$3"
-    log "Applying ${label}: ${image}:${path}"
-    if $DRY_RUN; then
-        info "Would stream ${image}:${path} into ${TENANT_DB_NAME}"
-        return 0
-    fi
-    # Import with the tenant DB user so schema setup uses the same scoped
-    # permissions as the app runtime connection.
-    docker run --rm --entrypoint sh "$image" -c "cat $(shell_quote "$path")" \
-    | run_migration_mysql "$TENANT_DB_NAME"
-}
-
-list_image_migrations() {
-    local image="$1" dir="$2"
-    docker run --rm --entrypoint sh "$image" -c "find $(shell_quote "$dir") -maxdepth 1 -type f -name '*.sql' | sort"
-}
-
+# Schema changes are goose migrations from the backend image: /app/migrate up.
+# A failure stops the run before any image is deployed.
 apply_schema() {
     ensure_tenant_database
 
-    local image count required_count schema_path migrations_dir migration migrations_found missing
+    local image
     image="$(resolve_backend_image)"
     ensure_backend_image_available "$image"
 
-    count="$(tenant_table_count)"
-    required_count="$(tenant_required_table_count)"
-    if [ "$required_count" = "4" ]; then
-        info "Tenant DB already has required base schema tables; skipping base schema."
-    else
-        if [ "$count" != "0" ]; then
-            missing="$(tenant_missing_required_tables)"
-            warn "Tenant DB has $count tables but is missing required base schema tables: $missing"
-            warn "Reapplying base schema from backend image."
-        fi
-        schema_path="$(find_image_file "$image" \
-            "$TENANT_SCHEMA_IMAGE_PATH" \
-            /app/pkg/db/schema/schema.sql \
-            /app/schema.sql)" || {
-            error "Backend image does not contain a tenant schema file."
-            error "Expected ${TENANT_SCHEMA_IMAGE_PATH} (or set TENANT_SCHEMA_IMAGE_PATH)."
-            error "Fix the backend Dockerfile to copy schema into the runtime image."
-            exit 1
-        }
-        apply_image_sql_file "$image" "$schema_path" "base schema"
-    fi
-
-    ensure_migration_ledger
-
-    if ! migrations_dir="$(find_image_dir "$image" \
-        "$TENANT_MIGRATIONS_IMAGE_DIR" \
-        /app/pkg/db/migrations \
-        /app/migrations)"; then
-        error "Backend image has no readable migrations directory; refusing to skip migration replay."
-        error "Expected ${TENANT_MIGRATIONS_IMAGE_DIR}, /app/pkg/db/migrations, or /app/migrations."
-        return 1
-    fi
-
+    log "Running goose migrations from ${image}: /app/migrate up"
     if $DRY_RUN; then
-        log "Applying migrations from ${image}:${migrations_dir}"
-        info "Would apply all *.sql files in sorted order"
+        info "Would run /app/migrate up from ${image} against ${TENANT_DB_NAME}"
         return 0
     fi
-
-    local migration_paths
-    if ! migration_paths="$(list_image_migrations "$image" "$migrations_dir")"; then
-        error "Could not list migrations from ${image}:${migrations_dir}."
+    if ! goose_run "$image" up "$(tenant_db_host)" "$(tenant_db_port)" \
+        "$TENANT_DB_NAME" "$(tenant_db_user)" "$(tenant_db_password)"; then
+        error "goose migrations failed for ${TENANT_DB_NAME}; the tenant DB is not ready and no image was deployed."
         return 1
-    fi
-    if [ -n "$migration_paths" ]; then
-        while IFS= read -r migration; do
-            [ -n "$migration" ] || continue
-            apply_image_migration "$image" "$migration"
-        done <<< "$migration_paths"
-    else
-        warn "No *.sql migrations found in ${image}:${migrations_dir}."
     fi
 
     validate_tenant_schema
+    ensure_company_tenant_key
 }
 
+# company.tenant_key is copied from zatca_master.tenant for this tenant. The backend
+# refuses to start without it, so it is written after goose and before the image
+# is deployed. The row is created only when missing (never overwritten), and the key
+# is set by id. The value is never generated here and never printed.
+ensure_company_tenant_key() {
+    local tenant_key tenant_key_sql company_name company_sql matched
+    tenant_key="$(tenant_registry_key "$TENANT_DB_NAME")" || return 1
+    tenant_key_sql="$(sql_escape "$tenant_key")"
+    company_name="$(env_value COMPANY_NAME)"
+    company_name="${company_name:-$TENANT_NAME}"
+    company_sql="$(sql_escape "$company_name")"
+
+    run_tenant_mysql "$TENANT_DB_NAME" <<SQLEOF || return 1
+INSERT INTO company (id, state, name, vat_number, vat_registration_number, commercial_registration_number, name_ar, business_category, tenant_key)
+SELECT 1, 0, '${company_sql}', '300000000000003', '300000000000003', '1010000000', '${company_sql}', 'Supply activities', '${tenant_key_sql}'
+FROM DUAL
+WHERE NOT EXISTS (SELECT 1 FROM company WHERE id = 1);
+UPDATE company SET tenant_key = '${tenant_key_sql}' WHERE id = 1;
+SQLEOF
+
+    matched="$(run_tenant_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT COUNT(*) FROM company WHERE id = 1 AND tenant_key = '${tenant_key_sql}';" \
+        | awk 'NF { print $1; exit }')"
+    if [ "$matched" != "1" ]; then
+        error "company row 1 in ${TENANT_DB_NAME} does not carry the registry tenant_key; the backend will not start."
+        return 1
+    fi
+    info "company.tenant_key set in ${TENANT_DB_NAME} from ${MYSQL_MASTER_DB:-zatca_master}.tenant."
+}
+
+# Read-only goose status for --status. The dashboard parses these lines; a failed
+# status check is schema_status=unknown with an error line.
 show_migration_status() {
-    local image migrations_dir migration_paths migration
-    local ledger_exists status pending_count failed_count row previous_status previous_checksum checksum
+    local image output rc line path state pending=0
     image="$(resolve_backend_image)"
     ensure_backend_image_available "$image"
-
-    migrations_dir="$(find_image_dir "$image" \
-        "$TENANT_MIGRATIONS_IMAGE_DIR" \
-        /app/pkg/db/migrations \
-        /app/migrations)" || {
-        printf 'tenant=%s\nimage=%s\nschema_status=unknown\n' "$TENANT_NAME" "$image"
-        error "Backend image has no migration directory."
-        return 1
-    }
-
     printf 'tenant=%s\nimage=%s\n' "$TENANT_NAME" "$image"
-    if ! ledger_exists="$(migration_ledger_exists)"; then
-        echo "schema_status=ledger_unreachable"
-        error "Could not query migration ledger with the configured migration account."
-        return 1
-    fi
-    if [ "$ledger_exists" != "1" ]; then
-        echo "schema_status=ledger_missing"
-        echo "pending_migrations=unknown"
-        error "Migration ledger table '${MIGRATION_LEDGER_TABLE}' is missing from ${TENANT_DB_NAME}."
-        return 1
-    fi
 
-    if ! migration_paths="$(list_image_migrations "$image" "$migrations_dir")"; then
+    set +e
+    output="$(goose_run "$image" status "$(tenant_db_host)" "$(tenant_db_port)" \
+        "$TENANT_DB_NAME" "$(tenant_db_user)" "$(tenant_db_password)" 2>&1)"
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
         echo "schema_status=unknown"
-        error "Could not list migrations from ${image}:${migrations_dir}."
+        error "goose status failed for ${TENANT_DB_NAME} (exit ${rc})."
         return 1
     fi
 
-    status="up_to_date"
-    pending_count=0
-    failed_count=0
-    while IFS= read -r migration; do
-        [ -n "$migration" ] || continue
-        local migration_id
-        migration_id="$(basename "$migration")"
-        checksum="$(migration_checksum "$image" "$migration")" || {
-            echo "schema_status=unknown"
-            error "Could not checksum migration ${migration_id}."
-            return 1
-        }
-        row="$(migration_ledger_row "$migration_id")" || {
-            echo "schema_status=unknown"
-            error "Could not read migration ledger for ${migration_id}."
-            return 1
-        }
-        if [ -z "$row" ]; then
-            echo "pending_migration=${migration_id}"
-            status="pending"
-            pending_count=$((pending_count + 1))
-            continue
-        fi
+    while IFS= read -r line; do
+        read -r path state <<< "$line" || true
+        [ -n "$path" ] || continue
+        case "$state" in
+            applied) echo "applied_migration=$(basename "$path")" ;;
+            pending)
+                echo "pending_migration=$(basename "$path")"
+                pending=$((pending + 1))
+                ;;
+        esac
+    done <<< "$output"
 
-        IFS=$'\t' read -r previous_status previous_checksum <<< "$row"
-        if [ "$previous_status" = "applied" ] && [ "$previous_checksum" = "$checksum" ]; then
-            echo "applied_migration=${migration_id}"
-            continue
-        fi
-
-        echo "failed_migration=${migration_id} status=${previous_status}"
-        status="failed"
-        failed_count=$((failed_count + 1))
-    done <<< "$migration_paths"
-
-    if [ "$pending_count" -gt 0 ] && [ "$failed_count" -eq 0 ]; then
-        status="pending"
+    if [ "$pending" -gt 0 ]; then
+        echo "schema_status=pending"
+        return 1
     fi
-    echo "schema_status=${status}"
-    [ "$status" = "up_to_date" ]
+    echo "schema_status=up_to_date"
 }
 
 seed_company_defaults() {
@@ -801,10 +454,14 @@ seed_company_defaults() {
         return 0
     fi
 
+    local tenant_key tenant_key_sql
+    tenant_key="$(tenant_registry_key "$TENANT_DB_NAME")" || return 1
+    tenant_key_sql="$(sql_escape "$tenant_key")"
+
     run_tenant_mysql "$TENANT_DB_NAME" <<SQLEOF
-INSERT INTO company (id, state, name, vat_number, vat_registration_number, commercial_registration_number, name_ar, business_category)
-VALUES (1, 0, '${company_sql}', '300000000000003', '300000000000003', '1010000000', '${company_sql}', 'Supply activities')
-ON DUPLICATE KEY UPDATE name=VALUES(name), name_ar=VALUES(name_ar);
+INSERT INTO company (id, state, name, vat_number, vat_registration_number, commercial_registration_number, name_ar, business_category, tenant_key)
+VALUES (1, 0, '${company_sql}', '300000000000003', '300000000000003', '1010000000', '${company_sql}', 'Supply activities', '${tenant_key_sql}')
+ON DUPLICATE KEY UPDATE name=VALUES(name), name_ar=VALUES(name_ar), tenant_key=VALUES(tenant_key);
 
 INSERT INTO branches (id, name, company_id, is_active)
 VALUES (1, 'Main', 1, 1)

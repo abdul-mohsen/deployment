@@ -62,9 +62,6 @@ runtime besides the docker socket.
 | `MYSQL_PORT`          | no       | `3306`        |
 | `MYSQL_ADMIN_USER`     | no       | `dokku_admin`  |
 | `MYSQL_ADMIN_PASSWORD` | no       | —             |
-| `MIGRATION_DB_USER`     | no       | falls back to `MYSQL_ADMIN_USER` |
-| `MIGRATION_DB_PASSWORD` | no       | falls back to `MYSQL_ADMIN_PASSWORD` |
-| `BACKUP_BEFORE_MIGRATION` | no    | `1`            |
 | `MIGRATION_STATUS_INTERVAL` | no | `5m`           |
 
 `MYSQL_ADMIN_USER` and `MYSQL_ADMIN_PASSWORD` identify the least-privileged
@@ -72,14 +69,9 @@ deployment account used for direct MySQL operations. They do not need to be
 the MySQL root credentials. `MYSQL_ROOT_USER` and `MYSQL_ROOT_PASSWORD` remain
 accepted as legacy fallbacks for existing installations.
 
-`MIGRATION_DB_USER` and `MIGRATION_DB_PASSWORD` are optional dedicated schema
-credentials. They must have DDL access scoped to tenant databases. If omitted,
-schema replay uses the deployment account, then the tenant application account
-for legacy compatibility. The migration ledger is verified immediately after
-creation; missing tables or insufficient privileges are reported explicitly.
-
-Backend image migrations run before backend image swaps and require a verified
-backup by default. The tenant page reports the migration ledger status and
+Backend image migrations are goose only (`/app/migrate up` from the image), run
+before backend image swaps, and are preceded by a verified backup. A failed
+migration stops the deploy. The tenant page reports goose status (read-only) and
 supports an immediate per-tenant check. Set `MIGRATION_STATUS_INTERVAL` to
 control the background check interval; values below 30 seconds use the default.
 An image without a readable migrations directory is rejected instead of being

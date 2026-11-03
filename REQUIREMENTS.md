@@ -71,27 +71,24 @@ Copy from [config.env.example](config.env.example) and fill:
 - `MYSQL_HOST=host.docker.internal`, `MYSQL_PORT=3306`,
   `MYSQL_ADMIN_USER`, `MYSQL_ADMIN_PASSWORD` — the least-privileged
   deployment account; it does not need to be the MySQL root account.
-- Optional `MIGRATION_DB_USER`, `MIGRATION_DB_PASSWORD` — dedicated account
-  with DDL access scoped to tenant databases. Backend schema and migration
-  replay prefer this account, then the deployment account, then the legacy
-  tenant application account.
-- `MYSQL_MASTER_DB=zatca_master` — registry table `tenant(name, db_name, enabled)`
+- `MYSQL_MASTER_DB=zatca_master` — registry table `tenant(name, db_name, enabled, tenant_key)`,
+  owned by ZATCA's zatca_master migrations (zatca_integration README section 1a). This repo
+  writes rows there and never creates or alters its tables. Apply ZATCA's migrations first:
+  `create-tenant.sh` refuses to run until `tenant.tenant_key` and the trigger
+  `tenant_key_default` exist.
+- `DEPLOY_STATE_DB=deployment_state` (optional) — the deployment-owned database for per-tenant
+  image pins (`tenant_image`), verified identity (`tenant_identity`) and the deploy audit log
+  (`tenant_deployment_audit`). `setup.sh` creates it.
 - `MYSQL_TENANT_HOST=172.%` — docker bridge subnet; **must match** the host
   pattern used in [scripts/remove-tenant.sh](scripts/remove-tenant.sh)
 - `DOCKERHUB_USERNAME`, optional `BACKEND_IMAGE` / `FRONTEND_IMAGE`,
   `PULL_TAG=dev` (the shared backend/frontend branch tag)
-- `BACKUP_BEFORE_MIGRATION=1` — require a verified tenant backup before
-  applying backend-image migrations.
-- `MIGRATION_STATUS_INTERVAL=5m` — dashboard interval for checking every
-  tenant's migration ledger; checks also run at dashboard startup.
+- `MIGRATION_STATUS_INTERVAL=5m` — dashboard interval for the read-only goose status check
+  (`init-tenant-db.sh --status`); checks also run at dashboard startup.
 - Production dashboard updates require the deployment checkout on `main` to
   match the published dashboard image commit. `update.sh` fast-forwards the
   checkout, and `dashboard/prod-up.sh` refuses a revision mismatch before
   replacing the running dashboard.
-- `MIGRATE_CMD` — optional legacy custom migration command. Normal tenant
-  schema migrations are applied from the selected backend image by
-  `scripts/init-tenant-db.sh`; images without a readable migrations directory
-  are rejected so migration replay cannot be silently skipped.
 - Optional: `PUBLIC_PROTOCOL=https|http` (controls the canonical public link
   scheme and the frontend `API_URL`; production must use `https`),
   `NGINX_CLIENT_MAX_BODY_SIZE=50m`
@@ -104,14 +101,33 @@ Copy from [config.env.example](config.env.example) and fill:
 
 ## 4. One-time MySQL admin grants
 
-Required for the deployment-side admin user to create per-tenant DBs/users.
-The account is intentionally not required to be MySQL root:
+Required for the deployment-side admin user (`MYSQL_ADMIN_USER`) to create per-tenant
+DBs and users. The account is intentionally not MySQL root, and it has no `ALL PRIVILEGES`
+on `zatca_master`:
 
 ```sql
 GRANT ALL PRIVILEGES ON `tenant_%`.* TO 'dokku_admin'@'172.%' WITH GRANT OPTION;
-GRANT ALL PRIVILEGES ON `zatca_master`.* TO 'dokku_admin'@'172.%';
+GRANT SELECT, INSERT, UPDATE, DELETE, TRIGGER ON `zatca_master`.`tenant` TO 'dokku_admin'@'172.%';
+GRANT CREATE, SELECT, INSERT, UPDATE, DELETE ON `deployment_state`.* TO 'dokku_admin'@'172.%';
 GRANT CREATE USER ON *.* TO 'dokku_admin'@'172.%';
 ```
+
+What each privilege is for. The statements were checked in `scripts/`; the defaults are
+`MYSQL_MASTER_DB=zatca_master` and `DEPLOY_STATE_DB=deployment_state`.
+
+| Object | Privileges | Statements |
+|---|---|---|
+| `zatca_master.tenant` | SELECT | reads of `tenant_key` (`lib.sh`, `tenant_registry_key`); joins on `tenant` (`deploy-all.sh`, `status.sh`, `set-tenant-image.sh`); column check (`lib.sh`, `require_registry_tenant_key`) |
+| `zatca_master.tenant` | INSERT, UPDATE | `INSERT INTO tenant ... ON DUPLICATE KEY UPDATE enabled=1` (`create-tenant.sh`); `UPDATE tenant SET enabled=0` (`cleanup-broken-tenant.sh`) |
+| `zatca_master.tenant` | DELETE | `DELETE FROM tenant` (`remove-tenant.sh`, `cleanup-broken-tenant.sh`) |
+| `zatca_master.tenant` | TRIGGER | the trigger check (`lib.sh`, `require_registry_tenant_key`) reads `information_schema.triggers`. MySQL shows a table's triggers only to accounts with the TRIGGER privilege on that table |
+| `deployment_state.*` | CREATE | `CREATE DATABASE` and `CREATE TABLE IF NOT EXISTS` (`lib.sh`, `ensure_deployment_state_schema`), run by `setup.sh`, `create-tenant.sh`, `deploy-all.sh` and `update-tenant.sh` |
+| `deployment_state.*` | SELECT, INSERT, UPDATE, DELETE | `tenant_image` and `tenant_identity` reads and writes (`set-tenant-image.sh`, `status.sh`, `deploy-all.sh`, `tenant-provenance.sh`, `remove-tenant.sh`, `cleanup-broken-tenant.sh`); `tenant_deployment_audit` inserts (`tenant-provenance.sh`) |
+| `tenant_%`.* | ALL PRIVILEGES, WITH GRANT OPTION | unchanged. Creates and drops tenant DBs and grants their users. The dashboard's accounting export and password update connect as this account to tenant DBs (`dashboard/internal/web/backup.go`, `web.go`). `goose` connects as the tenant user, not as this account |
+| `*.*` | CREATE USER | unchanged. `CREATE USER` and `ALTER USER` for tenant users |
+
+`scripts/tests/test-no-git-push-and-master-grants.sh` fails if a doc or an example grants
+`ALL PRIVILEGES` on `zatca_master`.
 
 Rules learned the hard way:
 - Use **backticks** for `tenant_%`, never single quotes.
@@ -127,6 +143,9 @@ Rules learned the hard way:
 - Existing-tenant schema replay uses the tenant's `DB_USER`/`DB_PASSWORD`
   account and does not require `MYSQL_ADMIN_PASSWORD`; the deployment account
   is needed only when a tenant database or user must be provisioned.
+- Schema changes are forward-only. A backend rollback across a schema change needs a
+  restore first, and `rollback-tenant.sh` requires `--confirm-schema-compatible` for a
+  backend rollback.
 - Tenant image updates resolve tags to OCI digests, require the canonical
   BuildIdentity labels, pass `APP_IMAGE_VERSION`/`APP_IMAGE_COMMIT`,
   `APP_IMAGE_CHANNEL`, `APP_IMAGE_REF`, `APP_IMAGE_DIGEST`,
@@ -181,9 +200,8 @@ Before any Dokku command runs, the scripts reject reserved deployment keys:
   `TENANT_PROVENANCE_*`, `TENANT_STATE_DIR`, `TENANT_VERIFY_*`, and
   `WEBHOOK_SECRET`.
 - **Database administration:** `MYSQL_*`, `MYSQL_PWD`, and `DB_ADMIN_*`.
-- **Migration controls:** `MIGRATE_CMD`, `MIGRATION_*`,
-  `TENANT_SCHEMA_*`, `TENANT_MIGRATIONS_*`,
-  `TENANT_IGNORED_SCHEMA_FILES`, and `BACKUP_BEFORE_MIGRATION`.
+- **Migration controls:** `MIGRATION_*` is reserved for deployment (goose runs from the
+  backend image; tenants cannot set migration controls).
 - **Docker execution:** `DOCKER_*` and `DOKKU_*`.
 - **Telemetry and telemetry secrets:** `OPENOBSERVE_*`, `OTEL_*`, and
   `METRICS_TOKEN`.
@@ -243,6 +261,7 @@ Modern duplicates (`DATABASE_URL`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`,
 - Multiple `NGINX_MODE` values — single mode only.
 - "Standalone" Dokku where Dokku owns :443 — operator nginx is mandatory.
 - Deploying or managing the on-host ZATCA submitter — it lives outside this repo.
+- Git-push deploys to Dokku. Tenant apps are deployed by the scripts only, from Docker Hub images, and no SSH key for git push may be registered with Dokku.
 
 ---
 

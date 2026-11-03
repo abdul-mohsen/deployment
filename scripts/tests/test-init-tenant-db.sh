@@ -81,12 +81,12 @@ fi
 
 echo ""
 echo "=== existing-tenant schema replay does not require admin credentials ==="
-if grep -qF 'run_migration_mysql' scripts/init-tenant-db.sh &&
-    grep -qF 'MIGRATION_DB_USER and MIGRATION_DB_PASSWORD must be configured together.' scripts/init-tenant-db.sh &&
-    grep -qF 'run_tenant_mysql "$@"' scripts/init-tenant-db.sh; then
-    pass "existing-tenant replay supports dedicated, deployment, and legacy tenant credentials"
+if grep -qF 'goose_run "$image" up' scripts/init-tenant-db.sh &&
+    grep -qF '"$(tenant_db_user)" "$(tenant_db_password)"' scripts/init-tenant-db.sh &&
+    ! grep -qF 'run_migration_mysql' scripts/init-tenant-db.sh; then
+    pass "schema replay is goose (/app/migrate up) as the tenant account"
 else
-    fail "existing-tenant replay credential precedence is missing"
+    fail "schema replay must be goose (/app/migrate up) as the tenant account"
 fi
 
 if echo "$output" | grep -qF "Would POST /api/register "; then
@@ -107,6 +107,21 @@ if grep -q '\[dev-diag\] register attempt=' scripts/init-tenant-db.sh; then
     pass "register retry loop logs attempts in dev mode"
 else
     fail "register retry loop does not log attempts when DASHBOARD_ENV=dev"
+fi
+
+echo ""
+echo "=== dry-run --schema-only plans goose from the backend image ==="
+output=$(bash scripts/init-tenant-db.sh acme --schema-only --dry-run \
+    --config "$tmpcfg" \
+    --backend-image example/api:v1 2>&1 || true)
+
+if echo "$output" | grep -qF "/app/migrate up from example/api:v1"; then
+    pass "dry-run schema prints the goose command"
+else
+    echo "--- output ---"
+    echo "$output"
+    echo "--- end ---"
+    fail "dry-run schema did not plan goose migrations"
 fi
 
 echo ""

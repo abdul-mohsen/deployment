@@ -17,10 +17,6 @@
 #                              versions (org.opencontainers.image.version)
 #                              disagree. Use only when knowingly running a
 #                              mismatched pair (e.g. targeted rollback).
-#   --skip-migrations          Skip the idempotent schema/migration replay
-#                              that normally follows a --backend-image update.
-#                              Only use this for rollbacks to older backend
-#                              images (schema can only move forward).
 #   --routing-only             Reconcile persisted domain/URL state and exit.
 #   --config <path>            Path to config.env file (default: ../config.env)
 #
@@ -31,18 +27,11 @@
 #   use post-merge-cleanup.sh for a fleet-wide repair without an update.
 #
 # Migration behavior:
-#   When --backend-image is provided, this script re-applies every
-#   pkg/db/migrations/*.sql file bundled inside the new backend image to the
-#   tenant's DB. The migrations are already idempotent (each ALTER is guarded
-#   by information_schema lookups), and applying them BEFORE the container is
-#   swapped means the new binary never boots against a schema it cannot INSERT
-#   into. This closes the class of failure where a tenant DB was frozen at an
-#   older schema (init-tenant-db.sh only ran at provisioning time) while the
-#   backend image advanced through new migrations — the failure mode was a
-#   silent HTTP 400 with an empty body from ``purchase_bill.go`` line 173
-#   after the ``INSERT INTO purchase_bill_product`` failed with
-#   ``Error 1054 Unknown column 'cost_price'``.
-# Image updates are provenance-verified and transactional as far as Dokku can
+#   When --backend-image is provided, this script runs goose (/app/migrate up from
+#   the new backend image) against the tenant's DB before the container is swapped.
+#   goose is the only migration path. A failed migration stops the update, so the
+#   new binary never boots against a schema it cannot use.
+#   A verified pre-migration backup is taken first.
 # make them: backend migrations run before the image swap, every app reports
 # the expected /version identity, and a failed component restores the prior
 # image/config where a prior image exists.
@@ -84,7 +73,6 @@ FRONTEND_IMAGE=""
 RESTART=false
 SCALE=""
 SKIP_DRIFT_CHECK=false
-SKIP_MIGRATIONS=false
 ROUTING_ONLY=false
 MIGRATIONS_APPLIED=false
 DB_BACKUP_ID=""
@@ -385,7 +373,6 @@ while [[ $# -gt 0 ]]; do
         --restart)           RESTART=true; shift ;;
         --scale)             SCALE="$2"; shift 2 ;;
         --skip-drift-check)  SKIP_DRIFT_CHECK=true; shift ;;
-        --skip-migrations)   SKIP_MIGRATIONS=true; shift ;;
         --routing-only)      ROUTING_ONLY=true; shift ;;
         --config)            shift 2 ;;  # already parsed above
         -*)                  error "Unknown option: $1"; exit 1 ;;
@@ -426,8 +413,8 @@ fi
 # ---- Set env vars ----
 
 if [ -n "$BACKEND_IMAGE" ] || [ -n "$FRONTEND_IMAGE" ]; then
-    if ! ensure_tenant_provenance_schema; then
-        error "Tenant provenance schema is unavailable; refusing an untracked deployment."
+    if ! ensure_deployment_state_schema; then
+        error "Deployment state schema is unavailable; refusing an untracked deployment."
         exit 1
     fi
 fi
@@ -472,41 +459,29 @@ for component in backend frontend; do
 done
 
 if [ -n "$BACKEND_IMAGE" ]; then
-    if $SKIP_MIGRATIONS && ! provenance_override_enabled; then
-        error "--skip-migrations is only allowed with TENANT_PROVENANCE_OVERRIDE=1 in a non-production environment."
-        record_failure backend "$BACKEND_IMAGE" "unsafe migration bypass refused"
+    log "Creating verified pre-migration database backup for ${TENANT_NAME}"
+    if ! DB_BACKUP_INFO="$(create_verified_tenant_db_backup "$TENANT_NAME" "$CONFIG_FILE")"; then
+        error "Verified tenant DB backup could not be created; refusing migrations and image swap."
+        record_failure backend "$BACKEND_IMAGE" "verified pre-migration database backup unavailable"
         exit 1
     fi
-    if ! $SKIP_MIGRATIONS; then
-        log "Creating verified pre-migration database backup for ${TENANT_NAME}"
-        if ! DB_BACKUP_INFO="$(create_verified_tenant_db_backup "$TENANT_NAME" "$CONFIG_FILE")"; then
-            error "Verified tenant DB backup could not be created; refusing migrations and image swap."
-            record_failure backend "$BACKEND_IMAGE" "verified pre-migration database backup unavailable"
-            exit 1
-        fi
-        IFS=$'\t' read -r DB_BACKUP_ID DB_BACKUP_ARTIFACT _ <<< "$DB_BACKUP_INFO"
-        if [ -z "$DB_BACKUP_ID" ] || [ -z "$DB_BACKUP_ARTIFACT" ]; then
-            error "Pre-migration backup identity is incomplete; refusing migrations and image swap."
-            record_failure backend "$BACKEND_IMAGE" "pre-migration backup identity incomplete"
-            exit 1
-        fi
-        log "Verified DB backup: ${DB_BACKUP_ID}"
-        log "Replaying schema/migrations from ${BACKEND_IMAGE} before backend swap"
-        if ! "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
-            --schema-only --backend-image "$BACKEND_IMAGE" --config "$CONFIG_FILE"; then
-            error "Migration replay failed; refusing to swap the backend image."
-            error "Restore verified backup ${DB_BACKUP_ID} (${DB_BACKUP_ARTIFACT}) before retrying."
-            record_failure backend "$BACKEND_IMAGE" \
-                "migration replay failed; restore pre-migration backup before retry"
-            exit 1
-        fi
-        MIGRATIONS_APPLIED=true
-    else
-        warn "Skipping backend migrations under explicit non-production override."
-        tenant_record_audit "$TENANT_NAME" backend "$BACKEND_IMAGE" "" "" \
-            "" "" "" "" "" "" "" "" "override" \
-            "--skip-migrations under non-production override" "" "" 2>/dev/null || true
+    IFS=$'\t' read -r DB_BACKUP_ID DB_BACKUP_ARTIFACT _ <<< "$DB_BACKUP_INFO"
+    if [ -z "$DB_BACKUP_ID" ] || [ -z "$DB_BACKUP_ARTIFACT" ]; then
+        error "Pre-migration backup identity is incomplete; refusing migrations and image swap."
+        record_failure backend "$BACKEND_IMAGE" "pre-migration backup identity incomplete"
+        exit 1
     fi
+    log "Verified DB backup: ${DB_BACKUP_ID}"
+    log "Replaying schema/migrations from ${BACKEND_IMAGE} before backend swap"
+    if ! "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
+        --schema-only --backend-image "$BACKEND_IMAGE" --config "$CONFIG_FILE"; then
+        error "Migration replay failed; refusing to swap the backend image."
+        error "Restore verified backup ${DB_BACKUP_ID} (${DB_BACKUP_ARTIFACT}) before retrying."
+        record_failure backend "$BACKEND_IMAGE" \
+            "migration replay failed; restore pre-migration backup before retry"
+        exit 1
+    fi
+    MIGRATIONS_APPLIED=true
 fi
 
 if [ -n "$BACKEND_IMAGE" ]; then

@@ -583,15 +583,15 @@ func Catalog() []Script {
 				{Name: "update", Label: "Update existing tenant", Flag: "--update", Type: "checkbox", Boolean: true,
 					Help: "Check this if the tenant already exists and you want to re-deploy or re-seed it. Safe to use after a partial failure."},
 				{Name: "no_database", Label: "Skip database", Flag: "--no-database", Type: "checkbox", Boolean: true,
-					Help: "Only use this if the backend can boot without a DB, or if you provide DATABASE_URL/DB_* in Env vars."},
+					Help: "Skips MySQL provisioning. A tenant created from images needs it (goose migrations and tenant_key), so create-tenant refuses this option."},
 				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
 				{Name: "envs", Label: "Env vars", Flag: "--env", Type: "kv",
-					Help: "One KEY=VALUE per line; each becomes a separate --env flag. Tenant application keys remain supported, including DATABASE_URL and DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD. Deployment-reserved control-plane, MYSQL_*, MIGRATION_*, Docker, and telemetry keys are rejected."},
+					Help: "One KEY=VALUE per line; each becomes a separate --env flag. Tenant application keys remain supported. DATABASE_URL and DB_* are set by MySQL provisioning. Deployment-reserved control-plane, MYSQL_*, MIGRATION_*, Docker, and telemetry keys are rejected."},
 			},
 		},
 		{
 			Name: "init-tenant-db.sh", Title: "Initialize tenant DB",
-			Summary: "Apply schema/migrations from the backend image and seed tenant users.",
+			Summary: "Run goose migrations from the backend image and seed tenant users.",
 			Danger:  true,
 			Fields: []Field{
 				{Name: "_pos_name", Label: "Tenant name", Type: "text", Required: true, Placeholder: "acme"},
@@ -599,7 +599,7 @@ func Catalog() []Script {
 				componentImageVersionField("backend_image_version", "Backend image channel/tag"),
 				{Name: "backend_image", Flag: "--backend-image", Type: "hidden"},
 				{Name: "status", Label: "Status only", Flag: "--status", Type: "checkbox", Boolean: true,
-					Help: "Read-only check of the migration ledger for the selected tenant."},
+					Help: "Read-only goose migration status for the selected tenant."},
 				{Name: "admin_user", Label: "Admin username", Flag: "--env", Type: "text", Placeholder: "admin",
 					Default: "admin", Suggest: []string{"admin"}},
 				{Name: "admin_password", Label: "Admin password", Flag: "--env", Type: "password", Secret: true,
@@ -616,7 +616,7 @@ func Catalog() []Script {
 		},
 		{
 			Name: "migration-status.sh", Title: "Migration status",
-			Summary: "Detect pending or failed backend migrations for one or every tenant.",
+			Summary: "Detect pending backend migrations (goose status) for one or every tenant.",
 			Fields: []Field{
 				{Name: "tenant", Label: "Tenant filter", Flag: "--tenant", Type: "text", Placeholder: "(all)"},
 				{Name: "json", Label: "JSON output", Flag: "--json", Type: "checkbox", Boolean: true},
@@ -671,6 +671,8 @@ func Catalog() []Script {
 				imageVersionFieldForScope(false, "role"),
 				{Name: "to", Flag: "--to", Type: "hidden"},
 				{Name: "list", Label: "List recent deploys", Flag: "--list", Type: "checkbox", Boolean: true},
+				{Name: "confirm_schema_compatible", Label: "Confirm no schema change needs a restore first", Flag: "--confirm-schema-compatible", Type: "checkbox", Boolean: true,
+					Help: "Required for a backend rollback. Schema changes are forward-only: if one needs a restore, restore the backup first, then check this."},
 			},
 		},
 		{

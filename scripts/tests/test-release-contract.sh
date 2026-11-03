@@ -13,6 +13,13 @@ contains() {
     pass "$description"
 }
 
+not_contains() {
+    local file="$1" text="$2" description="$3" status=0
+    grep -Fq -- "$text" "$file" || status=$?
+    [ "$status" -eq 1 ] || fail "$description"
+    pass "$description"
+}
+
 not_contains_any() {
     local description="$1"
     shift
@@ -42,6 +49,15 @@ contains templates/backend/Dockerfile 'http://localhost:3000/healthz' \
     "backend container healthcheck uses /healthz"
 not_contains_any "legacy /api/health probes are absent" \
     scripts/*.sh templates dashboard REQUIREMENTS.md
+
+echo
+echo "=== Backend build targets ==="
+not_contains templates/backend/Dockerfile './cmd/server' \
+    "backend Dockerfile builds no cmd/server package"
+contains templates/backend/Dockerfile '-o /app/server .' \
+    "backend Dockerfile builds the server from the root package"
+contains templates/backend/Dockerfile './cmd/migrate' \
+    "backend Dockerfile builds the goose runner from cmd/migrate"
 
 echo
 echo "=== BuildIdentity environment and label schema ==="
@@ -140,12 +156,10 @@ contains .github/workflows/dashboard-image.yml "'scripts/**'" \
     "dashboard image rebuilds when deployment scripts change"
 contains scripts/backup-tenant.sh '--no-tablespaces' \
     "database backups avoid requiring PROCESS for tablespaces"
-contains scripts/init-tenant-db.sh 'Migration ledger table' \
-    "migration ledger bootstrap verifies its postcondition"
-contains scripts/init-tenant-db.sh 'MIGRATION_DB_USER' \
-    "migration replay supports dedicated DDL credentials"
-contains scripts/init-tenant-db.sh 'refusing to skip migration replay' \
-    "migration replay fails closed when the image has no readable migration directory"
+contains scripts/init-tenant-db.sh 'goose migrations failed' \
+    "goose failure stops the tenant DB build before any image is deployed"
+contains scripts/init-tenant-db.sh 'company row 1' \
+    "tenant_key is written to company row 1 after goose"
 
 contains scripts/tenant-provenance.sh 'BUILD_WORKFLOW_RUN_ID' \
     "tenant provenance reads workflow run identity"

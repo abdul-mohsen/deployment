@@ -51,6 +51,56 @@ got="$(dokku_host_port)"
 [ "$got" = "8080" ] && pass "falls back to 8080 when nothing else is set" || fail "expected 8080 got '$got'"
 
 echo ""
+echo "=== goose_run passes only the names cmd/migrate reads ==="
+docker() { printf '%s\n' "$@" > "$tmpdir/goose-args"; }
+goose_run example/api:v1 up host.docker.internal 3306 tenant_acme usr_acme pw123
+goose_args="$(cat "$tmpdir/goose-args")"
+for want in "HOST=host.docker.internal:3306" "DBNAME=tenant_acme" "DBUSER=usr_acme" "PASSWORD=pw123" "/app/migrate" "up"; do
+    if printf '%s\n' "$goose_args" | grep -qxF -- "$want"; then
+        pass "goose gets $want"
+    else
+        fail "goose must pass $want"
+    fi
+done
+if printf '%s\n' "$goose_args" | grep -q '^DATABASE_URL=\|^DB_'; then
+    fail "goose must not pass DATABASE_URL or DB_* settings"
+else
+    pass "goose passes no DATABASE_URL or DB_* settings"
+fi
+unset -f docker
+
+echo ""
+echo "=== require_registry_tenant_key refuses an unmigrated zatca_master ==="
+MYSQL_MASTER_DB=zatca_master
+run_mysql() {
+    case "$*" in
+        *"information_schema.columns"*) echo "${STUB_COLUMNS:-1}" ;;
+        *"information_schema.triggers"*) echo "${STUB_TRIGGERS:-1}" ;;
+    esac
+}
+if STUB_COLUMNS=1 STUB_TRIGGERS=1 require_registry_tenant_key 2>/dev/null; then
+    pass "migrated registry (tenant_key + tenant_key_default) is accepted"
+else
+    fail "migrated registry must be accepted"
+fi
+if STUB_COLUMNS=0 STUB_TRIGGERS=1 require_registry_tenant_key 2>/dev/null; then
+    fail "registry without tenant_key must be refused"
+else
+    pass "registry without tenant_key is refused"
+fi
+if STUB_COLUMNS=1 STUB_TRIGGERS=0 require_registry_tenant_key 2>/dev/null; then
+    fail "registry without tenant_key_default must be refused"
+else
+    pass "registry without tenant_key_default is refused"
+fi
+refusal="$(STUB_COLUMNS=0 require_registry_tenant_key 2>&1 || true)"
+if printf '%s' "$refusal" | grep -q "Apply ZATCA's zatca_master migrations first"; then
+    pass "refusal tells the operator to apply ZATCA's zatca_master migrations first"
+else
+    fail "refusal must name ZATCA's zatca_master migrations"
+fi
+unset -f run_mysql
+
 echo "=== MySQL admin credential resolution ==="
 unset MYSQL_ADMIN_USER MYSQL_ADMIN_PASSWORD MYSQL_ROOT_USER MYSQL_ROOT_PASSWORD
 [ "$(mysql_admin_user)" = "dokku_admin" ] \

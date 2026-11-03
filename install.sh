@@ -91,9 +91,6 @@ fi
 : "${WEBHOOK_SECRET:=}"
 : "${STORAGE_ROOT:=/opt/tenant-data}"
 : "${BACKUP_DIR:=/opt/tenant-backups}"
-# Tenant schema migrations are applied from the selected backend image by
-# scripts/init-tenant-db.sh. Keep this legacy custom hook opt-in.
-: "${MIGRATE_CMD:=}"
 
 DEV_ONLY=true
 SKIP_DEV_TENANT=false
@@ -178,10 +175,6 @@ APP_IMAGE_frontend=${APP_IMAGE_frontend}
 
 DEV_TENANT=${DEV_TENANT}
 DEV_TAG=${DEV_TAG}
-
-# Single-quoted: \$DATABASE_URL must stay literal here. It's expanded inside
-# the backend container by Dokku at run time, not when config.env is sourced.
-MIGRATE_CMD='${MIGRATE_CMD}'
 
 WEBHOOK_SECRET=${WEBHOOK_SECRET}
 EOF

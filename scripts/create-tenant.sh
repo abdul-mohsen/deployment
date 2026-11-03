@@ -16,20 +16,18 @@
 #   ./scripts/create-tenant.sh <tenant-name> [options]
 #
 # Options:
-#   --backend-image <image>   Docker image for backend (or deploy via git later)
-#   --frontend-image <image>  Docker image for frontend (or deploy via git later)
+#   --backend-image <image>   Docker Hub image for the backend (required)
+#   --frontend-image <image>  Docker Hub image for the frontend (required)
 #   --backend-port <port>     Port the backend listens on (default: 3000)
 #   --frontend-port <port>    Port the frontend listens on (default: 80)
 #   --no-database             Skip database creation
 #   --env KEY=VALUE           Set application env var (repeatable; reserved
 #                             deployment keys are rejected; see REQUIREMENTS.md)
-#   --git-only                Create apps without deploying (deploy via git push)
 #   --dry-run                 Show plan without executing
-#   --migrate <cmd>           Run migration after initial deploy (e.g. "npm run migrate")
 #   --config <path>           Path to config.env file (default: ../config.env)
 #
 # Examples:
-#   ./scripts/create-tenant.sh acme --git-only
+#   ./scripts/create-tenant.sh acme --backend-image myregistry/ifritah-api:v1 --frontend-image myregistry/ifritah-web:v1
 #   ./scripts/create-tenant.sh acme --backend-image myregistry/ifritah-api:v1
 #   ./scripts/create-tenant.sh acme --backend-image myregistry/ifritah-api:v1 --env SECRET_KEY=abc123
 #   ./scripts/create-tenant.sh acme --config /opt/deployment/config.dev.env
@@ -91,27 +89,14 @@ FRONTEND_IMAGE=""
 BACKEND_PORT="8090"
 FRONTEND_PORT="8000"
 NO_DATABASE=false
-GIT_ONLY=false
 DRY_RUN=false
 FORCE_UPDATE=false
-MIGRATE_CMD=""
 DB_BACKUP_ID=""
 DB_BACKUP_ARTIFACT=""
 VERIFY_RETRIES="${TENANT_VERIFY_RETRIES:-15}"
 VERIFY_DELAY="${TENANT_VERIFY_DELAY:-2}"
 declare -A COMPONENT_IDENTITY=()
 declare -a ENV_VARS=()
-
-has_env_var() {
-    local key="$1"
-    local ev
-    for ev in "${ENV_VARS[@]+${ENV_VARS[@]}}"; do
-        if [[ "$ev" == "$key="* ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
 
 env_value() {
     local key="$1"
@@ -273,10 +258,8 @@ while [[ $# -gt 0 ]]; do
             ENV_VARS+=("$2")
             shift 2
             ;;
-        --git-only)       GIT_ONLY=true; shift ;;
         --dry-run)        DRY_RUN=true; shift ;;
         --update)         FORCE_UPDATE=true; shift ;;
-        --migrate)        MIGRATE_CMD="$2"; shift 2 ;;
         --config)         CONFIG_FILE="$2"; shift 2 ;;
         -*)               error "Unknown option: $1"; exit 1 ;;
         *)
@@ -311,6 +294,17 @@ if [ -z "$TENANT_NAME" ] || [ ${#TENANT_NAME} -gt 63 ]; then
     exit 1
 fi
 
+# Tenant apps are created from Docker Hub images. Both are checked before anything
+# is created; a dry run only reports the gap.
+if [ -z "$BACKEND_IMAGE" ] || [ -z "$FRONTEND_IMAGE" ]; then
+    if $DRY_RUN; then
+        warn "A real run needs --backend-image and --frontend-image; this dry run only reports that."
+    else
+        error "Tenant apps are created from Docker Hub images: refusing to create the tenant without --backend-image and --frontend-image. Nothing was created."
+        exit 1
+    fi
+fi
+
 # ---- Logging: tee everything to a per-run log file -------------------------
 # So we (and the dashboard) can read what happened after the fact.
 LOG_DIR="${LOG_DIR:-${PROJECT_DIR}/logs}"
@@ -324,15 +318,6 @@ fi
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
 
-HAS_DATABASE_URL=false
-HAS_DB_PARTS=false
-if has_env_var "DATABASE_URL"; then
-    HAS_DATABASE_URL=true
-fi
-if has_env_var "DB_HOST" && has_env_var "DB_PORT" && has_env_var "DB_NAME" && has_env_var "DB_USER" && has_env_var "DB_PASSWORD"; then
-    HAS_DB_PARTS=true
-fi
-
 BACKEND_APP="${TENANT_NAME}-backend"
 FRONTEND_APP="${TENANT_NAME}-frontend"
 TENANT_DOMAIN="${TENANT_NAME}.${BASE_DOMAIN}"
@@ -345,24 +330,31 @@ PUBLIC_TENANT_URL="$(public_tenant_url "$TENANT_NAME")" || exit 1
 export TENANT_NETWORK
 export BACKEND_PORT
 
+# The registry row (step 7) takes its tenant_key from ZATCA's trigger. Refuse before
+# anything is created if zatca_master has not been migrated by ZATCA.
+if ! $NO_DATABASE && mysql_admin_configured; then
+    require_registry_tenant_key || exit 1
+fi
+
 if [ -n "$BACKEND_IMAGE" ] || [ -n "$FRONTEND_IMAGE" ]; then
-    if ! ensure_tenant_provenance_schema; then
-        error "Tenant provenance schema is unavailable; refusing an untracked image deployment."
+    if ! ensure_deployment_state_schema; then
+        error "Deployment state schema is unavailable; refusing an untracked image deployment."
         exit 1
     fi
     [ -z "$BACKEND_IMAGE" ] || preflight_tenant_image backend "$BACKEND_IMAGE"
     [ -z "$FRONTEND_IMAGE" ] || preflight_tenant_image frontend "$FRONTEND_IMAGE"
 fi
 
-if [ -n "$BACKEND_IMAGE" ] && ! $HAS_DATABASE_URL && ! $HAS_DB_PARTS; then
+# A backend tenant needs goose migrations and the registry tenant_key, so it needs
+# MySQL provisioning. External DB env vars cannot replace it.
+if [ -n "$BACKEND_IMAGE" ]; then
     if $NO_DATABASE; then
-        error "Backend image deploy requires database settings, but --no-database was set and no DATABASE_URL/DB_* env vars were provided."
-        error "Either remove --no-database and configure MySQL, or provide explicit DB env vars."
+        error "Backend image deploy requires MySQL provisioning (goose migrations and tenant_key), but --no-database was set."
         exit 1
     fi
     if ! mysql_admin_configured; then
         error "Backend image deploy requires database provisioning, but MYSQL_ADMIN_PASSWORD is not configured in config.env."
-        error "Set MYSQL_ADMIN_USER/MYSQL_ADMIN_PASSWORD for the deployment account, run scripts/verify-mysql.sh, then retry; or provide DATABASE_URL/DB_* via --env; or use --git-only."
+        error "Set MYSQL_ADMIN_USER/MYSQL_ADMIN_PASSWORD for the deployment account, run scripts/verify-mysql.sh, then retry."
         exit 1
     fi
 fi
@@ -538,9 +530,6 @@ fi
 if [ -n "$FRONTEND_IMAGE" ]; then
     info "  Frontend image: $FRONTEND_IMAGE"
 fi
-if $GIT_ONLY; then
-    info "  Deploy method:  git push (no image deploy now)"
-fi
 for ev in "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; do
     info "  Env var:        $(redact_env_var "$ev")"
 done
@@ -587,8 +576,8 @@ ensure_tenant_network "$TENANT_NETWORK"
 log "Attaching apps to $TENANT_NETWORK"
 # Dokku 0.30+ rejects setting attach-post-create AND attach-post-deploy for the
 # same network on the same app ("Network name already associated with this app").
-# attach-post-create alone is enough: it attaches on container create which
-# covers both image deploys (ps:rebuild) and git-push deploys.
+# attach-post-create alone is enough: it attaches on container create, which
+# covers image deploys (ps:rebuild).
 dokku network:set "$BACKEND_APP"  attach-post-create "$TENANT_NETWORK"
 dokku network:set "$FRONTEND_APP" attach-post-create "$TENANT_NETWORK"
 
@@ -780,7 +769,7 @@ SQLEOF
                     "pre-migration backup identity incomplete" 2>/dev/null || true
                 exit 1
             fi
-            log "Initializing tenant database schema from backend image..."
+            log "Running goose migrations from backend image..."
             bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
                 --schema-only \
                 --backend-image "$BACKEND_IMAGE" \
@@ -813,40 +802,30 @@ log "Configuring health checks..."
 dokku_shell "mkdir -p /home/dokku/${BACKEND_APP} && echo '/healthz' > /home/dokku/${BACKEND_APP}/CHECKS" || warn "could not seed backend CHECKS"
 dokku_shell "mkdir -p /home/dokku/${FRONTEND_APP} && echo '/' > /home/dokku/${FRONTEND_APP}/CHECKS" || warn "could not seed frontend CHECKS"
 
-# ---- 9. Deploy (if images provided) ----
-if ! $GIT_ONLY; then
-    if [ -n "$BACKEND_IMAGE" ]; then
-        log "Deploying backend from image: $BACKEND_IMAGE"
-        if ! deploy_verified_component backend "$BACKEND_IMAGE"; then
-            error "Backend deployment failed; tenant is marked failed and no automatic rollback was attempted."
-            exit 1
-        fi
-    else
-        info "No backend image — deploy later with: git push dokku@${BASE_DOMAIN}:${BACKEND_APP} main"
-    fi
-
-    if [ -n "$FRONTEND_IMAGE" ]; then
-        log "Deploying frontend from image: $FRONTEND_IMAGE"
-        if ! dokku config:set --no-restart "$FRONTEND_APP" COOKIE_SECURE=false; then
-            tenant_record_failure "$TENANT_NAME" frontend "failed to set frontend config" 2>/dev/null || true
-            exit 1
-        fi
-        if ! deploy_verified_component frontend "$FRONTEND_IMAGE"; then
-            error "Frontend deployment failed; tenant is degraded and backend identity was preserved."
-            exit 1
-        fi
-
-        # Dokku's nginx config uses the bridge network IP which changes on every container
-        # restart. Fix it immediately to use the Docker service hostname on the web network,
-        # which is stable and resolved via Docker's internal DNS (127.0.0.11).
-        fix_nginx_upstream "$FRONTEND_APP" "${FRONTEND_APP}.web" "8000"
-    else
-        info "No frontend image — deploy later with: git push dokku@${BASE_DOMAIN}:${FRONTEND_APP} main"
-    fi
+# ---- 9. Deploy from the Docker Hub images (both are checked at the top) ----
+log "Deploying backend from image: $BACKEND_IMAGE"
+if ! deploy_verified_component backend "$BACKEND_IMAGE"; then
+    error "Backend deployment failed; tenant is marked failed and no automatic rollback was attempted."
+    exit 1
 fi
 
+log "Deploying frontend from image: $FRONTEND_IMAGE"
+if ! dokku config:set --no-restart "$FRONTEND_APP" COOKIE_SECURE=false; then
+    tenant_record_failure "$TENANT_NAME" frontend "failed to set frontend config" 2>/dev/null || true
+    exit 1
+fi
+if ! deploy_verified_component frontend "$FRONTEND_IMAGE"; then
+    error "Frontend deployment failed; tenant is degraded and backend identity was preserved."
+    exit 1
+fi
+
+# Dokku's nginx config uses the bridge network IP which changes on every container
+# restart. Fix it immediately to use the Docker service hostname on the web network,
+# which is stable and resolved via Docker's internal DNS (127.0.0.11).
+fix_nginx_upstream "$FRONTEND_APP" "${FRONTEND_APP}.web" "8000"
+
 # ---- 10. Seed tenant users ----
-if $DB_PROVISIONED && ! $GIT_ONLY; then
+if $DB_PROVISIONED; then
     ADMIN_USER="$(env_value ADMIN_USER)"
     ADMIN_PASSWORD="$(env_value ADMIN_PASSWORD)"
     MANAGER_USER="$(env_value MANAGER_USER)"
@@ -879,32 +858,6 @@ fi
 # ---- 11. External nginx ----
 info "Host nginx (operator-managed) wildcards *.${BASE_DOMAIN} → 127.0.0.1:${DOKKU_PORT}; nothing to do per-tenant."
 info "Verify once on the host that the wildcard vhost forwards with 'Host \$host' preserved, then: sudo nginx -t && sudo systemctl reload nginx"
-
-# ---- 12. Run database migration ----
-if [ -n "$MIGRATE_CMD" ] && [ -n "$BACKEND_IMAGE" ]; then
-    if [ -z "$DB_BACKUP_ID" ]; then
-        log "Creating verified pre-migration database backup for ${TENANT_NAME}"
-        if ! DB_BACKUP_INFO="$(create_verified_tenant_db_backup "$TENANT_NAME" "$CONFIG_FILE")"; then
-            error "Verified tenant DB backup could not be created; refusing custom migration."
-            tenant_record_failure "$TENANT_NAME" backend \
-                "verified pre-migration database backup unavailable" 2>/dev/null || true
-            exit 1
-        fi
-        IFS=$'\t' read -r DB_BACKUP_ID DB_BACKUP_ARTIFACT _ <<< "$DB_BACKUP_INFO"
-    fi
-    log "Running database migration: $MIGRATE_CMD"
-    if dokku run "$BACKEND_APP" $MIGRATE_CMD; then
-        log "Migration completed successfully."
-    else
-        error "Migration failed; restore backup ${DB_BACKUP_ID} before retrying."
-        tenant_record_failure "$TENANT_NAME" backend \
-            "custom migration failed; restore pre-migration backup before retry" 2>/dev/null || true
-        exit 1
-    fi
-elif [ -n "$MIGRATE_CMD" ] && [ -z "$BACKEND_IMAGE" ]; then
-    warn "--migrate specified but no backend image deployed yet. Skipping migration."
-    warn "Run manually after deploy: dokku run $BACKEND_APP $MIGRATE_CMD"
-fi
 
 # ---- DNS wildcard check ----
 # Fail loudly if *.BASE_DOMAIN doesn't resolve — the tenant URL below will

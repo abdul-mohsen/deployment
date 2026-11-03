@@ -12,35 +12,28 @@ source scripts/tenant-provenance.sh
 
 IMAGE_DIGEST="sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-echo "=== portable schema column helper ==="
-schema_calls_file="$(mktemp)"
-trap 'rm -f "$schema_calls_file"' EXIT
-schema_column_exists=0
+echo "=== deployment state writes go to deployment_state, never zatca_master ==="
+sql_calls_file="$(mktemp)"
+trap 'rm -f "$sql_calls_file"' EXIT
 run_mysql() {
-    local args="$*"
-    printf '%s\n' "$args" >> "$schema_calls_file"
-    if [[ "$args" == *"information_schema.columns"* ]]; then
-        printf '%s\n' "$schema_column_exists"
-    fi
+    printf '%s\n' "$*" >> "$sql_calls_file"
 }
-mysql_add_column_if_missing test_db tenant sample_column "VARCHAR(8) NOT NULL DEFAULT ''" \
-    || fail "missing schema column was not added"
-grep -q 'ALTER TABLE `tenant` ADD COLUMN `sample_column` VARCHAR(8)' "$schema_calls_file" ||
-    fail "portable schema helper did not issue a column ALTER"
+tenant_record_identity acme backend example/api:v1 example/api:v1 "$IMAGE_DIGEST" \
+    stable v1.2.3 abc1234 abc1234 1 https://github.com/example/api/actions/runs/1 2026-01-01T00:00:00Z
+tenant_record_audit acme backend example/api:v1 example/api:v1 "$IMAGE_DIGEST" \
+    stable v1.2.3 abc1234 abc1234 1 https://github.com/example/api/actions/runs/1 2026-01-01T00:00:00Z \
+    "" "" started "" "" ""
+grep -q '^deployment_state -e INSERT INTO tenant_identity' "$sql_calls_file" ||
+    fail "identity is not written to deployment_state.tenant_identity"
+grep -q '^deployment_state -e INSERT INTO tenant_deployment_audit' "$sql_calls_file" ||
+    fail "audit is not written to deployment_state.tenant_deployment_audit"
+! grep -q 'zatca_master\|UPDATE tenant ' "$sql_calls_file" ||
+    fail "provenance writes still touch the zatca_master tenant table"
+! grep -R -n 'ALTER TABLE' scripts/*.sh >/dev/null 2>&1 ||
+    fail "a script still issues ALTER TABLE"
+pass "provenance writes target deployment_state; no ALTER TABLE in scripts"
 
-: > "$schema_calls_file"
-schema_column_exists=1
-mysql_add_column_if_missing test_db tenant sample_column "VARCHAR(8) NOT NULL DEFAULT ''" \
-    || fail "existing schema column was not accepted"
-[ "$(grep -c 'information_schema.columns' "$schema_calls_file")" -eq 1 ] ||
-    fail "existing schema column was not checked"
-! grep -q 'ALTER TABLE `tenant` ADD COLUMN `sample_column`' "$schema_calls_file" ||
-    fail "existing schema column triggered an unnecessary ALTER"
-! grep -q 'ADD COLUMN IF NOT EXISTS `' \
-    scripts/lib.sh scripts/setup.sh scripts/tenant-provenance.sh \
-    docs/tenant-recovery-hockun2.md ||
-    fail "unsupported ADD COLUMN IF NOT EXISTS migration remains"
-pass "portable schema migration is used"
+unset -f run_mysql
 
 docker() {
     local format=""

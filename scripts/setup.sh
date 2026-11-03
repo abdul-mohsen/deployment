@@ -373,76 +373,21 @@ mkdir -p "${STORAGE_ROOT}"
 log "Creating backup/state/log directories"
 mkdir -p "${BACKUP_DIR}" "${TENANT_STATE_DIR}" "${LOG_DIR}"
 
-# ---- Step 5b: External MySQL — master database ----
+# ---- Step 5b: External MySQL: deployment state and registry check ----
+# zatca_master is owned by ZATCA (zatca_integration migrations/zatca_master). This
+# repo writes rows there and never creates or alters its tables. Deployment-owned
+# state (pins, verified identity, deploy audit) lives in ${DEPLOY_STATE_DB}.
 if mysql_admin_configured; then
-    log "Setting up master database: ${MYSQL_MASTER_DB}"
-
-    run_mysql <<SQLEOF
-CREATE DATABASE IF NOT EXISTS \`${MYSQL_MASTER_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE \`${MYSQL_MASTER_DB}\`;
-CREATE TABLE IF NOT EXISTS tenant (
-    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    name            VARCHAR(100)  NOT NULL COMMENT 'Friendly tenant name',
-    db_name         VARCHAR(100)  NOT NULL UNIQUE COMMENT 'MySQL database name for this tenant',
-    zatca_env       VARCHAR(20)   NOT NULL DEFAULT 'production' COMMENT 'sandbox, simulation, or production',
-    alert_email     VARCHAR(255)  NOT NULL DEFAULT '' COMMENT 'Email for failure alerts',
-    enabled         TINYINT(1)    NOT NULL DEFAULT 1 COMMENT '0 = paused',
-    backend_image   VARCHAR(255)  NOT NULL DEFAULT '' COMMENT 'Per-tenant override (empty = use global latest)',
-    frontend_image  VARCHAR(255)  NOT NULL DEFAULT '' COMMENT 'Per-tenant override (empty = use global latest)',
-    backend_image_ref VARCHAR(512) NOT NULL DEFAULT '',
-    frontend_image_ref VARCHAR(512) NOT NULL DEFAULT '',
-    backend_image_digest VARCHAR(255) NOT NULL DEFAULT '',
-    frontend_image_digest VARCHAR(255) NOT NULL DEFAULT '',
-    backend_channel VARCHAR(64) NOT NULL DEFAULT '',
-    frontend_channel VARCHAR(64) NOT NULL DEFAULT '',
-    backend_version VARCHAR(128) NOT NULL DEFAULT '',
-    frontend_version VARCHAR(128) NOT NULL DEFAULT '',
-    backend_commit VARCHAR(128) NOT NULL DEFAULT '',
-    frontend_commit VARCHAR(128) NOT NULL DEFAULT '',
-    backend_commit_short VARCHAR(32) NOT NULL DEFAULT '',
-    frontend_commit_short VARCHAR(32) NOT NULL DEFAULT '',
-    backend_workflow_run VARCHAR(128) NOT NULL DEFAULT '',
-    frontend_workflow_run VARCHAR(128) NOT NULL DEFAULT '',
-    backend_built_at VARCHAR(64) NOT NULL DEFAULT '',
-    frontend_built_at VARCHAR(64) NOT NULL DEFAULT '',
-    backend_deployed_at TIMESTAMP NULL DEFAULT NULL,
-    frontend_deployed_at TIMESTAMP NULL DEFAULT NULL,
-    backend_deployment_status VARCHAR(32) NOT NULL DEFAULT 'unknown',
-    frontend_deployment_status VARCHAR(32) NOT NULL DEFAULT 'unknown',
-    backend_deployment_error TEXT NULL,
-    frontend_deployment_error TEXT NULL,
-    created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_enabled (enabled)
-) ENGINE=InnoDB;
-CREATE TABLE IF NOT EXISTS tenant_deployment_audit (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    tenant_name VARCHAR(100) NOT NULL,
-    app_type VARCHAR(16) NOT NULL,
-    requested_image_ref VARCHAR(512) NOT NULL DEFAULT '',
-    resolved_image_ref VARCHAR(512) NOT NULL DEFAULT '',
-    image_digest VARCHAR(255) NOT NULL DEFAULT '',
-    channel VARCHAR(64) NOT NULL DEFAULT '',
-    semantic_version VARCHAR(128) NOT NULL DEFAULT '',
-    commit_sha VARCHAR(128) NOT NULL DEFAULT '',
-    commit_short VARCHAR(32) NOT NULL DEFAULT '',
-    workflow_run VARCHAR(128) NOT NULL DEFAULT '',
-    built_at VARCHAR(64) NOT NULL DEFAULT '',
-    previous_image_ref VARCHAR(512) NOT NULL DEFAULT '',
-    previous_image_digest VARCHAR(255) NOT NULL DEFAULT '',
-    backup_id VARCHAR(255) NOT NULL DEFAULT '',
-    backup_db_artifact VARCHAR(512) NOT NULL DEFAULT '',
-    status VARCHAR(32) NOT NULL,
-    error_message TEXT NULL,
-    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    completed_at TIMESTAMP NULL DEFAULT NULL,
-    INDEX idx_tenant_deployment_audit_tenant (tenant_name, started_at),
-    INDEX idx_tenant_deployment_audit_status (status, started_at)
-) ENGINE=InnoDB;
-SQLEOF
-
-    ensure_tenant_provenance_columns "$MYSQL_MASTER_DB"
-    ensure_tenant_audit_columns "$MYSQL_MASTER_DB"
-    log "Master database ready: ${MYSQL_MASTER_DB}.tenant"
+    log "Setting up deployment state: ${DEPLOY_STATE_DB}"
+    if ! ensure_deployment_state_schema; then
+        error "Could not create the ${DEPLOY_STATE_DB} tables; check the deployment account grants."
+        exit 1
+    fi
+    if require_registry_tenant_key; then
+        log "Registry ready: ${MYSQL_MASTER_DB}.tenant has tenant_key and trigger tenant_key_default"
+    else
+        warn "Create tenants only after ZATCA's zatca_master migrations are applied (see above)."
+    fi
 else
     warn "MYSQL_ADMIN_PASSWORD not configured. Skipping master DB setup."
     warn "Edit config.env and re-run setup.sh to create master database."
@@ -547,28 +492,29 @@ if prompt_yn "Create your first tenant now?" "y"; then
     else
         TENANT_CMD="$SCRIPT_DIR/create-tenant.sh $TENANT_NAME --config $CONFIG_FILE"
 
-        if [ -n "$DOCKERHUB_USERNAME" ]; then
+        # Tenant apps are created from Docker Hub images. Without them nothing is created.
+        if [ -z "$DOCKERHUB_USERNAME" ]; then
+            error "Tenant not created: tenant apps need Docker Hub images, and DOCKERHUB_USERNAME is not set."
+            TENANT_CMD=""
+        else
             RELEASE_TAG="${APP_IMAGE_VERSION_DEFAULT:-${PULL_TAG:-dev}}"
             BACKEND_IMG="${BACKEND_IMAGE:-${DOCKERHUB_USERNAME}/ifritah-api}:${RELEASE_TAG}"
             FRONTEND_IMG="${FRONTEND_IMAGE:-${DOCKERHUB_USERNAME}/ifritah-web}:${RELEASE_TAG}"
 
-            info "Will deploy from: $BACKEND_IMG + $FRONTEND_IMG"
+            info "Will create from: $BACKEND_IMG + $FRONTEND_IMG"
             if prompt_yn "Are images already pushed to Docker Hub?" "n"; then
                 TENANT_CMD="$TENANT_CMD --backend-image $BACKEND_IMG --frontend-image $FRONTEND_IMG"
             else
-                info "Creating tenant without images. Deploy later:"
-                info "  dokku git:from-image ${TENANT_NAME}-backend $BACKEND_IMG"
-                info "  dokku git:from-image ${TENANT_NAME}-frontend $FRONTEND_IMG"
-                TENANT_CMD="$TENANT_CMD --git-only"
+                error "Tenant not created: its images are not on Docker Hub yet. After CI pushes them, run: ./scripts/create-tenant.sh $TENANT_NAME --backend-image $BACKEND_IMG --frontend-image $FRONTEND_IMG"
+                TENANT_CMD=""
             fi
-        else
-            info "No Docker Hub — tenant will be created for git push deploy."
-            TENANT_CMD="$TENANT_CMD --git-only"
         fi
 
-        echo ""
-        log "Creating tenant: $TENANT_NAME"
-        bash $TENANT_CMD || warn "Tenant creation had issues — check output above."
+        if [ -n "$TENANT_CMD" ]; then
+            echo ""
+            log "Creating tenant: $TENANT_NAME"
+            bash $TENANT_CMD || warn "Tenant creation had issues — check output above."
+        fi
     fi
 fi
 

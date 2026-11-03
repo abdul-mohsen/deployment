@@ -59,6 +59,12 @@ expect_plan "bash scripts/backup-tenant.sh --all" \
 expect_plan "bash scripts/restore-tenant.sh acme --from acme_20250101_120000" \
     tenant restore acme --from acme_20250101_120000
 
+expect_plan "bash scripts/rollback-tenant.sh acme --to repo/ifritah-api:v1 --confirm-schema-compatible" \
+    tenant rollback acme --to repo/ifritah-api:v1 --confirm-schema-compatible
+
+expect_plan "bash scripts/rollback-tenant.sh acme --to repo/ifritah-api:v1" \
+    tenant rollback acme --to repo/ifritah-api:v1
+
 expect_plan "bash scripts/manage-backups.sh list acme --json" \
     tenant backups list acme --json
 

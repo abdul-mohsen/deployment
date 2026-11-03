@@ -671,6 +671,8 @@ func Catalog() []Script {
 				imageVersionFieldForScope(false, "role"),
 				{Name: "to", Flag: "--to", Type: "hidden"},
 				{Name: "list", Label: "List recent deploys", Flag: "--list", Type: "checkbox", Boolean: true},
+				{Name: "confirm_schema_compatible", Label: "Confirm no schema change needs a restore first", Flag: "--confirm-schema-compatible", Type: "checkbox", Boolean: true,
+					Help: "Required for a backend rollback. Schema changes are forward-only: if one needs a restore, restore the backup first, then check this."},
 			},
 		},
 		{

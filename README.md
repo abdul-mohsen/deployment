@@ -152,7 +152,7 @@ sudo ./scripts/deployctl.sh setup dev-tenant        # creates the one dev tenant
 | Manual prod deploy (one client) | `sudo ./scripts/deployctl.sh fleet sync myuser/ifritah-api:v0.0.1 --tenant acme` |
 | Manual prod deploy (all clients) | `sudo ./scripts/deployctl.sh fleet sync myuser/ifritah-api:v0.0.1` |
 | Pin a tenant to a fixed image | `sudo ./scripts/deployctl.sh tenant pin acme --backend myuser/ifritah-api:v0.0.1` |
-| Rollback | `sudo ./scripts/deployctl.sh tenant rollback acme --to myuser/ifritah-api:abc1234` |
+| Rollback | `sudo ./scripts/deployctl.sh tenant rollback acme --to myuser/ifritah-api:abc1234 --confirm-schema-compatible` |
 | List tenants | `sudo ./scripts/deployctl.sh tenant list` |
 | Tenant status | `sudo ./scripts/deployctl.sh tenant status acme` |
 | Tail logs | `sudo ./scripts/deployctl.sh tenant logs acme --type backend` |
@@ -163,6 +163,8 @@ sudo ./scripts/deployctl.sh setup dev-tenant        # creates the one dev tenant
 | Prune by policy | `sudo ./scripts/deployctl.sh fleet backups prune` |
 | Restore / rollback | `sudo ./scripts/deployctl.sh tenant restore acme --from acme_20250101_120000` |
 | Restart platform | `sudo ./scripts/deployctl.sh stack restart --env all` |
+
+`--confirm-schema-compatible` confirms that no schema change since the target image needs a restore first; without it a backend rollback is refused, because schema changes are forward-only.
 
 The old `scripts/*.sh` files remain as readable implementation units and compatibility entrypoints. New operations should be exposed through `deployctl.sh` first.
 

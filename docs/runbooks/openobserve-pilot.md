@@ -238,8 +238,11 @@ the same command before using the existing image rollback procedure:
 
 ```sh
 sudo bash scripts/rollback-tenant.sh acme --type backend \
-  --to myuser/ifritah-api:known-good --config /opt/deployment/config.env
+  --to myuser/ifritah-api:known-good --confirm-schema-compatible \
+  --config /opt/deployment/config.env
 ```
+
+Pass `--confirm-schema-compatible` only after you confirm that no schema change since the known-good image needs a restore first; the telemetry change itself does not alter the schema.
 
 Do not remove the named OpenObserve network while any tenant or collector is
 attached. Stop the profile without `--volumes`, detach wired tenants, and

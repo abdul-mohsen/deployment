@@ -101,14 +101,33 @@ Copy from [config.env.example](config.env.example) and fill:
 
 ## 4. One-time MySQL admin grants
 
-Required for the deployment-side admin user to create per-tenant DBs/users.
-The account is intentionally not required to be MySQL root:
+Required for the deployment-side admin user (`MYSQL_ADMIN_USER`) to create per-tenant
+DBs and users. The account is intentionally not MySQL root, and it has no `ALL PRIVILEGES`
+on `zatca_master`:
 
 ```sql
 GRANT ALL PRIVILEGES ON `tenant_%`.* TO 'dokku_admin'@'172.%' WITH GRANT OPTION;
-GRANT ALL PRIVILEGES ON `zatca_master`.* TO 'dokku_admin'@'172.%';
+GRANT SELECT, INSERT, UPDATE, DELETE, TRIGGER ON `zatca_master`.`tenant` TO 'dokku_admin'@'172.%';
+GRANT CREATE, SELECT, INSERT, UPDATE, DELETE ON `deployment_state`.* TO 'dokku_admin'@'172.%';
 GRANT CREATE USER ON *.* TO 'dokku_admin'@'172.%';
 ```
+
+What each privilege is for. The statements were checked in `scripts/`; the defaults are
+`MYSQL_MASTER_DB=zatca_master` and `DEPLOY_STATE_DB=deployment_state`.
+
+| Object | Privileges | Statements |
+|---|---|---|
+| `zatca_master.tenant` | SELECT | reads of `tenant_key` (`lib.sh`, `tenant_registry_key`); joins on `tenant` (`deploy-all.sh`, `status.sh`, `set-tenant-image.sh`); column check (`lib.sh`, `require_registry_tenant_key`) |
+| `zatca_master.tenant` | INSERT, UPDATE | `INSERT INTO tenant ... ON DUPLICATE KEY UPDATE enabled=1` (`create-tenant.sh`); `UPDATE tenant SET enabled=0` (`cleanup-broken-tenant.sh`) |
+| `zatca_master.tenant` | DELETE | `DELETE FROM tenant` (`remove-tenant.sh`, `cleanup-broken-tenant.sh`) |
+| `zatca_master.tenant` | TRIGGER | the trigger check (`lib.sh`, `require_registry_tenant_key`) reads `information_schema.triggers`. MySQL shows a table's triggers only to accounts with the TRIGGER privilege on that table |
+| `deployment_state.*` | CREATE | `CREATE DATABASE` and `CREATE TABLE IF NOT EXISTS` (`lib.sh`, `ensure_deployment_state_schema`), run by `setup.sh`, `create-tenant.sh`, `deploy-all.sh` and `update-tenant.sh` |
+| `deployment_state.*` | SELECT, INSERT, UPDATE, DELETE | `tenant_image` and `tenant_identity` reads and writes (`set-tenant-image.sh`, `status.sh`, `deploy-all.sh`, `tenant-provenance.sh`, `remove-tenant.sh`, `cleanup-broken-tenant.sh`); `tenant_deployment_audit` inserts (`tenant-provenance.sh`) |
+| `tenant_%`.* | ALL PRIVILEGES, WITH GRANT OPTION | unchanged. Creates and drops tenant DBs and grants their users. The dashboard's accounting export and password update connect as this account to tenant DBs (`dashboard/internal/web/backup.go`, `web.go`). `goose` connects as the tenant user, not as this account |
+| `*.*` | CREATE USER | unchanged. `CREATE USER` and `ALTER USER` for tenant users |
+
+`scripts/tests/test-no-git-push-and-master-grants.sh` fails if a doc or an example grants
+`ALL PRIVILEGES` on `zatca_master`.
 
 Rules learned the hard way:
 - Use **backticks** for `tenant_%`, never single quotes.
@@ -239,6 +258,7 @@ Modern duplicates (`DATABASE_URL`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`,
 - Multiple `NGINX_MODE` values — single mode only.
 - "Standalone" Dokku where Dokku owns :443 — operator nginx is mandatory.
 - Deploying or managing the on-host ZATCA submitter — it lives outside this repo.
+- Git-push deploys to Dokku. Tenant apps are deployed by the scripts only, from Docker Hub images, and no SSH key for git push may be registered with Dokku.
 
 ---
 

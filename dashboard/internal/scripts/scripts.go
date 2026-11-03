@@ -583,7 +583,7 @@ func Catalog() []Script {
 				{Name: "update", Label: "Update existing tenant", Flag: "--update", Type: "checkbox", Boolean: true,
 					Help: "Check this if the tenant already exists and you want to re-deploy or re-seed it. Safe to use after a partial failure."},
 				{Name: "no_database", Label: "Skip database", Flag: "--no-database", Type: "checkbox", Boolean: true,
-					Help: "Skips MySQL provisioning. A backend image needs it (goose migrations and tenant_key), so use this only for git-only tenants."},
+					Help: "Skips MySQL provisioning. A tenant created from images needs it (goose migrations and tenant_key), so create-tenant refuses this option."},
 				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
 				{Name: "envs", Label: "Env vars", Flag: "--env", Type: "kv",
 					Help: "One KEY=VALUE per line; each becomes a separate --env flag. Tenant application keys remain supported. DATABASE_URL and DB_* are set by MySQL provisioning. Deployment-reserved control-plane, MYSQL_*, MIGRATION_*, Docker, and telemetry keys are rejected."},

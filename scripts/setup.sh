@@ -492,28 +492,29 @@ if prompt_yn "Create your first tenant now?" "y"; then
     else
         TENANT_CMD="$SCRIPT_DIR/create-tenant.sh $TENANT_NAME --config $CONFIG_FILE"
 
-        if [ -n "$DOCKERHUB_USERNAME" ]; then
+        # Tenant apps are created from Docker Hub images. Without them nothing is created.
+        if [ -z "$DOCKERHUB_USERNAME" ]; then
+            error "Tenant not created: tenant apps need Docker Hub images, and DOCKERHUB_USERNAME is not set."
+            TENANT_CMD=""
+        else
             RELEASE_TAG="${APP_IMAGE_VERSION_DEFAULT:-${PULL_TAG:-dev}}"
             BACKEND_IMG="${BACKEND_IMAGE:-${DOCKERHUB_USERNAME}/ifritah-api}:${RELEASE_TAG}"
             FRONTEND_IMG="${FRONTEND_IMAGE:-${DOCKERHUB_USERNAME}/ifritah-web}:${RELEASE_TAG}"
 
-            info "Will deploy from: $BACKEND_IMG + $FRONTEND_IMG"
+            info "Will create from: $BACKEND_IMG + $FRONTEND_IMG"
             if prompt_yn "Are images already pushed to Docker Hub?" "n"; then
                 TENANT_CMD="$TENANT_CMD --backend-image $BACKEND_IMG --frontend-image $FRONTEND_IMG"
             else
-                info "Creating tenant without images. Deploy later:"
-                info "  dokku git:from-image ${TENANT_NAME}-backend $BACKEND_IMG"
-                info "  dokku git:from-image ${TENANT_NAME}-frontend $FRONTEND_IMG"
-                TENANT_CMD="$TENANT_CMD --git-only"
+                error "Tenant not created: its images are not on Docker Hub yet. After CI pushes them, run: ./scripts/create-tenant.sh $TENANT_NAME --backend-image $BACKEND_IMG --frontend-image $FRONTEND_IMG"
+                TENANT_CMD=""
             fi
-        else
-            info "No Docker Hub — tenant will be created for git push deploy."
-            TENANT_CMD="$TENANT_CMD --git-only"
         fi
 
-        echo ""
-        log "Creating tenant: $TENANT_NAME"
-        bash $TENANT_CMD || warn "Tenant creation had issues — check output above."
+        if [ -n "$TENANT_CMD" ]; then
+            echo ""
+            log "Creating tenant: $TENANT_NAME"
+            bash $TENANT_CMD || warn "Tenant creation had issues — check output above."
+        fi
     fi
 fi
 

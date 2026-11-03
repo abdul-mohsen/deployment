@@ -16,19 +16,18 @@
 #   ./scripts/create-tenant.sh <tenant-name> [options]
 #
 # Options:
-#   --backend-image <image>   Docker image for backend (or deploy via git later)
-#   --frontend-image <image>  Docker image for frontend (or deploy via git later)
+#   --backend-image <image>   Docker Hub image for the backend (required)
+#   --frontend-image <image>  Docker Hub image for the frontend (required)
 #   --backend-port <port>     Port the backend listens on (default: 3000)
 #   --frontend-port <port>    Port the frontend listens on (default: 80)
 #   --no-database             Skip database creation
 #   --env KEY=VALUE           Set application env var (repeatable; reserved
 #                             deployment keys are rejected; see REQUIREMENTS.md)
-#   --git-only                Create apps without deploying (deploy via git push)
 #   --dry-run                 Show plan without executing
 #   --config <path>           Path to config.env file (default: ../config.env)
 #
 # Examples:
-#   ./scripts/create-tenant.sh acme --git-only
+#   ./scripts/create-tenant.sh acme --backend-image myregistry/ifritah-api:v1 --frontend-image myregistry/ifritah-web:v1
 #   ./scripts/create-tenant.sh acme --backend-image myregistry/ifritah-api:v1
 #   ./scripts/create-tenant.sh acme --backend-image myregistry/ifritah-api:v1 --env SECRET_KEY=abc123
 #   ./scripts/create-tenant.sh acme --config /opt/deployment/config.dev.env
@@ -90,7 +89,6 @@ FRONTEND_IMAGE=""
 BACKEND_PORT="8090"
 FRONTEND_PORT="8000"
 NO_DATABASE=false
-GIT_ONLY=false
 DRY_RUN=false
 FORCE_UPDATE=false
 DB_BACKUP_ID=""
@@ -260,7 +258,6 @@ while [[ $# -gt 0 ]]; do
             ENV_VARS+=("$2")
             shift 2
             ;;
-        --git-only)       GIT_ONLY=true; shift ;;
         --dry-run)        DRY_RUN=true; shift ;;
         --update)         FORCE_UPDATE=true; shift ;;
         --config)         CONFIG_FILE="$2"; shift 2 ;;
@@ -295,6 +292,17 @@ TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
 if [ -z "$TENANT_NAME" ] || [ ${#TENANT_NAME} -gt 63 ]; then
     error "Invalid tenant name (must be 1-63 chars, lowercase alphanumeric + hyphens)."
     exit 1
+fi
+
+# Tenant apps are created from Docker Hub images. Both are checked before anything
+# is created; a dry run only reports the gap.
+if [ -z "$BACKEND_IMAGE" ] || [ -z "$FRONTEND_IMAGE" ]; then
+    if $DRY_RUN; then
+        warn "A real run needs --backend-image and --frontend-image; this dry run only reports that."
+    else
+        error "Tenant apps are created from Docker Hub images: refusing to create the tenant without --backend-image and --frontend-image. Nothing was created."
+        exit 1
+    fi
 fi
 
 # ---- Logging: tee everything to a per-run log file -------------------------
@@ -346,7 +354,7 @@ if [ -n "$BACKEND_IMAGE" ]; then
     fi
     if ! mysql_admin_configured; then
         error "Backend image deploy requires database provisioning, but MYSQL_ADMIN_PASSWORD is not configured in config.env."
-        error "Set MYSQL_ADMIN_USER/MYSQL_ADMIN_PASSWORD for the deployment account, run scripts/verify-mysql.sh, then retry; or use --git-only."
+        error "Set MYSQL_ADMIN_USER/MYSQL_ADMIN_PASSWORD for the deployment account, run scripts/verify-mysql.sh, then retry."
         exit 1
     fi
 fi
@@ -522,9 +530,6 @@ fi
 if [ -n "$FRONTEND_IMAGE" ]; then
     info "  Frontend image: $FRONTEND_IMAGE"
 fi
-if $GIT_ONLY; then
-    info "  Deploy method:  git push (no image deploy now)"
-fi
 for ev in "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; do
     info "  Env var:        $(redact_env_var "$ev")"
 done
@@ -571,8 +576,8 @@ ensure_tenant_network "$TENANT_NETWORK"
 log "Attaching apps to $TENANT_NETWORK"
 # Dokku 0.30+ rejects setting attach-post-create AND attach-post-deploy for the
 # same network on the same app ("Network name already associated with this app").
-# attach-post-create alone is enough: it attaches on container create which
-# covers both image deploys (ps:rebuild) and git-push deploys.
+# attach-post-create alone is enough: it attaches on container create, which
+# covers image deploys (ps:rebuild).
 dokku network:set "$BACKEND_APP"  attach-post-create "$TENANT_NETWORK"
 dokku network:set "$FRONTEND_APP" attach-post-create "$TENANT_NETWORK"
 
@@ -797,40 +802,30 @@ log "Configuring health checks..."
 dokku_shell "mkdir -p /home/dokku/${BACKEND_APP} && echo '/healthz' > /home/dokku/${BACKEND_APP}/CHECKS" || warn "could not seed backend CHECKS"
 dokku_shell "mkdir -p /home/dokku/${FRONTEND_APP} && echo '/' > /home/dokku/${FRONTEND_APP}/CHECKS" || warn "could not seed frontend CHECKS"
 
-# ---- 9. Deploy (if images provided) ----
-if ! $GIT_ONLY; then
-    if [ -n "$BACKEND_IMAGE" ]; then
-        log "Deploying backend from image: $BACKEND_IMAGE"
-        if ! deploy_verified_component backend "$BACKEND_IMAGE"; then
-            error "Backend deployment failed; tenant is marked failed and no automatic rollback was attempted."
-            exit 1
-        fi
-    else
-        info "No backend image — deploy later with: git push dokku@${BASE_DOMAIN}:${BACKEND_APP} main"
-    fi
-
-    if [ -n "$FRONTEND_IMAGE" ]; then
-        log "Deploying frontend from image: $FRONTEND_IMAGE"
-        if ! dokku config:set --no-restart "$FRONTEND_APP" COOKIE_SECURE=false; then
-            tenant_record_failure "$TENANT_NAME" frontend "failed to set frontend config" 2>/dev/null || true
-            exit 1
-        fi
-        if ! deploy_verified_component frontend "$FRONTEND_IMAGE"; then
-            error "Frontend deployment failed; tenant is degraded and backend identity was preserved."
-            exit 1
-        fi
-
-        # Dokku's nginx config uses the bridge network IP which changes on every container
-        # restart. Fix it immediately to use the Docker service hostname on the web network,
-        # which is stable and resolved via Docker's internal DNS (127.0.0.11).
-        fix_nginx_upstream "$FRONTEND_APP" "${FRONTEND_APP}.web" "8000"
-    else
-        info "No frontend image — deploy later with: git push dokku@${BASE_DOMAIN}:${FRONTEND_APP} main"
-    fi
+# ---- 9. Deploy from the Docker Hub images (both are checked at the top) ----
+log "Deploying backend from image: $BACKEND_IMAGE"
+if ! deploy_verified_component backend "$BACKEND_IMAGE"; then
+    error "Backend deployment failed; tenant is marked failed and no automatic rollback was attempted."
+    exit 1
 fi
 
+log "Deploying frontend from image: $FRONTEND_IMAGE"
+if ! dokku config:set --no-restart "$FRONTEND_APP" COOKIE_SECURE=false; then
+    tenant_record_failure "$TENANT_NAME" frontend "failed to set frontend config" 2>/dev/null || true
+    exit 1
+fi
+if ! deploy_verified_component frontend "$FRONTEND_IMAGE"; then
+    error "Frontend deployment failed; tenant is degraded and backend identity was preserved."
+    exit 1
+fi
+
+# Dokku's nginx config uses the bridge network IP which changes on every container
+# restart. Fix it immediately to use the Docker service hostname on the web network,
+# which is stable and resolved via Docker's internal DNS (127.0.0.11).
+fix_nginx_upstream "$FRONTEND_APP" "${FRONTEND_APP}.web" "8000"
+
 # ---- 10. Seed tenant users ----
-if $DB_PROVISIONED && ! $GIT_ONLY; then
+if $DB_PROVISIONED; then
     ADMIN_USER="$(env_value ADMIN_USER)"
     ADMIN_PASSWORD="$(env_value ADMIN_PASSWORD)"
     MANAGER_USER="$(env_value MANAGER_USER)"

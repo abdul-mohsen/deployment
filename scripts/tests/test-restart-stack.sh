@@ -376,9 +376,10 @@ grep -q 'ensure_deployment_state_schema' scripts/setup.sh \
     || FAIL "setup.sh must create the deployment-owned state tables"
 grep -q 'init-tenant-db.sh" "\$tenant" --schema-only' scripts/deploy-all.sh \
     && grep -q 'init-tenant-db.sh" "\$TENANT_NAME" \\' scripts/update-tenant.sh \
-    && grep -q 'init-tenant-db.sh" "\${app%-backend}" --schema-only' scripts/rollback-tenant.sh \
-    && PASS "every backend deploy path runs goose before the image is deployed" \
-    || FAIL "deploy-all, update-tenant and rollback-tenant must run goose before deploying a backend image"
+    && ! grep -q -- '--schema-only' scripts/rollback-tenant.sh \
+    && grep -q -- '--confirm-schema-compatible' scripts/rollback-tenant.sh \
+    && PASS "every backend deploy path runs goose before the image is deployed; rollback-tenant runs no goose" \
+    || FAIL "deploy-all and update-tenant must run goose before deploying a backend image; rollback-tenant must not run goose and must require --confirm-schema-compatible"
 grep -qF "UPDATE company SET tenant_key = '\${tenant_key_sql}' WHERE id = 1;" scripts/init-tenant-db.sh \
     && PASS "tenant_key is written with UPDATE ... WHERE id" \
     || FAIL "tenant_key write must be an UPDATE with a WHERE clause"

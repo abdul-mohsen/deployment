@@ -27,12 +27,14 @@ sed -n "${schema_line},$((deploy_line - 1))p" "$UPDATE" | grep -q 'exit 1' \
 pass "failed goose run stops before the image swap"
 
 echo
-echo "=== deploy-all and rollback run goose before the swap ==="
+echo "=== deploy-all runs goose before the swap; rollback runs none ==="
 grep -q 'init-tenant-db.sh" "\$tenant" --schema-only' scripts/deploy-all.sh \
     || fail "deploy-all does not run goose before the image swap"
-grep -q 'init-tenant-db.sh" "\${app%-backend}" --schema-only' scripts/rollback-tenant.sh \
-    || fail "rollback-tenant does not run goose before the image swap"
-pass "deploy-all and rollback-tenant run goose"
+! grep -q -- '--schema-only' scripts/rollback-tenant.sh \
+    || fail "rollback-tenant runs goose; schema changes are forward-only"
+grep -q -- '--confirm-schema-compatible' scripts/rollback-tenant.sh \
+    || fail "rollback-tenant does not require --confirm-schema-compatible"
+pass "deploy-all runs goose; rollback-tenant runs no goose and requires --confirm-schema-compatible"
 
 echo
 echo "=== goose status contract ==="

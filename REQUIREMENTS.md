@@ -143,6 +143,9 @@ Rules learned the hard way:
 - Existing-tenant schema replay uses the tenant's `DB_USER`/`DB_PASSWORD`
   account and does not require `MYSQL_ADMIN_PASSWORD`; the deployment account
   is needed only when a tenant database or user must be provisioned.
+- Schema changes are forward-only. A backend rollback across a schema change needs a
+  restore first, and `rollback-tenant.sh` requires `--confirm-schema-compatible` for a
+  backend rollback.
 - Tenant image updates resolve tags to OCI digests, require the canonical
   BuildIdentity labels, pass `APP_IMAGE_VERSION`/`APP_IMAGE_COMMIT`,
   `APP_IMAGE_CHANNEL`, `APP_IMAGE_REF`, `APP_IMAGE_DIGEST`,

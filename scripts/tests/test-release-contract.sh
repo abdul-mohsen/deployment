@@ -13,6 +13,13 @@ contains() {
     pass "$description"
 }
 
+not_contains() {
+    local file="$1" text="$2" description="$3" status=0
+    grep -Fq -- "$text" "$file" || status=$?
+    [ "$status" -eq 1 ] || fail "$description"
+    pass "$description"
+}
+
 not_contains_any() {
     local description="$1"
     shift
@@ -42,6 +49,15 @@ contains templates/backend/Dockerfile 'http://localhost:3000/healthz' \
     "backend container healthcheck uses /healthz"
 not_contains_any "legacy /api/health probes are absent" \
     scripts/*.sh templates dashboard REQUIREMENTS.md
+
+echo
+echo "=== Backend build targets ==="
+not_contains templates/backend/Dockerfile './cmd/server' \
+    "backend Dockerfile builds no cmd/server package"
+contains templates/backend/Dockerfile '-o /app/server .' \
+    "backend Dockerfile builds the server from the root package"
+contains templates/backend/Dockerfile './cmd/migrate' \
+    "backend Dockerfile builds the goose runner from cmd/migrate"
 
 echo
 echo "=== BuildIdentity environment and label schema ==="

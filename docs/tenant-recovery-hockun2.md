@@ -178,9 +178,9 @@ Any future tenant deploy via `update-tenant.sh` will:
   tenant DB that lags the current schema is auto-repaired before the new
   container is swapped in.
 
-Both checks can be bypassed (`--skip-drift-check`, `--skip-migrations`) for
-targeted rollback investigations, but both bypasses are loud (warning
-banners on stdout and stderr).
+The drift check can be bypassed (`--skip-drift-check`) for targeted
+rollback investigations. The bypass is loud (warning banners on stdout and
+stderr).
 
 ## If `BASE_DOMAIN` changed
 

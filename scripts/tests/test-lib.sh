@@ -67,6 +67,60 @@ if printf '%s\n' "$goose_args" | grep -q '^DATABASE_URL=\|^DB_'; then
 else
     pass "goose passes no DATABASE_URL or DB_* settings"
 fi
+
+echo ""
+echo "=== goose_run exact command contract and allow-list ==="
+cat > "$tmpdir/expected-goose-up" <<'EOF'
+run
+--rm
+--add-host=host.docker.internal:host-gateway
+-e
+HOST=host.docker.internal:3306
+-e
+DBNAME=tenant_acme
+-e
+DBUSER=usr_acme
+-e
+PASSWORD=pw123
+--entrypoint
+/app/migrate
+example/api:v1
+up
+EOF
+goose_run example/api:v1 up host.docker.internal 3306 tenant_acme usr_acme pw123
+cmp -s "$tmpdir/expected-goose-up" "$tmpdir/goose-args" \
+    && pass "goose up uses the exact /app/migrate argv contract" \
+    || fail "goose up argv or environment contract changed"
+
+cat > "$tmpdir/expected-goose-status" <<'EOF'
+run
+--rm
+--add-host=host.docker.internal:host-gateway
+-e
+HOST=host.docker.internal:3306
+-e
+DBNAME=tenant_acme
+-e
+DBUSER=usr_acme
+-e
+PASSWORD=pw123
+--entrypoint
+/app/migrate
+example/api:v1
+status
+EOF
+goose_run example/api:v1 status host.docker.internal 3306 tenant_acme usr_acme pw123
+cmp -s "$tmpdir/expected-goose-status" "$tmpdir/goose-args" \
+    && pass "goose status uses the exact read-only /app/migrate argv contract" \
+    || fail "goose status argv or environment contract changed"
+
+: > "$tmpdir/goose-args"
+if goose_run example/api:v1 migrate host.docker.internal 3306 tenant_acme usr_acme pw123 2>/dev/null; then
+    fail "unsupported goose command was accepted"
+fi
+[ ! -s "$tmpdir/goose-args" ] \
+    && pass "unsupported goose commands are rejected before Docker" \
+    || fail "unsupported goose command reached Docker"
 unset -f docker
 
 echo ""

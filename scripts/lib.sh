@@ -1611,6 +1611,13 @@ EOF
 #   The host is mapped the way the migration container sees it (see mysql_host_for_container).
 goose_run() {
     local image="$1" command="$2" host="$3" port="$4" db="$5" user="$6" password="$7"
+    case "$command" in
+        up|status) ;;
+        *)
+            echo "[✗] Unsupported goose migration command '$command'; expected up or status." >&2
+            return 2
+            ;;
+    esac
     host="$(mysql_host_for_container "$host")"
     docker run --rm --add-host=host.docker.internal:host-gateway \
         -e "HOST=${host}:${port}" -e "DBNAME=${db}" \

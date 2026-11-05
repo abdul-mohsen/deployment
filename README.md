@@ -300,6 +300,9 @@ the last-known-good fields. Backend updates run goose (`/app/migrate up`) from
 the target image against the tenant DB before the Dokku swap. A migration or verification failure
 therefore cannot be reported as a successful deployment, and a later
 component failure restores earlier components where a prior image exists.
+The shared migration helper accepts only `/app/migrate up` for schema changes
+and read-only `/app/migrate status`; unsupported migration commands are refused
+before Docker is invoked.
 
 The checks require a running Docker daemon, a reachable Dokku container,
 `curl` or `wget` inside the Dokku container, and MySQL access for the master

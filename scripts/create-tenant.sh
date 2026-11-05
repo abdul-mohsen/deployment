@@ -21,6 +21,7 @@
 #   --backend-port <port>     Port the backend listens on (default: 3000)
 #   --frontend-port <port>    Port the frontend listens on (default: 80)
 #   --no-database             Skip database creation
+#   --adopt-existing         Explicitly adopt an existing tenant DB or registry row
 #   --env KEY=VALUE           Set application env var (repeatable; reserved
 #                             deployment keys are rejected; see REQUIREMENTS.md)
 #   --dry-run                 Show plan without executing
@@ -89,6 +90,7 @@ FRONTEND_IMAGE=""
 BACKEND_PORT="8090"
 FRONTEND_PORT="8000"
 NO_DATABASE=false
+ADOPT_EXISTING=false
 DRY_RUN=false
 FORCE_UPDATE=false
 DB_BACKUP_ID=""
@@ -253,6 +255,7 @@ while [[ $# -gt 0 ]]; do
         --backend-port)   BACKEND_PORT="$2"; shift 2 ;;
         --frontend-port)  FRONTEND_PORT="$2"; shift 2 ;;
         --no-database)    NO_DATABASE=true; shift ;;
+        --adopt-existing) ADOPT_EXISTING=true; shift ;;
         --env)
             [ "$#" -ge 2 ] || { error "--env requires KEY=VALUE"; exit 1; }
             ENV_VARS+=("$2")
@@ -320,6 +323,7 @@ STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
 
 BACKEND_APP="${TENANT_NAME}-backend"
 FRONTEND_APP="${TENANT_NAME}-frontend"
+TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
 TENANT_DOMAIN="${TENANT_NAME}.${BASE_DOMAIN}"
 TENANT_NETWORK="${TENANT_APP_NETWORK:-web}"
 public_protocol >/dev/null || exit 1
@@ -329,6 +333,38 @@ PUBLIC_TENANT_URL="$(public_tenant_url "$TENANT_NAME")" || exit 1
 # seed user registration (bypasses the frontend proxy CSRF).
 export TENANT_NETWORK
 export BACKEND_PORT
+
+# Fresh provisioning must not silently attach a new Dokku tenant to data left
+# by an earlier tenant or partial run. Adoption is explicit and still follows
+# the normal backup -> goose -> verification -> image deployment sequence.
+if $ADOPT_EXISTING && $NO_DATABASE; then
+    error "--adopt-existing requires database provisioning; remove --no-database."
+    exit 1
+fi
+if ! $NO_DATABASE && mysql_admin_configured; then
+    existing_database=false
+    existing_registry=false
+    if tenant_database_exists "$TENANT_DB_NAME"; then
+        existing_database=true
+    elif [ "$?" -ne 1 ]; then
+        error "Could not determine whether tenant database '$TENANT_DB_NAME' exists; refusing provisioning."
+        exit 1
+    fi
+    if tenant_registry_entry_exists "$TENANT_NAME" "$TENANT_DB_NAME"; then
+        existing_registry=true
+    elif [ "$?" -ne 1 ]; then
+        error "Could not determine whether the tenant registry entry exists; refusing provisioning."
+        exit 1
+    fi
+    if [ "$existing_database" = true ] || [ "$existing_registry" = true ]; then
+        if ! $ADOPT_EXISTING; then
+            error "Existing tenant state detected (database=${existing_database}, registry=${existing_registry})."
+            error "Fresh provisioning is refused; pass --adopt-existing only after confirming this data belongs to '$TENANT_NAME'."
+            exit 1
+        fi
+        warn "Explicitly adopting existing tenant state; goose must complete before backend deployment."
+    fi
+fi
 
 # The registry row (step 7) takes its tenant_key from ZATCA's trigger. Refuse before
 # anything is created if zatca_master has not been migrated by ZATCA.
@@ -676,7 +712,6 @@ MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
 MYSQL_TENANT_HOST="${MYSQL_TENANT_HOST:-%}"
 MYSQL_APP_HOST="$(mysql_host_for_container "${MYSQL_HOST:-host.docker.internal}")"
 
-TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
 TENANT_DB_USER="usr_${TENANT_NAME//-/_}"
 DB_PROVISIONED=false
 

@@ -14,6 +14,24 @@ echo "=== syntax ==="
 bash -n scripts/create-tenant.sh && pass "syntax create-tenant.sh"
 
 echo ""
+echo "=== fresh provisioning requires explicit existing-state adoption ==="
+grep -q -- '--adopt-existing' scripts/create-tenant.sh \
+    || fail "create-tenant does not expose --adopt-existing"
+grep -q 'tenant_database_exists "\$TENANT_DB_NAME"' scripts/create-tenant.sh \
+    || fail "create-tenant does not check existing tenant database state"
+grep -q 'tenant_registry_entry_exists "\$TENANT_NAME" "\$TENANT_DB_NAME"' scripts/create-tenant.sh \
+    || fail "create-tenant does not check existing registry state"
+grep -q 'Fresh provisioning is refused' scripts/create-tenant.sh \
+    || fail "create-tenant does not refuse ambiguous existing state"
+grep -q -- '--adopt-existing requires database provisioning' scripts/create-tenant.sh \
+    || fail "create-tenant does not reject contradictory adoption flags"
+app_create_line="$(grep -n 'create_dokku_app "\$BACKEND_APP"' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
+state_guard_line="$(grep -n 'tenant_database_exists "\$TENANT_DB_NAME"' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
+[ -n "$app_create_line" ] && [ -n "$state_guard_line" ] && [ "$state_guard_line" -lt "$app_create_line" ] \
+    || fail "existing-state guard runs after Dokku app creation"
+pass "fresh provisioning is guarded before Dokku side effects and adoption is explicit"
+
+echo ""
 echo "=== tenant operation logs redact secret env values ==="
 redaction_tmpdir="$REPO_DIR/.test-create-tenant-redaction.$$"
 mkdir -p "$redaction_tmpdir/logs"

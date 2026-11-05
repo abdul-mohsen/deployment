@@ -121,6 +121,13 @@ fi
 [ ! -s "$tmpdir/goose-args" ] \
     && pass "unsupported goose commands are rejected before Docker" \
     || fail "unsupported goose command reached Docker"
+: > "$tmpdir/goose-args"
+if goose_run example/api:v1 down host.docker.internal 3306 tenant_acme usr_acme pw123 2>/dev/null; then
+    fail "destructive goose down command was accepted"
+fi
+[ ! -s "$tmpdir/goose-args" ] \
+    && pass "destructive goose down is rejected before Docker" \
+    || fail "destructive goose down reached Docker"
 unset -f docker
 
 echo ""
@@ -130,6 +137,14 @@ run_mysql() {
     case "$*" in
         *"information_schema.columns"*) echo "${STUB_COLUMNS:-1}" ;;
         *"information_schema.triggers"*) echo "${STUB_TRIGGERS:-1}" ;;
+        *"information_schema.schemata"*)
+            [ "${STUB_DB_QUERY_FAIL:-0}" = "1" ] && return 1
+            echo "${STUB_DB_EXISTS:-0}"
+            ;;
+        *"FROM tenant WHERE name="*)
+            [ "${STUB_REGISTRY_QUERY_FAIL:-0}" = "1" ] && return 1
+            echo "${STUB_REGISTRY_EXISTS:-0}"
+            ;;
     esac
 }
 if STUB_COLUMNS=1 STUB_TRIGGERS=1 require_registry_tenant_key 2>/dev/null; then
@@ -153,6 +168,44 @@ if printf '%s' "$refusal" | grep -q "Apply ZATCA's zatca_master migrations first
 else
     fail "refusal must name ZATCA's zatca_master migrations"
 fi
+
+echo ""
+echo "=== existing tenant state detection is read-only and fail-closed ==="
+if tenant_database_exists tenant_acme; then
+    fail "absent tenant database was reported as existing"
+else
+    [ "$?" -eq 1 ] || fail "absent tenant database did not return the empty-state code"
+fi
+STUB_DB_EXISTS=1
+tenant_database_exists tenant_acme \
+    && pass "existing tenant database is detected" \
+    || fail "existing tenant database was not detected"
+unset STUB_DB_EXISTS
+if tenant_registry_entry_exists acme tenant_acme; then
+    fail "absent tenant registry row was reported as existing"
+else
+    [ "$?" -eq 1 ] || fail "absent tenant registry row did not return the empty-state code"
+fi
+STUB_REGISTRY_EXISTS=1
+tenant_registry_entry_exists acme tenant_acme \
+    && pass "existing tenant registry row is detected" \
+    || fail "existing tenant registry row was not detected"
+unset STUB_REGISTRY_EXISTS
+STUB_DB_QUERY_FAIL=1
+if tenant_database_exists tenant_acme; then
+    fail "database query failure was treated as an existing/absent result"
+else
+    [ "$?" -eq 2 ] || fail "database query failure did not fail closed"
+fi
+unset STUB_DB_QUERY_FAIL
+STUB_REGISTRY_QUERY_FAIL=1
+if tenant_registry_entry_exists acme tenant_acme; then
+    fail "registry query failure was treated as an existing/absent result"
+else
+    [ "$?" -eq 2 ] || fail "registry query failure did not fail closed"
+fi
+unset STUB_REGISTRY_QUERY_FAIL
+pass "existing tenant state checks distinguish absent, present, and query failure"
 unset -f run_mysql
 
 echo "=== MySQL admin credential resolution ==="

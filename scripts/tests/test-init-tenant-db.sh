@@ -145,6 +145,53 @@ grep -q 'UPDATE company SET tenant_key =.*WHERE id = 1' scripts/init-tenant-db.s
 pass "existing-data required tables and registry tenant_key remain after goose"
 
 echo ""
+echo "=== chain-owner schema contract is read-only and follows goose ==="
+chain_definition_line="$(grep -n '^validate_chain_owner_schema()' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+chain_call_line="$(grep -n '^    validate_chain_owner_schema$' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+[ -n "$chain_definition_line" ] && [ -n "$chain_call_line" ] \
+    || fail "chain-owner schema validation is missing"
+[ "$goose_line" -lt "$validate_line" ] &&
+    [ "$validate_line" -lt "$chain_call_line" ] &&
+    [ "$chain_call_line" -lt "$key_line" ] \
+    || fail "chain-owner schema validation is not ordered between goose and tenant-key propagation"
+for column in \
+    last_icv \
+    previous_invoice_hash \
+    icv_reservation_key \
+    icv_reservation_token \
+    reserved_icv \
+    reservation_lease_expires_at; do
+    grep -q "SELECT '${column}'" scripts/init-tenant-db.sh \
+        || fail "chain-owner column is not validated: $column"
+done
+for column in \
+    id bill_id branch_id status outcome_state invoice_icv previous_invoice_hash \
+    invoice_uuid invoice_hash invoice_kind signed_xml provider_code \
+    rejection_code rejection_msg provider_warning_message submitted_at outcome_at; do
+    grep -q "SELECT '${column}'" scripts/init-tenant-db.sh \
+        || fail "zatca_submission column is not validated: $column"
+done
+for column in \
+    pos_id bill_request_id event_id egs_sequence_id fingerprint state \
+    lease_expires_at completed_at; do
+    grep -q "SELECT '${column}'" scripts/init-tenant-db.sh \
+        || fail "zatca_consumer_claim column is not validated: $column"
+done
+grep -q "table_name='zatca_submission'" scripts/init-tenant-db.sh \
+    || fail "zatca_submission metadata is not validated"
+for index_name in uq_zatca_invoice_chain uq_zatca_bill uq_zatca_invoice_uuid; do
+    grep -q "index_name='${index_name}'" scripts/init-tenant-db.sh \
+        || fail "zatca_submission unique key is not validated: $index_name"
+done
+grep -q "table_name='zatca_consumer_claim'" scripts/init-tenant-db.sh \
+    || fail "zatca_consumer_claim table is not validated"
+if sed -n "${chain_definition_line},$((chain_call_line - 1))p" scripts/init-tenant-db.sh |
+    grep -qE 'CREATE[[:space:]]+TABLE|ALTER[[:space:]]+TABLE|INSERT[[:space:]]+INTO'; then
+    fail "chain-owner validation contains deployment-owned DDL or writes"
+fi
+pass "fresh/existing tenants validate the read-only chain-owner schema after goose"
+
+echo ""
 echo "=== status mode remains read-only ==="
 status_line="$(grep -n 'if \$STATUS_ONLY; then' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
 status_exit_line="$(grep -n '^    exit \$?' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"

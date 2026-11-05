@@ -1625,6 +1625,35 @@ goose_run() {
         --entrypoint /app/migrate "$image" "$command"
 }
 
+# tenant_database_exists <db>
+#   Read-only check used by fresh tenant provisioning. A query failure is an
+#   error, not an "absent" database, so callers can fail closed.
+tenant_database_exists() {
+    local db="$1" db_sql result
+    db_sql="${db//\'/\'\'}"
+    if ! result="$(run_mysql -N -B -e \
+        "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name='${db_sql}';" |
+        awk 'NF { print $1; exit }')"; then
+        return 2
+    fi
+    [ "$result" = "1" ]
+}
+
+# tenant_registry_entry_exists <tenant-name> <db>
+#   Read-only check for either side of a master-registry entry. Matching by
+#   both name and db_name catches partial provisioning without mutating state.
+tenant_registry_entry_exists() {
+    local tenant="$1" db="$2" tenant_sql db_sql result
+    tenant_sql="${tenant//\'/\'\'}"
+    db_sql="${db//\'/\'\'}"
+    if ! result="$(run_mysql -N -B "${MYSQL_MASTER_DB:-zatca_master}" -e \
+        "SELECT COUNT(*) FROM tenant WHERE name='${tenant_sql}' OR db_name='${db_sql}';" |
+        awk 'NF { print $1; exit }')"; then
+        return 2
+    fi
+    [ "$result" = "1" ]
+}
+
 # tenant_registry_key <db>
 #   Prints zatca_master.tenant.tenant_key for the tenant DB. Fails if it is empty.
 tenant_registry_key() {

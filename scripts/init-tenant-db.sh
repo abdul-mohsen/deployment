@@ -161,6 +161,147 @@ validate_tenant_schema() {
     info "Tenant schema verified: required base tables exist."
 }
 
+# tenant_missing_chain_owner_columns
+#   Read-only contract check for the backend/ZATCA chain schema. The ZATCA
+#   daemon owns reservation/commit writes; deployment only verifies metadata
+#   after the target image's goose migrations complete.
+tenant_missing_chain_owner_columns() {
+    local missing
+    missing="$(run_tenant_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT required.name FROM (
+            SELECT 'last_icv' AS name
+            UNION ALL SELECT 'previous_invoice_hash'
+            UNION ALL SELECT 'icv_reservation_key'
+            UNION ALL SELECT 'icv_reservation_token'
+            UNION ALL SELECT 'reserved_icv'
+            UNION ALL SELECT 'reservation_lease_expires_at'
+        ) required
+        LEFT JOIN information_schema.columns existing
+          ON existing.table_schema=DATABASE()
+         AND existing.table_name='branch_zatca_config'
+         AND existing.column_name=required.name
+        WHERE existing.column_name IS NULL;")" \
+        || return 1
+    printf '%s\n' "$missing" | paste -sd ',' -
+}
+
+tenant_missing_chain_submission_columns() {
+    local missing
+    missing="$(run_tenant_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT required.name FROM (
+            SELECT 'id' AS name
+            UNION ALL SELECT 'bill_id'
+            UNION ALL SELECT 'branch_id'
+            UNION ALL SELECT 'status'
+            UNION ALL SELECT 'outcome_state'
+            UNION ALL SELECT 'invoice_icv'
+            UNION ALL SELECT 'previous_invoice_hash'
+            UNION ALL SELECT 'invoice_uuid'
+            UNION ALL SELECT 'invoice_hash'
+            UNION ALL SELECT 'invoice_kind'
+            UNION ALL SELECT 'signed_xml'
+            UNION ALL SELECT 'provider_code'
+            UNION ALL SELECT 'rejection_code'
+            UNION ALL SELECT 'rejection_msg'
+            UNION ALL SELECT 'provider_warning_message'
+            UNION ALL SELECT 'submitted_at'
+            UNION ALL SELECT 'outcome_at'
+        ) required
+        LEFT JOIN information_schema.columns existing
+          ON existing.table_schema=DATABASE()
+         AND existing.table_name='zatca_submission'
+         AND existing.column_name=required.name
+        WHERE existing.column_name IS NULL;")" \
+        || return 1
+    printf '%s\n' "$missing" | paste -sd ',' -
+}
+
+tenant_missing_consumer_claim_columns() {
+    local missing
+    missing="$(run_tenant_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT required.name FROM (
+            SELECT 'pos_id' AS name
+            UNION ALL SELECT 'bill_request_id'
+            UNION ALL SELECT 'event_id'
+            UNION ALL SELECT 'egs_sequence_id'
+            UNION ALL SELECT 'fingerprint'
+            UNION ALL SELECT 'state'
+            UNION ALL SELECT 'lease_expires_at'
+            UNION ALL SELECT 'completed_at'
+        ) required
+        LEFT JOIN information_schema.columns existing
+          ON existing.table_schema=DATABASE()
+         AND existing.table_name='zatca_consumer_claim'
+         AND existing.column_name=required.name
+        WHERE existing.column_name IS NULL;")" \
+        || return 1
+    printf '%s\n' "$missing" | paste -sd ',' -
+}
+
+tenant_chain_submission_unique_count() {
+    run_tenant_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT COUNT(*) FROM (
+            SELECT index_name,
+                   GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ',') AS column_names
+            FROM information_schema.statistics
+            WHERE table_schema=DATABASE()
+              AND table_name='zatca_submission'
+              AND non_unique=0
+            GROUP BY index_name
+        ) chain_indexes
+        WHERE (index_name='uq_zatca_invoice_chain' AND column_names='branch_id,invoice_icv')
+           OR (index_name='uq_zatca_bill' AND column_names='bill_id')
+           OR (index_name='uq_zatca_invoice_uuid' AND column_names='invoice_uuid');"
+}
+
+validate_chain_owner_schema() {
+    if $DRY_RUN; then
+        return 0
+    fi
+
+    local missing submission_missing claim_missing unique_count
+    missing="$(tenant_missing_chain_owner_columns)" || {
+        error "Could not read chain-owner schema metadata in ${TENANT_DB_NAME}."
+        return 1
+    }
+    if [ -n "$missing" ]; then
+        error "Chain-owner schema is incomplete in ${TENANT_DB_NAME}; missing branch_zatca_config columns: $missing"
+        error "Backend goose/ZATCA migrations must provide this contract; deployment does not create or repair it."
+        return 1
+    fi
+
+    submission_missing="$(tenant_missing_chain_submission_columns)" || {
+        error "Could not read zatca_submission schema metadata in ${TENANT_DB_NAME}."
+        return 1
+    }
+    if [ -n "$submission_missing" ]; then
+        error "Chain-owner schema is incomplete in ${TENANT_DB_NAME}; missing zatca_submission columns: $submission_missing"
+        error "Backend goose/ZATCA migrations must provide this contract; deployment does not create or repair it."
+        return 1
+    fi
+
+    claim_missing="$(tenant_missing_consumer_claim_columns)" || {
+        error "Could not read zatca_consumer_claim schema metadata in ${TENANT_DB_NAME}."
+        return 1
+    }
+    if [ -n "$claim_missing" ]; then
+        error "Chain-owner schema is incomplete in ${TENANT_DB_NAME}; missing zatca_consumer_claim columns: $claim_missing"
+        error "Backend goose/ZATCA migrations must provide this contract; deployment does not create or repair it."
+        return 1
+    fi
+
+    unique_count="$(tenant_chain_submission_unique_count)" || {
+        error "Could not read zatca_submission uniqueness metadata in ${TENANT_DB_NAME}."
+        return 1
+    }
+    if [ "$unique_count" != "3" ]; then
+        error "Chain-owner schema in ${TENANT_DB_NAME} is missing one or more zatca_submission unique keys."
+        error "Backend goose/ZATCA migrations must provide this contract; deployment does not create or repair it."
+        return 1
+    fi
+    info "Chain-owner schema verified: branch reservations, submission outcome/chain fields and keys, and consumer claims are present."
+}
+
 ensure_tenant_database() {
     if $DRY_RUN; then
         info "Would ensure database exists: $TENANT_DB_NAME"
@@ -370,6 +511,7 @@ apply_schema() {
     fi
 
     validate_tenant_schema
+    validate_chain_owner_schema
     ensure_company_tenant_key
 }
 

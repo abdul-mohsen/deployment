@@ -143,9 +143,29 @@ Rules learned the hard way:
 - Existing-tenant schema replay uses the tenant's `DB_USER`/`DB_PASSWORD`
   account and does not require `MYSQL_ADMIN_PASSWORD`; the deployment account
   is needed only when a tenant database or user must be provisioned.
+- Fresh `create-tenant.sh` provisioning refuses an existing tenant database or
+  master-registry row before creating Dokku apps or mutating MySQL. Use
+  `--adopt-existing` only after confirming that the state belongs to the
+  requested tenant; adoption still runs the verified backup and goose migration
+  before the backend image starts. `--update` remains the separate acknowledgement
+  for existing Dokku apps.
 - Schema changes are forward-only. A backend rollback across a schema change needs a
   restore first, and `rollback-tenant.sh` requires `--confirm-schema-compatible` for a
   backend rollback.
+- Deployment never names backend migration files or versions; removed or
+  modified migration SQL is not recreated here. The backend image owns the
+  contiguous goose sequence `00001..00010`, including chain-owner migrations
+  and the idempotent `00008` existing-data backfill. Deployment must not
+  remove or renumber `00005`/`00008`; it only runs the target image's goose
+  command and validates the final metadata contract.
+- The ZATCA daemon's `queue.SQLChain` owns runtime ICV reservation/commit
+  behavior. Deployment only verifies the read-only chain schema contract:
+  `branch_zatca_config` contains `last_icv`, `previous_invoice_hash`, all four
+  reservation columns, and `zatca_submission` has a unique
+  `(branch_id, invoice_icv)` key plus its chain/outcome/signed-XML columns and
+  the `zatca_consumer_claim` claim columns.
+  Deployment never references removed `pkg/egschain` code or writes these
+  chain-owned fields.
 - Tenant image updates resolve tags to OCI digests, require the canonical
   BuildIdentity labels, pass `APP_IMAGE_VERSION`/`APP_IMAGE_COMMIT`,
   `APP_IMAGE_CHANNEL`, `APP_IMAGE_REF`, `APP_IMAGE_DIGEST`,

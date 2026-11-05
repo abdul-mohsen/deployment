@@ -68,6 +68,42 @@ grep -q -- '--confirm-schema-compatible' scripts/rollback-tenant.sh \
 pass "deploy-all runs goose; rollback-tenant runs no goose and requires --confirm-schema-compatible"
 
 echo
+echo "=== backend migration sequence and chain ownership stay image-owned ==="
+for path in scripts/create-tenant.sh scripts/init-tenant-db.sh \
+    scripts/update-tenant.sh scripts/deploy-all.sh scripts/rollback-tenant.sh \
+    templates; do
+    if grep -R -n -E 'pkg/egschain|queue\.SQLChain|branch_zatca_config.*(INSERT|UPDATE)|zatca_submission.*(INSERT|UPDATE)' "$path"; then
+        fail "deployment claims chain runtime ownership in $path"
+    fi
+done
+grep -q 'goose (`/app/migrate up`) from' README.md \
+    || fail "README does not state that the backend image owns goose migrations"
+grep -q 'queue.SQLChain.*owns runtime' README.md &&
+    grep -q 'reservation/commit behavior' README.md \
+    || fail "README does not state the ZATCA runtime chain owner"
+grep -q 'references the removed `pkg/egschain` path' README.md \
+    || fail "README does not state the removed chain implementation boundary"
+grep -q 'validate_chain_owner_schema' scripts/init-tenant-db.sh \
+    || fail "deployment does not validate the final chain-owner schema"
+grep -q 'goose migrations from .*backend image' scripts/create-tenant.sh \
+    || fail "create-tenant does not document image-owned goose migration execution"
+grep -q 'goose migrations failed' scripts/init-tenant-db.sh \
+    || fail "existing-data migration failure is not fail-closed"
+pass "backend migration sequence/backfill and chain ownership remain image-owned"
+
+echo
+echo "=== adoption still migrates existing data before backend startup ==="
+adoption_line="$(grep -n 'Explicitly adopting existing tenant state' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
+create_schema_line="$(grep -n 'init-tenant-db.sh" "\$TENANT_NAME" \\' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
+create_backend_line="$(grep -n 'deploy_verified_component backend "\$BACKEND_IMAGE"' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
+[ -n "$adoption_line" ] && [ -n "$create_schema_line" ] && [ -n "$create_backend_line" ] \
+    || fail "adoption migration/startup contract is incomplete"
+[ "$adoption_line" -lt "$create_schema_line" ] &&
+    [ "$create_schema_line" -lt "$create_backend_line" ] \
+    || fail "adoption can deploy backend before goose"
+pass "explicit adoption preserves goose-before-backend-start ordering"
+
+echo
 echo "=== goose status contract ==="
 grep -q -- '--entrypoint /app/migrate' scripts/lib.sh \
     || fail "goose helper does not use the backend migration entrypoint"
@@ -85,6 +121,8 @@ grep -q 'goose_run "\$image" status' scripts/init-tenant-db.sh \
     || fail "migration status is not read from goose"
 grep -q 'migration-status.sh' scripts/deployctl.sh \
     || fail "migration-status deployctl command is missing"
+! grep -R -n -E 'goose_run .*down|/app/migrate.*down|--down' scripts/*.sh \
+    || fail "deployment scripts contain a destructive goose down path"
 pass "goose migration status contract is present"
 
 echo

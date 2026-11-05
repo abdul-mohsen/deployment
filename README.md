@@ -304,6 +304,20 @@ is refused and the verified backup must be restored explicitly before retrying.
 The shared migration helper accepts only `/app/migrate up` for schema changes
 and read-only `/app/migrate status`; unsupported migration commands are refused
 before Docker is invoked.
+Deployment does not enumerate backend migration filenames or assume contiguous
+versions; the backend image owns its contiguous goose sequence, including the
+chain-owner migrations and existing-data backfills. After goose, deployment
+verifies the read-only chain-owner metadata contract (`branch_zatca_config`
+reservation columns and the `zatca_submission` `(branch_id, invoice_icv)`
+unique key, its outcome/signed-XML fields, and the
+`zatca_consumer_claim` claim fields) without creating or updating those
+structures. The ZATCA daemon's `queue.SQLChain` owns runtime
+reservation/commit behavior; deployment never
+references the removed `pkg/egschain` path. Fresh `create-tenant.sh`
+provisioning refuses an existing tenant database or registry row unless
+`--adopt-existing` is supplied explicitly. Adoption still takes the verified
+backup and runs goose before the backend image starts; `--update` remains the
+separate guard for existing Dokku apps.
 
 The checks require a running Docker daemon, a reachable Dokku container,
 `curl` or `wget` inside the Dokku container, and MySQL access for the master

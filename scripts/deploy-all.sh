@@ -276,11 +276,16 @@ deploy_one() {
         "$(printf '%s' "$previous_identity" | cut -f2)" "verified" "" \
         "$backup_id" "$backup_artifact" 2>/dev/null; then
         error "${app}: failed to record successful deployment audit"
-        if [ -n "$previous_image" ]; then
-            dokku_git_from_image "$app" "$previous_image" || true
+        if [ "$migrations_attempted" = true ]; then
+            error "${app}: automatic rollback refused after migration; image rollback cannot restore migrated DB schema/data."
+            error "Restore backup ${backup_id} (${backup_artifact}) explicitly before retry."
+        else
+            if [ -n "$previous_image" ]; then
+                dokku_git_from_image "$app" "$previous_image" || true
+            fi
+            restore_runtime_config "$app"
+            restore_previous_identity "$tenant" "$APP_TYPE" "$previous_identity"
         fi
-        restore_runtime_config "$app"
-        restore_previous_identity "$tenant" "$APP_TYPE" "$previous_identity"
         tenant_record_failure "$tenant" "$APP_TYPE" "deployment audit completion failed" 2>/dev/null || true
         return 1
     fi

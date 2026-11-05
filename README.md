@@ -298,8 +298,9 @@ The last verified identity is stored per component in `deployment_state.tenant_i
 failed attempts are recorded in `deployment_state.tenant_deployment_audit` without replacing
 the last-known-good fields. Backend updates run goose (`/app/migrate up`) from
 the target image against the tenant DB before the Dokku swap. A migration or verification failure
-therefore cannot be reported as a successful deployment, and a later
-component failure restores earlier components where a prior image exists.
+therefore cannot be reported as a successful deployment. Before migrations run, a failed
+component may restore its prior image/config; after migrations run, automatic image rollback
+is refused and the verified backup must be restored explicitly before retrying.
 The shared migration helper accepts only `/app/migrate up` for schema changes
 and read-only `/app/migrate status`; unsupported migration commands are refused
 before Docker is invoked.

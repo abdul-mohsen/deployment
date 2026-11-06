@@ -689,6 +689,11 @@ SQLEOF
     fi
 fi
 
+# ---- 7b. Optional OpenObserve application wiring --------------------------
+# The shared helper keeps telemetry opt-in and fails open if the collector
+# network is unavailable.
+openobserve_reconcile_tenant_apps "$TENANT_NAME" "$BACKEND_APP" "$FRONTEND_APP" || true
+
 # ---- 8. Health checks ----
 # Modern Dokku (>= 0.30) uses an app-root CHECKS file or app.json for HTTP
 # path checks; the legacy `checks:set <app> web http-path=...` form was

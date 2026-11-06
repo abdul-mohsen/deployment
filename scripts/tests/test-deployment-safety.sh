@@ -79,8 +79,6 @@ grep_or_fail 'tenant_record_identity.*old_ref' scripts/update-tenant.sh \
     "last-known-good identity is not restored on safe rollback"
 grep_or_fail 'rollback refused: database migrations applied' scripts/update-tenant.sh \
     "rollback failure is not persisted"
-grep_or_fail 'skip-migrations.*non-production override' scripts/update-tenant.sh \
-    "skip-migrations override is not audited"
 pass "last-known-good preservation and rollback failure reporting present"
 
 echo

@@ -207,6 +207,30 @@ app_version_response() {
     printf '%s' "$response"
 }
 
+runtime_health_check() {
+    local app="$1" path="${2:-/healthz}" container="${DOKKU_CONTAINER:-dokku}" port
+    port="$(dokku_app_port "$app")"
+    docker exec -i "$container" sh -lc \
+        "curl -fsS --max-time 10 http://${app}.web:${port}${path} >/dev/null" \
+        2>/dev/null && return 0
+    docker exec -i "$container" sh -lc \
+        "wget -qO- -T 10 http://${app}.web:${port}${path} >/dev/null" \
+        2>/dev/null
+}
+
+wait_for_runtime_health() {
+    local app="$1" path="${2:-/healthz}"
+    local retries="${3:-${TENANT_VERIFY_RETRIES:-15}}"
+    local delay="${4:-${TENANT_VERIFY_DELAY:-2}}" attempt
+    for ((attempt=1; attempt<=retries; attempt++)); do
+        if runtime_health_check "$app" "$path"; then
+            return 0
+        fi
+        [ "$attempt" -lt "$retries" ] && sleep "$delay"
+    done
+    return 1
+}
+
 verify_runtime_identity() {
     local app="$1" expected_version="$2" expected_commit="$3"
     local expected_digest="$4" expected_ref="$5" expected_channel="$6"

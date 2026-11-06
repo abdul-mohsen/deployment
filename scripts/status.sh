@@ -322,9 +322,10 @@ tenant_pin() {
         echo "|"; return
     fi
     run_mysql -N -B -e \
-        "SELECT IFNULL(backend_image,''), IFNULL(frontend_image,''), enabled
-           FROM \`${MYSQL_MASTER_DB}\`.tenant
-          WHERE name='${name//\'/}' LIMIT 1;" 2>/dev/null \
+        "SELECT IFNULL(i.backend_image,''), IFNULL(i.frontend_image,''), t.enabled
+           FROM \`${MYSQL_MASTER_DB}\`.tenant t
+           LEFT JOIN \`${DEPLOY_STATE_DB}\`.tenant_image i ON i.name = t.name
+          WHERE t.name='${name//\'/}' LIMIT 1;" 2>/dev/null \
         | awk -F'\t' '{printf "%s|%s|%s", $1, $2, $3}'
 }
 

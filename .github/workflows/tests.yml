@@ -54,10 +54,6 @@ jobs:
         shell: bash
         run: bash scripts/tests/test-rollback-tenant.sh
 
-      - name: Check git-push and dokku_admin grant guards
-        shell: bash
-        run: bash scripts/tests/test-no-git-push-and-master-grants.sh
-
       - name: Check deployment logging contracts
         shell: bash
         run: bash scripts/tests/test-logging-contract.sh

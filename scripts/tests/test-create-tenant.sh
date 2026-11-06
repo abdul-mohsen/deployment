@@ -14,6 +14,27 @@ echo "=== syntax ==="
 bash -n scripts/create-tenant.sh && pass "syntax create-tenant.sh"
 
 echo ""
+echo "=== fresh provisioning never silently adopts tenant state ==="
+grep -q 'tenant_database_exists "\$TENANT_DB_NAME"' scripts/create-tenant.sh \
+    || fail "create-tenant does not check for an existing tenant database"
+grep -q 'tenant_registry_entry_exists "\$TENANT_NAME" "\$TENANT_DB_NAME"' scripts/create-tenant.sh \
+    || fail "create-tenant does not check for an existing registry row"
+grep -q 'Fresh provisioning refuses to adopt existing state' scripts/create-tenant.sh \
+    || fail "create-tenant does not fail closed on existing state"
+if grep -q -- '--adopt-existing\|ADOPT_EXISTING' scripts/create-tenant.sh; then
+    fail "create-tenant exposes an adoption bypass"
+fi
+pass "fresh provisioning is no-adoption by default"
+
+echo ""
+echo "=== startup health checks use the backend health endpoint ==="
+grep -q "echo '/healthz' > /home/dokku/\${BACKEND_APP}/CHECKS" scripts/create-tenant.sh \
+    || fail "backend startup CHECKS path is not /healthz"
+grep -q 'wait_for_runtime_health "\$BACKEND_APP" "/healthz"' scripts/create-tenant.sh \
+    || fail "create-tenant does not block on backend startup health"
+pass "backend startup health is required before provisioning continues"
+
+echo ""
 echo "=== tenant operation logs redact secret env values ==="
 redaction_tmpdir="$REPO_DIR/.test-create-tenant-redaction.$$"
 mkdir -p "$redaction_tmpdir/logs"

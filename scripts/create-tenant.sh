@@ -252,6 +252,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Reject deployment-owned or malformed overrides before they are displayed,
+# applied to Dokku, or used by tenant seed commands.
+if ! validate_tenant_env_overrides "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; then
+    error "Refusing invalid or reserved --env override."
+    exit 1
+fi
+
 # ---- Validate ----
 if [ -z "$TENANT_NAME" ]; then
     echo "Usage: $0 <tenant-name> [options]"

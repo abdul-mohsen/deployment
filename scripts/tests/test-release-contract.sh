@@ -41,8 +41,8 @@ contains dashboard/internal/web/web.go 'Write([]byte("ok"))' \
     "dashboard /healthz returns ok"
 contains scripts/create-tenant.sh "echo '/healthz' >" \
     "tenant checks use /healthz"
-contains scripts/deploy-all.sh 'HEALTH_URL}/healthz' \
-    "deploy health probes use /healthz"
+contains scripts/deploy-all.sh 'wait_for_runtime_health "$FIRST" "$HEALTH_PATH"' \
+    "deploy health probes block on the required runtime health endpoint"
 contains scripts/status.sh 'path="/healthz"' \
     "status health probes use /healthz"
 contains templates/backend/Dockerfile 'http://localhost:3000/healthz' \
@@ -156,12 +156,12 @@ contains .github/workflows/dashboard-image.yml "'scripts/**'" \
     "dashboard image rebuilds when deployment scripts change"
 contains scripts/backup-tenant.sh '--no-tablespaces' \
     "database backups avoid requiring PROCESS for tablespaces"
-contains scripts/init-tenant-db.sh 'Migration ledger table' \
-    "migration ledger bootstrap verifies its postcondition"
-contains scripts/init-tenant-db.sh 'MIGRATION_DB_USER' \
-    "migration replay supports dedicated DDL credentials"
-contains scripts/init-tenant-db.sh 'refusing to skip migration replay' \
-    "migration replay fails closed when the image has no readable migration directory"
+contains scripts/init-tenant-db.sh 'goose_run "$image" up' \
+    "tenant schema changes run through the Goose migration entrypoint"
+contains scripts/lib.sh '--entrypoint /app/migrate' \
+    "Goose runner uses the backend image migration entrypoint"
+contains scripts/init-tenant-db.sh 'Backend image is required to run goose migrations' \
+    "tenant migration setup fails closed without a backend image"
 
 echo
 echo "=== deploy-all audit failure preserves migrated image/schema compatibility ==="

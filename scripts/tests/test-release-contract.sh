@@ -13,6 +13,13 @@ contains() {
     pass "$description"
 }
 
+not_contains() {
+    local file="$1" text="$2" description="$3" status=0
+    grep -Fq -- "$text" "$file" || status=$?
+    [ "$status" -eq 1 ] || fail "$description"
+    pass "$description"
+}
+
 not_contains_any() {
     local description="$1"
     shift
@@ -42,6 +49,15 @@ contains templates/backend/Dockerfile 'http://localhost:3000/healthz' \
     "backend container healthcheck uses /healthz"
 not_contains_any "legacy /api/health probes are absent" \
     scripts/*.sh templates dashboard REQUIREMENTS.md
+
+echo
+echo "=== Backend build targets ==="
+not_contains templates/backend/Dockerfile './cmd/server' \
+    "backend Dockerfile builds no cmd/server package"
+contains templates/backend/Dockerfile '-o /app/server .' \
+    "backend Dockerfile builds the server from the root package"
+contains templates/backend/Dockerfile './cmd/migrate' \
+    "backend Dockerfile builds the goose runner from cmd/migrate"
 
 echo
 echo "=== BuildIdentity environment and label schema ==="
@@ -146,6 +162,43 @@ contains scripts/init-tenant-db.sh 'MIGRATION_DB_USER' \
     "migration replay supports dedicated DDL credentials"
 contains scripts/init-tenant-db.sh 'refusing to skip migration replay' \
     "migration replay fails closed when the image has no readable migration directory"
+
+echo
+echo "=== deploy-all audit failure preserves migrated image/schema compatibility ==="
+audit_line="$(grep -nF '    if ! tenant_record_audit "$tenant" "$APP_TYPE"' \
+    scripts/deploy-all.sh | tail -1 | cut -d: -f1 || true)"
+[ -n "$audit_line" ] || fail "deploy-all final audit failure block is missing"
+audit_block="$(sed -n "${audit_line},$((audit_line + 20))p" scripts/deploy-all.sh)"
+guard_line="$(printf '%s\n' "$audit_block" |
+    grep -nF 'if [ "$migrations_attempted" = true ]; then' |
+    head -1 | cut -d: -f1 || true)"
+rollback_branch_line="$(printf '%s\n' "$audit_block" |
+    grep -nF '        else' |
+    head -1 | cut -d: -f1 || true)"
+previous_image_guard_line="$(printf '%s\n' "$audit_block" |
+    grep -nF 'if [ -n "$previous_image" ]; then' |
+    head -1 | cut -d: -f1 || true)"
+rollback_line="$(printf '%s\n' "$audit_block" |
+    grep -nF 'dokku_git_from_image "$app" "$previous_image" || true' |
+    head -1 | cut -d: -f1 || true)"
+rollback_count="$(printf '%s\n' "$audit_block" |
+    grep -cF 'dokku_git_from_image "$app" "$previous_image" || true' || true)"
+[ -n "$guard_line" ] && [ -n "$rollback_branch_line" ] &&
+    [ -n "$previous_image_guard_line" ] && [ -n "$rollback_line" ] \
+    || fail "deploy-all audit failure lacks a migration rollback guard"
+[ "$guard_line" -lt "$rollback_branch_line" ] &&
+    [ "$rollback_branch_line" -lt "$previous_image_guard_line" ] &&
+    [ "$previous_image_guard_line" -lt "$rollback_line" ] \
+    || fail "deploy-all previous-image rollback is not confined to the non-migrated branch"
+[ "$rollback_count" -eq 1 ] \
+    || fail "deploy-all audit failure has an unconditional or duplicate previous-image rollback"
+printf '%s\n' "$audit_block" |
+    grep -qF 'automatic rollback refused after migration' \
+    || fail "deploy-all audit failure lacks the post-migration rollback refusal"
+printf '%s\n' "$audit_block" |
+    grep -qF 'Restore backup ${backup_id} (${backup_artifact}) explicitly before retry.' \
+    || fail "deploy-all audit failure lacks restore-before-retry guidance"
+pass "deploy-all preserves migrated image/schema compatibility when audit persistence fails"
 
 contains scripts/tenant-provenance.sh 'BUILD_WORKFLOW_RUN_ID' \
     "tenant provenance reads workflow run identity"

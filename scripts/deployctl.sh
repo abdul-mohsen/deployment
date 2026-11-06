@@ -29,7 +29,7 @@ Areas:
   tenant backup [name|--all]         Dump tenant data
   tenant restore <name> --from <id>  Restore/rollback a tenant to a backup
   tenant backups <list|delete|prune> Manage backup sets (protect/verify/prune)
-  tenant rollback <name> [flags]     Roll back to a previous image
+  tenant rollback <name> [flags]     Roll back to a previous image (backend: --confirm-schema-compatible)
   tenant pin [name] [flags]          Pin or list desired images
   tenant init-db <name> [flags]      Initialize schema and seed users
   tenant migration-status [name]     Check applied/pending/failed migrations

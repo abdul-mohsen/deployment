@@ -211,9 +211,8 @@ validate_tenant_env_override() {
         DB_ADMIN_*|MYSQL_*|MYSQL_PWD)
             reason="database-admin or deployment-managed database key" ;;
 
-        # Schema and migration controls are applied from the selected image.
-        BACKUP_BEFORE_MIGRATION|MIGRATE_CMD|MIGRATION_*|\
-        TENANT_IGNORED_SCHEMA_FILES|TENANT_MIGRATIONS_*|TENANT_SCHEMA_*)
+        # Migrations are run by deployment (goose from the backend image); tenants cannot set them.
+        MIGRATE_CMD|MIGRATION_*)
             reason="migration-control key" ;;
 
         # Prevent a tenant override from changing Docker/Dokku execution.
@@ -1025,89 +1024,6 @@ run_mysql() {
     fi
 }
 
-# Check whether a column exists without relying on the conditional ALTER form,
-# which is not available on all MySQL versions supported by existing
-# installations.
-mysql_column_exists() {
-    local db="$1" table="$2" column="$3" count
-    if [[ ! "$table" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ||
-        ! "$column" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-        echo "Invalid MySQL identifier in schema migration." >&2
-        return 2
-    fi
-
-    count="$(run_mysql "$db" -N -B -e \
-        "SELECT COUNT(*) FROM information_schema.columns
-         WHERE table_schema = DATABASE()
-           AND table_name = '${table}'
-           AND column_name = '${column}'")" || return 2
-    case "$count" in
-        0) printf '0' ;;
-        1) printf '1' ;;
-        *)
-            echo "Unexpected information_schema.columns result for ${table}.${column}: ${count}" >&2
-            return 2
-            ;;
-    esac
-}
-
-mysql_add_column_if_missing() {
-    local db="$1" table="$2" column="$3" definition="$4" exists
-    exists="$(mysql_column_exists "$db" "$table" "$column")" || return
-    case "$exists" in
-        1) return 0 ;;
-        0) run_mysql "$db" -e "ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${definition}" ;;
-        *) echo "Unexpected column existence result for ${table}.${column}: ${exists}" >&2; return 1 ;;
-    esac
-}
-
-# Add the deployment provenance columns needed by both setup and upgrade
-# paths. Each column is checked separately for compatibility with older
-# MySQL servers and partially upgraded installations.
-ensure_tenant_provenance_columns() {
-    local db="$1" column definition
-    local columns=(
-        "backend_image|VARCHAR(255) NOT NULL DEFAULT ''"
-        "frontend_image|VARCHAR(255) NOT NULL DEFAULT ''"
-        "backend_image_ref|VARCHAR(512) NOT NULL DEFAULT ''"
-        "frontend_image_ref|VARCHAR(512) NOT NULL DEFAULT ''"
-        "backend_image_digest|VARCHAR(255) NOT NULL DEFAULT ''"
-        "frontend_image_digest|VARCHAR(255) NOT NULL DEFAULT ''"
-        "backend_channel|VARCHAR(64) NOT NULL DEFAULT ''"
-        "frontend_channel|VARCHAR(64) NOT NULL DEFAULT ''"
-        "backend_version|VARCHAR(128) NOT NULL DEFAULT ''"
-        "frontend_version|VARCHAR(128) NOT NULL DEFAULT ''"
-        "backend_commit|VARCHAR(128) NOT NULL DEFAULT ''"
-        "frontend_commit|VARCHAR(128) NOT NULL DEFAULT ''"
-        "backend_commit_short|VARCHAR(32) NOT NULL DEFAULT ''"
-        "frontend_commit_short|VARCHAR(32) NOT NULL DEFAULT ''"
-        "backend_workflow_run|VARCHAR(128) NOT NULL DEFAULT ''"
-        "frontend_workflow_run|VARCHAR(128) NOT NULL DEFAULT ''"
-        "backend_workflow_run_url|VARCHAR(512) NOT NULL DEFAULT ''"
-        "frontend_workflow_run_url|VARCHAR(512) NOT NULL DEFAULT ''"
-        "backend_built_at|VARCHAR(64) NOT NULL DEFAULT ''"
-        "frontend_built_at|VARCHAR(64) NOT NULL DEFAULT ''"
-        "backend_deployed_at|TIMESTAMP NULL DEFAULT NULL"
-        "frontend_deployed_at|TIMESTAMP NULL DEFAULT NULL"
-        "backend_deployment_status|VARCHAR(32) NOT NULL DEFAULT 'unknown'"
-        "frontend_deployment_status|VARCHAR(32) NOT NULL DEFAULT 'unknown'"
-        "backend_deployment_error|TEXT NULL"
-        "frontend_deployment_error|TEXT NULL"
-    )
-    for definition in "${columns[@]}"; do
-        column="${definition%%|*}"
-        mysql_add_column_if_missing "$db" tenant "$column" "${definition#*|}" || return
-    done
-}
-
-ensure_tenant_audit_columns() {
-    local db="$1"
-    mysql_add_column_if_missing "$db" tenant_deployment_audit \
-        backup_id "VARCHAR(255) NOT NULL DEFAULT ''" || return
-    mysql_add_column_if_missing "$db" tenant_deployment_audit \
-        backup_db_artifact "VARCHAR(512) NOT NULL DEFAULT ''"
-}
-
 # mysqldump (stdout flows to host for piping)
 run_mysqldump() {
     local host user password
@@ -1677,6 +1593,164 @@ write_backup_manifest() {
 }
 
 EOF
+}
+
+# =============================================================================
+# Tenant migrations and registry key
+# =============================================================================
+# Goose is the only migration path: a tenant DB is built by the backend image's
+# /app/migrate command (`up`), run before the new image is deployed. Deployment
+# writes rows only; it never ALTERs or CREATEs tables in zatca_master or in a
+# tenant DB. The backend refuses to start without company.tenant_key, which is
+# copied from zatca_master.tenant.tenant_key and never generated here.
+: "${DEPLOY_STATE_DB:=deployment_state}"
+
+# goose_run <image> <up|status> <host> <port> <db> <user> <password>
+#   Runs /app/migrate from <image> against one tenant DB. cmd/migrate reads only
+#   HOST (host:port), DBNAME, DBUSER and PASSWORD (ifritah-go cmd/migrate/main.go).
+#   The host is mapped the way the migration container sees it (see mysql_host_for_container).
+goose_run() {
+    local image="$1" command="$2" host="$3" port="$4" db="$5" user="$6" password="$7"
+    case "$command" in
+        up|status) ;;
+        *)
+            echo "[✗] Unsupported goose migration command '$command'; expected up or status." >&2
+            return 2
+            ;;
+    esac
+    host="$(mysql_host_for_container "$host")"
+    docker run --rm --add-host=host.docker.internal:host-gateway \
+        -e "HOST=${host}:${port}" -e "DBNAME=${db}" \
+        -e "DBUSER=${user}" -e "PASSWORD=${password}" \
+        --entrypoint /app/migrate "$image" "$command"
+}
+
+# tenant_registry_key <db>
+#   Prints zatca_master.tenant.tenant_key for the tenant DB. Fails if it is empty.
+tenant_registry_key() {
+    local db="$1" key db_sql
+    db_sql="${db//\'/\'\'}"
+    key="$(run_mysql -N -B "${MYSQL_MASTER_DB:-zatca_master}" -e \
+        "SELECT IFNULL(tenant_key, '') FROM tenant WHERE db_name='${db_sql}' LIMIT 1;")" || key=""
+    if [ -z "$key" ]; then
+        echo "[✗] No tenant_key in ${MYSQL_MASTER_DB:-zatca_master}.tenant for ${db}." >&2
+        return 1
+    fi
+    printf '%s' "$key"
+}
+
+tenant_database_exists() {
+    local db="$1" db_sql count
+    db_sql="${db//\'/\'\'}"
+    if ! count="$(run_mysql -N -B -e \
+        "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name='${db_sql}';")"; then
+        return 2
+    fi
+    count="$(printf '%s\n' "$count" | awk 'NF { print $1; exit }')"
+    case "$count" in
+        1) return 0 ;;
+        0) return 1 ;;
+        *) return 2 ;;
+    esac
+}
+
+tenant_registry_entry_exists() {
+    local name="$1" db="$2" name_sql db_sql count
+    name_sql="${name//\'/\'\'}"
+    db_sql="${db//\'/\'\'}"
+    if ! count="$(run_mysql -N -B "${MYSQL_MASTER_DB:-zatca_master}" -e \
+        "SELECT COUNT(*) FROM tenant WHERE name='${name_sql}' OR db_name='${db_sql}';")"; then
+        return 2
+    fi
+    count="$(printf '%s\n' "$count" | awk 'NF { print $1; exit }')"
+    case "$count" in
+        0) return 1 ;;
+        1) return 0 ;;
+        *) return 2 ;;
+    esac
+}
+
+# require_registry_tenant_key
+#   Refuses to create tenant rows unless ZATCA's zatca_master migrations are applied:
+#   tenant.tenant_key must exist and the BEFORE INSERT trigger tenant_key_default must
+#   fill it (zatca_integration migrations/zatca_master/00002_tenant_key.sql). Read-only:
+#   deployment never runs that DDL.
+require_registry_tenant_key() {
+    local master="${MYSQL_MASTER_DB:-zatca_master}" has_column has_trigger
+    has_column="$(run_mysql -N -B -e "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='${master}' AND table_name='tenant' AND column_name='tenant_key';" | awk 'NF { print $1; exit }')"
+    has_trigger="$(run_mysql -N -B -e "SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema='${master}' AND event_object_table='tenant' AND trigger_name='tenant_key_default' AND action_timing='BEFORE' AND event_manipulation='INSERT';" | awk 'NF { print $1; exit }')"
+    if [ "$has_column" != "1" ] || [ "$has_trigger" != "1" ]; then
+        echo "[✗] ${master}.tenant is not ready: it needs column tenant_key and trigger tenant_key_default." >&2
+        echo "    Apply ZATCA's zatca_master migrations first (zatca_integration: migrations/zatca_master, goose)." >&2
+        echo "    This script does not run that DDL." >&2
+        return 1
+    fi
+}
+
+# ensure_deployment_state_schema
+#   Creates the deployment-owned database and its tables if they are missing. These
+#   are the only tables this repo creates; zatca_master and tenant DBs are never
+#   altered here. Pins go in tenant_image, the verified identity of what runs in
+#   tenant_identity (read by status and by rollback), and the deploy log in
+#   tenant_deployment_audit.
+ensure_deployment_state_schema() {
+    run_mysql <<SQL
+CREATE DATABASE IF NOT EXISTS \`${DEPLOY_STATE_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS \`${DEPLOY_STATE_DB}\`.tenant_image (
+    name           VARCHAR(100) NOT NULL PRIMARY KEY COMMENT 'Tenant name, as in zatca_master.tenant.name',
+    backend_image  VARCHAR(255) NOT NULL DEFAULT '' COMMENT 'Per-tenant override (empty = use global latest)',
+    frontend_image VARCHAR(255) NOT NULL DEFAULT '' COMMENT 'Per-tenant override (empty = use global latest)',
+    updated_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS \`${DEPLOY_STATE_DB}\`.tenant_identity (
+    name                      VARCHAR(100) NOT NULL PRIMARY KEY COMMENT 'Tenant name, as in zatca_master.tenant.name',
+    backend_image_ref         VARCHAR(512) NOT NULL DEFAULT '',
+    backend_image_digest      VARCHAR(255) NOT NULL DEFAULT '',
+    backend_channel           VARCHAR(64)  NOT NULL DEFAULT '',
+    backend_version           VARCHAR(128) NOT NULL DEFAULT '',
+    backend_commit            VARCHAR(128) NOT NULL DEFAULT '',
+    backend_commit_short      VARCHAR(32)  NOT NULL DEFAULT '',
+    backend_workflow_run      VARCHAR(128) NOT NULL DEFAULT '',
+    backend_workflow_run_url  VARCHAR(512) NOT NULL DEFAULT '',
+    backend_built_at          VARCHAR(64)  NOT NULL DEFAULT '',
+    backend_deployment_status VARCHAR(32)  NOT NULL DEFAULT 'unknown',
+    frontend_image_ref         VARCHAR(512) NOT NULL DEFAULT '',
+    frontend_image_digest      VARCHAR(255) NOT NULL DEFAULT '',
+    frontend_channel           VARCHAR(64)  NOT NULL DEFAULT '',
+    frontend_version           VARCHAR(128) NOT NULL DEFAULT '',
+    frontend_commit            VARCHAR(128) NOT NULL DEFAULT '',
+    frontend_commit_short      VARCHAR(32)  NOT NULL DEFAULT '',
+    frontend_workflow_run      VARCHAR(128) NOT NULL DEFAULT '',
+    frontend_workflow_run_url  VARCHAR(512) NOT NULL DEFAULT '',
+    frontend_built_at          VARCHAR(64)  NOT NULL DEFAULT '',
+    frontend_deployment_status VARCHAR(32)  NOT NULL DEFAULT 'unknown'
+) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS \`${DEPLOY_STATE_DB}\`.tenant_deployment_audit (
+    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    tenant_name VARCHAR(100) NOT NULL,
+    app_type VARCHAR(16) NOT NULL,
+    requested_image_ref VARCHAR(512) NOT NULL DEFAULT '',
+    resolved_image_ref VARCHAR(512) NOT NULL DEFAULT '',
+    image_digest VARCHAR(255) NOT NULL DEFAULT '',
+    channel VARCHAR(64) NOT NULL DEFAULT '',
+    semantic_version VARCHAR(128) NOT NULL DEFAULT '',
+    commit_sha VARCHAR(128) NOT NULL DEFAULT '',
+    commit_short VARCHAR(32) NOT NULL DEFAULT '',
+    workflow_run VARCHAR(128) NOT NULL DEFAULT '',
+    workflow_run_url VARCHAR(512) NOT NULL DEFAULT '',
+    built_at VARCHAR(64) NOT NULL DEFAULT '',
+    previous_image_ref VARCHAR(512) NOT NULL DEFAULT '',
+    previous_image_digest VARCHAR(255) NOT NULL DEFAULT '',
+    backup_id VARCHAR(255) NOT NULL DEFAULT '',
+    backup_db_artifact VARCHAR(512) NOT NULL DEFAULT '',
+    status VARCHAR(32) NOT NULL,
+    error_message TEXT NULL,
+    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP NULL DEFAULT NULL,
+    INDEX idx_tenant_deployment_audit_tenant (tenant_name, started_at),
+    INDEX idx_tenant_deployment_audit_status (status, started_at)
+) ENGINE=InnoDB;
+SQL
 }
 
 # verified_tenant_db_backup <tenant> [backup-dir]

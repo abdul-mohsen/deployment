@@ -23,7 +23,9 @@
 # Routing behavior:
 #   Every update reconciles the persisted frontend domain, APP_DOMAIN, and
 #   API_URL with the current BASE_DOMAIN. This repairs tenants created before
-#   a base-domain change. Use --routing-only for a URL repair without images;
+#   a base-domain change. The shared routing helper also applies the optional,
+#   private OpenObserve app-network/trace wiring without making telemetry a
+#   deployment prerequisite. Use --routing-only for a URL repair without images;
 #   use post-merge-cleanup.sh for a fleet-wide repair without an update.
 #
 # Migration behavior:

@@ -212,7 +212,7 @@ validate_tenant_env_override() {
             reason="database-admin or deployment-managed database key" ;;
 
         # Migrations are run by deployment (goose from the backend image); tenants cannot set them.
-        MIGRATION_*)
+        MIGRATE_CMD|MIGRATION_*)
             reason="migration-control key" ;;
 
         # Prevent a tenant override from changing Docker/Dokku execution.

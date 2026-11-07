@@ -5,7 +5,7 @@
 # The daemon owns embedded NATS/JetStream. This command starts the Compose
 # overlay, waits for NATS readiness, and then checks the ZATCA stream backlog.
 # Use --recreate when the tenant registry changed; persistent XML and JetStream
-# volumes are retained across that controlled restart.
+# JetStream volumes are retained across that controlled restart.
 #
 # Usage:
 #   bash scripts/setup-zatca-daemon.sh --config /opt/deployment/config.env
@@ -79,11 +79,10 @@ esac
 COMPOSE_FILE="${ZATCA_DAEMON_COMPOSE_FILE:-${REPO_DIR}/dashboard/docker-compose.zatca.yml}"
 CONTAINER="${ZATCA_DAEMON_CONTAINER:-zatca-daemon}"
 NATS_PORT="${ZATCA_NATS_PORT:-4222}"
-XML_ROOT="${ZATCA_XML_ROOT:-/opt/zatca-xml}"
 NATS_ROOT="${ZATCA_NATS_DATA_ROOT:-/opt/zatca-nats}"
 
 [ -f "$COMPOSE_FILE" ] || fail "Compose file not found: $COMPOSE_FILE"
-mkdir -p "$XML_ROOT" "$NATS_ROOT"
+mkdir -p "$NATS_ROOT"
 
 # A legacy standalone NATS container and the daemon's embedded NATS must never
 # own the same client port: that would split the queue and lose delivery.

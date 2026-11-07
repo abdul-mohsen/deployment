@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# update-tenant.sh — Update a tenant's app images, config, or routing
+# update-tenant.sh â€” Update a tenant's app images, config, or routing
 # =============================================================================
 # Usage:
 #   ./scripts/update-tenant.sh <tenant-name> [options]
@@ -67,7 +67,7 @@ RED='\033[0;31m'
 NC='\033[0m'
 log()   { deployment_log INFO "$*"; echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { deployment_log WARN "$*"; echo -e "${YELLOW}[!]${NC} $*"; }
-error() { deployment_log ERROR "$*"; echo -e "${RED}[✗]${NC} $*" >&2; }
+error() { deployment_log ERROR "$*"; echo -e "${RED}[âœ—]${NC} $*" >&2; }
 
 TENANT_NAME=""
 BACKEND_IMAGE=""
@@ -127,12 +127,12 @@ image_tag() {
 # Callers must have already pulled the image via ensure_update_image_available.
 image_version_label() {
     local image="$1"
-    docker inspect --format='{{index .Config.Labels "org.opencontainers.image.version"}}' "$image" 2>/dev/null | tr -d '\r\n' || true
+    docker inspect --format='{{index .Config.Labels "org.opencontainers.image.version"}}' "$image" 2>/dev/null | tr -d '\n' || true
 }
 
 # Refuse to deploy a backend + frontend pair whose image versions disagree.
 # The pair is only compared when both sides are being updated in the same
-# invocation — pinning just one image is still allowed.
+# invocation â€” pinning just one image is still allowed.
 #
 # Bypass with --skip-drift-check when knowingly running mismatched images
 # (rare; usually only needed during a rollback investigation).
@@ -149,7 +149,7 @@ assert_image_versions_match() {
     backend_ver="$(image_version_label "$BACKEND_IMAGE")"
     frontend_ver="$(image_version_label "$FRONTEND_IMAGE")"
 
-    # If either image doesn't carry a version label, warn and continue —
+    # If either image doesn't carry a version label, warn and continue â€”
     # this covers older images built before the label was added, or ad-hoc
     # locally-built images used during development.
     if [ -z "$backend_ver" ] || [ -z "$frontend_ver" ]; then
@@ -390,6 +390,9 @@ if ! validate_tenant_env_overrides "${ENV_VARS[@]}"; then
     error "Refusing invalid or reserved --env override."
     exit 1
 fi
+validate_database_identifier "${MYSQL_MASTER_DB:-zatca_master}" || exit 1
+validate_database_identifier "${DEPLOY_STATE_DB:-deployment_state}" || exit 1
+validate_nats_url "${NATS_URL:-nats://host.docker.internal:4222}" || exit 1
 
 if [ -z "$TENANT_NAME" ]; then
     echo "Usage: $0 <tenant-name> [--backend-image <image>] [--frontend-image <image>]"

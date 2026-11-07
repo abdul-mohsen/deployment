@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# create-tenant.sh — Provision a new tenant on Dokku
+# create-tenant.sh â€” Provision a new tenant on Dokku
 # =============================================================================
 # Creates a complete tenant with:
 #   - Backend app (API) at <tenant>.<domain>/api
@@ -47,7 +47,7 @@ NC='\033[0m'
 
 log()   { echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-error() { echo -e "${RED}[✗]${NC} $*" >&2; }
+error() { echo -e "${RED}[âœ—]${NC} $*" >&2; }
 info()  { echo -e "${BLUE}[i]${NC} $*"; }
 
 mysql_password_sql_literal() {
@@ -265,6 +265,9 @@ if ! validate_tenant_env_overrides "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; then
     error "Refusing invalid or reserved --env override."
     exit 1
 fi
+validate_database_identifier "${MYSQL_MASTER_DB:-zatca_master}" || exit 1
+validate_database_identifier "${DEPLOY_STATE_DB:-deployment_state}" || exit 1
+validate_nats_url "${NATS_URL:-nats://host.docker.internal:4222}" || exit 1
 
 # ---- Validate ----
 if [ -z "$TENANT_NAME" ]; then
@@ -301,7 +304,7 @@ FRONTEND_APP="${TENANT_NAME}-frontend"
 TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
 TENANT_DOMAIN="${TENANT_NAME}.${BASE_DOMAIN}"
 TENANT_NETWORK="${TENANT_APP_NETWORK:-web}"
-# Export so init-tenant-db.sh (invoked as child bash) inherits these — it uses
+# Export so init-tenant-db.sh (invoked as child bash) inherits these â€” it uses
 # them to reach the backend container directly over the tenant network for
 # seed user registration (bypasses the frontend proxy CSRF).
 export TENANT_NETWORK
@@ -324,21 +327,21 @@ fi
 # Check if apps already exist
 if dokku apps:exists "$BACKEND_APP" 2>/dev/null; then
     if [ "$FORCE_UPDATE" = "true" ]; then
-        warn "App '$BACKEND_APP' already exists — continuing with --update (will re-deploy and re-seed)."
+        warn "App '$BACKEND_APP' already exists â€” continuing with --update (will re-deploy and re-seed)."
     else
         error "App '$BACKEND_APP' already exists. Tenant may already be provisioned."
-        error "→ To update an existing tenant's image or env vars, use: update-tenant.sh $TENANT_NAME"
-        error "→ To re-run provisioning anyway (e.g. after a partial failure), add --update to this command."
+        error "â†’ To update an existing tenant's image or env vars, use: update-tenant.sh $TENANT_NAME"
+        error "â†’ To re-run provisioning anyway (e.g. after a partial failure), add --update to this command."
         exit 1
     fi
 fi
 if dokku apps:exists "$FRONTEND_APP" 2>/dev/null; then
     if [ "$FORCE_UPDATE" = "true" ]; then
-        warn "App '$FRONTEND_APP' already exists — continuing with --update."
+        warn "App '$FRONTEND_APP' already exists â€” continuing with --update."
     else
         error "App '$FRONTEND_APP' already exists. Tenant may already be provisioned."
-        error "→ To update an existing tenant's image or env vars, use: update-tenant.sh $TENANT_NAME"
-        error "→ To re-run provisioning anyway (e.g. after a partial failure), add --update to this command."
+        error "â†’ To update an existing tenant's image or env vars, use: update-tenant.sh $TENANT_NAME"
+        error "â†’ To re-run provisioning anyway (e.g. after a partial failure), add --update to this command."
         exit 1
     fi
 fi
@@ -373,7 +376,7 @@ if c2 != c:
 \"
   nginx -s reload 2>/dev/null || true
 fi
-" 2>&1 || warn "Could not fix nginx upstream for ${app} — tenant may not be accessible until next deploy"
+" 2>&1 || warn "Could not fix nginx upstream for ${app} â€” tenant may not be accessible until next deploy"
 }
 
 create_dokku_app() {
@@ -398,14 +401,14 @@ if [ -n "${TENANT_NAME_PREFIX:-}" ]; then
     info "  Tenant prefix:  $(tenant_name_prefix)"
 fi
 info "  Domain:         $TENANT_DOMAIN"
-info "  Backend app:    $BACKEND_APP  → internal only (${BACKEND_APP}.web:${BACKEND_PORT})"
-info "  Frontend app:   $FRONTEND_APP → $TENANT_DOMAIN"
+info "  Backend app:    $BACKEND_APP  â†’ internal only (${BACKEND_APP}.web:${BACKEND_PORT})"
+info "  Frontend app:   $FRONTEND_APP â†’ $TENANT_DOMAIN"
 info "  Docker network: $TENANT_NETWORK"
 info "  Backend port:   $BACKEND_PORT"
 info "  Frontend port:  $FRONTEND_PORT"
 info "  Storage:        $STORAGE_ROOT/$TENANT_NAME/{uploads,data}"
 if ! $NO_DATABASE; then
-    info "  Database:       MySQL → tenant_${TENANT_NAME} on ${MYSQL_HOST:-127.0.0.1}"
+    info "  Database:       MySQL â†’ tenant_${TENANT_NAME} on ${MYSQL_HOST:-127.0.0.1}"
 else
     info "  Database:       skipped (--no-database)"
 fi
@@ -424,7 +427,7 @@ done
 echo ""
 
 if $DRY_RUN; then
-    warn "Dry run — no changes made."
+    warn "Dry run â€” no changes made."
     exit 0
 fi
 
@@ -483,7 +486,7 @@ dokku domains:add "$FRONTEND_APP" "$TENANT_DOMAIN"
 
 # ---- 3. Inter-app networking ----
 # /api routing happens INSIDE the frontend Go app (it reads BACKEND_URL and
-# proxies HTTP itself). We do NOT write a Dokku nginx /api snippet here —
+# proxies HTTP itself). We do NOT write a Dokku nginx /api snippet here â€”
 # referencing a sibling app from a custom nginx.conf.d snippet breaks
 # `nginx:validate-config` (the upstream alias doesn't resolve from the
 # dokku-nginx context), which silently blocks reloads for ALL tenants.
@@ -508,7 +511,7 @@ dokku network:set "$FRONTEND_APP" attach-post-create "$TENANT_NETWORK"
 # nginx can resolve <app>.web hostnames via Docker DNS (used by fix_nginx_upstream).
 # Without this, dokku's nginx runs only on 'bridge' and returns 502 when the
 # upstream block references a service hostname from a user-defined network.
-# `docker network connect` errors if already connected — swallow that.
+# `docker network connect` errors if already connected â€” swallow that.
 DOKKU_CONTAINER="${DOKKU_CONTAINER:-dokku}"
 if docker network inspect "$TENANT_NETWORK" --format '{{range $k,$v := .Containers}}{{$v.Name}}{{"\n"}}{{end}}' 2>/dev/null | grep -qx "$DOKKU_CONTAINER"; then
     info "${DOKKU_CONTAINER} already attached to ${TENANT_NETWORK}"
@@ -516,7 +519,7 @@ else
     if docker network connect "$TENANT_NETWORK" "$DOKKU_CONTAINER" 2>&1; then
         info "Attached ${DOKKU_CONTAINER} to ${TENANT_NETWORK}"
     else
-        warn "Could not attach ${DOKKU_CONTAINER} to ${TENANT_NETWORK} — inter-app proxy may fail with 502"
+        warn "Could not attach ${DOKKU_CONTAINER} to ${TENANT_NETWORK} â€” inter-app proxy may fail with 502"
     fi
 fi
 
@@ -583,7 +586,7 @@ if [ -n "$MSG_HOST" ]; then
         ${MSG_PORT:+MSG_PORT="$MSG_PORT"}
 fi
 
-# Docker host access — ensure containers can reach host services
+# Docker host access â€” ensure containers can reach host services
 dokku docker-options:add "$BACKEND_APP" deploy,run "--add-host=host.docker.internal:host-gateway" 2>/dev/null || true
 
 # User-provided env vars
@@ -609,9 +612,9 @@ TENANT_REGISTERED=false
 
 if ! $NO_DATABASE; then
     if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
-        warn "MYSQL_ROOT_PASSWORD not set in config.env — skipping database creation."
+        warn "MYSQL_ROOT_PASSWORD not set in config.env â€” skipping database creation."
     else
-        # Generate a random password — but if the tenant backend already has a
+        # Generate a random password â€” but if the tenant backend already has a
         # DB_PASSWORD in Dokku config (re-run scenario), reuse it so the running
         # container does not get a mismatched credential.
         TENANT_DB_PASS=""
@@ -664,7 +667,7 @@ SQLEOF
 
         # Inject DB env vars into the backend container.
         # Both naming conventions: modern (DB_HOST/DB_USER/...) and legacy
-        # ifritah-go (HOST/DBUSER/PASSWORD/DBNAME — HOST is host:port).
+        # ifritah-go (HOST/DBUSER/PASSWORD/DBNAME â€” HOST is host:port).
         DATABASE_URL="mysql://${TENANT_DB_USER}:${TENANT_DB_PASS}@${MYSQL_APP_HOST}:${MYSQL_PORT}/${TENANT_DB_NAME}"
         dokku config:set --no-restart "$BACKEND_APP" \
             DATABASE_URL="$DATABASE_URL" \
@@ -723,7 +726,7 @@ if ! $GIT_ONLY; then
             exit 1
         fi
     else
-        info "No backend image — deploy later with: git push dokku@${BASE_DOMAIN}:${BACKEND_APP} main"
+        info "No backend image â€” deploy later with: git push dokku@${BASE_DOMAIN}:${BACKEND_APP} main"
     fi
 
     if [ -n "$FRONTEND_IMAGE" ]; then
@@ -744,7 +747,7 @@ if ! $GIT_ONLY; then
         # which is stable and resolved via Docker's internal DNS (127.0.0.11).
         fix_nginx_upstream "$FRONTEND_APP" "${FRONTEND_APP}.web" "8000"
     else
-        info "No frontend image — deploy later with: git push dokku@${BASE_DOMAIN}:${FRONTEND_APP} main"
+        info "No frontend image â€” deploy later with: git push dokku@${BASE_DOMAIN}:${FRONTEND_APP} main"
     fi
 fi
 
@@ -776,7 +779,7 @@ if $DB_PROVISIONED && ! $GIT_ONLY; then
 fi
 
 # ---- 11. External nginx ----
-info "Host nginx (operator-managed) wildcards *.${BASE_DOMAIN} → 127.0.0.1:${DOKKU_PORT}; nothing to do per-tenant."
+info "Host nginx (operator-managed) wildcards *.${BASE_DOMAIN} â†’ 127.0.0.1:${DOKKU_PORT}; nothing to do per-tenant."
 info "Verify once on the host that the wildcard vhost forwards with 'Host \$host' preserved, then: sudo nginx -t && sudo systemctl reload nginx"
 
 # The daemon loads enabled tenant rows and branch workers in memory. Refresh it
@@ -789,7 +792,7 @@ if $TENANT_REGISTERED && zatca_daemon_enabled; then
 fi
 
 # ---- DNS wildcard check ----
-# Fail loudly if *.BASE_DOMAIN doesn't resolve — the tenant URL below will
+# Fail loudly if *.BASE_DOMAIN doesn't resolve â€” the tenant URL below will
 # 404 in a browser otherwise, with no obvious hint that DNS is the problem.
 dns_ok=true
 if command -v getent >/dev/null 2>&1; then
@@ -825,7 +828,7 @@ if ! $dns_ok; then
     warn "  Every future tenant will resolve automatically once the wildcard is live."
     warn ""
 fi
-log "  Routing: host nginx (operator-managed TLS) → 127.0.0.1:${DOKKU_PORT} → Dokku → ${TENANT_DOMAIN}"
+log "  Routing: host nginx (operator-managed TLS) â†’ 127.0.0.1:${DOKKU_PORT} â†’ Dokku â†’ ${TENANT_DOMAIN}"
 log "  No per-tenant host port; Dokku routes by Host header."
 log ""
 log "  Dashboard: http://localhost:8088 (Apps page)"

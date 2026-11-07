@@ -341,7 +341,8 @@ grep -q 'IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"' scripts/deploy-all.sh
     || FAIL "deploy-all must pull image and handle same-ref git:from-image deploys"
 grep -q 'init-tenant-db.sh" "\$TENANT_NAME"' scripts/create-tenant.sh \
     && grep -q -- '--backend-image "\$BACKEND_IMAGE"' scripts/create-tenant.sh \
-    && grep -q -- '--env "DB_USER=\$TENANT_DB_USER"' scripts/create-tenant.sh \
+    && ! grep -q -- '--env "DB_USER=\$TENANT_DB_USER"' scripts/create-tenant.sh \
+    && grep -q 'validate_tenant_env_overrides' scripts/init-tenant-db.sh \
     && grep -q 'init-tenant-db.sh" "\${seed_args\[@\]}"' scripts/create-tenant.sh \
     && PASS "create-tenant applies schema and seed phases" \
     || FAIL "create-tenant must call init-tenant-db.sh for schema and seed phases"

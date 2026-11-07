@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# remove-tenant.sh — Fully remove a Dokku tenant. Leaves no traces by default.
+# remove-tenant.sh â€” Fully remove a Dokku tenant. Leaves no traces by default.
 # =============================================================================
 # Deletes: Dokku apps, MySQL DB + user, master DB row, tenantstate JSON,
 #          persistent data, backup artifacts, host nginx vhost.
@@ -22,7 +22,7 @@ NC='\033[0m'
 
 log()   { echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-error() { echo -e "${RED}[✗]${NC} $*" >&2; }
+error() { echo -e "${RED}[âœ—]${NC} $*" >&2; }
 
 zatca_daemon_enabled() {
     case "${ZATCA_DAEMON_ENABLED:-0}" in
@@ -130,7 +130,7 @@ SQLEOF
     TENANT_REGISTRY_CHANGED=true
     log "Tenant removed from master database."
 else
-    warn "MYSQL_ADMIN_PASSWORD not set — skipping database cleanup."
+    warn "MYSQL_ADMIN_PASSWORD not set â€” skipping database cleanup."
 fi
 
 # The daemon keeps tenant DB handles and branch workers in memory. Refresh it

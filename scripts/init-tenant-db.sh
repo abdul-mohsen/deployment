@@ -93,6 +93,12 @@ else
     exit 1
 fi
 
+if ! validate_tenant_env_overrides "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; then
+    error "Refusing invalid or deployment-owned --env override."
+    exit 1
+fi
+validate_database_identifier "${MYSQL_MASTER_DB:-zatca_master}" || exit 1
+
 TENANT_NAME="$(tenant_full_name "$TENANT_NAME")" || exit 1
 deployment_set_tenant "$TENANT_NAME"
 
@@ -384,7 +390,7 @@ SQLEOF
 
 http_post_register() {
     local payload="$1"
-    # Backend routes are mounted under BASEURL (default /api/v2 — set by
+    # Backend routes are mounted under BASEURL (default /api/v2 â€” set by
     # create-tenant.sh). Use the same prefix so this matches the deployed backend.
     local basepath="${BASEURL:-/api/v2}"
     # Hit the backend container DIRECTLY via the tenant docker network,

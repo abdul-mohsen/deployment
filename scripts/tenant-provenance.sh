@@ -277,36 +277,7 @@ provenance_sql_escape() {
 }
 
 ensure_tenant_provenance_schema() {
-    local db="${MYSQL_MASTER_DB:-zatca_master}"
-    ensure_tenant_provenance_columns "$db" || return
-    run_mysql "$db" <<'SQL'
-CREATE TABLE IF NOT EXISTS tenant_deployment_audit (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    tenant_name VARCHAR(100) NOT NULL,
-    app_type VARCHAR(16) NOT NULL,
-    requested_image_ref VARCHAR(512) NOT NULL DEFAULT '',
-    resolved_image_ref VARCHAR(512) NOT NULL DEFAULT '',
-    image_digest VARCHAR(255) NOT NULL DEFAULT '',
-    channel VARCHAR(64) NOT NULL DEFAULT '',
-    semantic_version VARCHAR(128) NOT NULL DEFAULT '',
-    commit_sha VARCHAR(128) NOT NULL DEFAULT '',
-    commit_short VARCHAR(32) NOT NULL DEFAULT '',
-    workflow_run VARCHAR(128) NOT NULL DEFAULT '',
-    workflow_run_url VARCHAR(512) NOT NULL DEFAULT '',
-    built_at VARCHAR(64) NOT NULL DEFAULT '',
-    previous_image_ref VARCHAR(512) NOT NULL DEFAULT '',
-    previous_image_digest VARCHAR(255) NOT NULL DEFAULT '',
-    backup_id VARCHAR(255) NOT NULL DEFAULT '',
-    backup_db_artifact VARCHAR(512) NOT NULL DEFAULT '',
-    status VARCHAR(32) NOT NULL,
-    error_message TEXT NULL,
-    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    completed_at TIMESTAMP NULL DEFAULT NULL,
-    INDEX idx_tenant_deployment_audit_tenant (tenant_name, started_at),
-    INDEX idx_tenant_deployment_audit_status (status, started_at)
-) ENGINE=InnoDB;
-SQL
-    ensure_tenant_audit_columns "$db"
+    ensure_deployment_state_schema
 }
 
 tenant_record_audit() {
@@ -315,7 +286,7 @@ tenant_record_audit() {
     local workflow="${10}" workflow_url="${11}" built_at="${12}" previous_ref="${13}"
     local previous_digest="${14}" status="${15}" error_message="${16:-}"
     local backup_id="${17:-}" backup_db_artifact="${18:-}"
-    local db="${MYSQL_MASTER_DB:-zatca_master}"
+    local db="${DEPLOY_STATE_DB:-deployment_state}"
     run_mysql "$db" -e "INSERT INTO tenant_deployment_audit
         (tenant_name, app_type, requested_image_ref, resolved_image_ref,
          image_digest, channel, semantic_version, commit_sha, commit_short,
@@ -346,50 +317,74 @@ tenant_record_audit() {
 tenant_record_identity() {
     local tenant="$1" app_type="$2" requested="$3"
     local resolved="$4" digest="$5" channel="$6" version="$7"
-    local     commit_sha="$8" commit_short="$9" workflow="${10}" workflow_url="${11}" built_at="${12}"
-    local db="${MYSQL_MASTER_DB:-zatca_master}" p
+    local commit_sha="$8" commit_short="$9" workflow="${10}" workflow_url="${11}" built_at="${12}"
+    local db="${DEPLOY_STATE_DB:-deployment_state}" p
     case "$app_type" in backend|frontend) p="$app_type" ;; *) return 1 ;; esac
-    run_mysql "$db" -e "UPDATE tenant SET
-        ${p}_image_ref='$(provenance_sql_escape "$requested")',
-        ${p}_image_digest='$(provenance_sql_escape "$digest")',
-        ${p}_channel='$(provenance_sql_escape "$channel")',
-        ${p}_version='$(provenance_sql_escape "$version")',
-        ${p}_commit='$(provenance_sql_escape "$commit_sha")',
-        ${p}_commit_short='$(provenance_sql_escape "$commit_short")',
-        ${p}_workflow_run='$(provenance_sql_escape "$workflow")',
-        ${p}_workflow_run_url='$(provenance_sql_escape "$workflow_url")',
-        ${p}_built_at='$(provenance_sql_escape "$built_at")',
-        ${p}_deployed_at=NOW(),
+    run_mysql "$db" -e "INSERT INTO tenant_identity
+        (name, ${p}_image_ref, ${p}_image_digest, ${p}_channel,
+         ${p}_version, ${p}_commit, ${p}_commit_short, ${p}_workflow_run,
+         ${p}_workflow_run_url, ${p}_built_at, ${p}_deployment_status,
+         ${p}_deployed_at, ${p}_deployment_error)
+      VALUES
+        ('$(provenance_sql_escape "$tenant")',
+         '$(provenance_sql_escape "$requested")',
+         '$(provenance_sql_escape "$digest")',
+         '$(provenance_sql_escape "$channel")',
+         '$(provenance_sql_escape "$version")',
+         '$(provenance_sql_escape "$commit_sha")',
+         '$(provenance_sql_escape "$commit_short")',
+         '$(provenance_sql_escape "$workflow")',
+         '$(provenance_sql_escape "$workflow_url")',
+         '$(provenance_sql_escape "$built_at")',
+         'verified', NOW(), '')
+      ON DUPLICATE KEY UPDATE
+        ${p}_image_ref=VALUES(${p}_image_ref),
+        ${p}_image_digest=VALUES(${p}_image_digest),
+        ${p}_channel=VALUES(${p}_channel),
+        ${p}_version=VALUES(${p}_version),
+        ${p}_commit=VALUES(${p}_commit),
+        ${p}_commit_short=VALUES(${p}_commit_short),
+        ${p}_workflow_run=VALUES(${p}_workflow_run),
+        ${p}_workflow_run_url=VALUES(${p}_workflow_run_url),
+        ${p}_built_at=VALUES(${p}_built_at),
         ${p}_deployment_status='verified',
-        ${p}_deployment_error=''
-      WHERE name='$(provenance_sql_escape "$tenant")' LIMIT 1;"
+        ${p}_deployed_at=NOW(),
+        ${p}_deployment_error='';"
 }
 
 tenant_record_failure() {
     local tenant="$1" app_type="$2" message="$3"
-    local db="${MYSQL_MASTER_DB:-zatca_master}" p
+    local db="${DEPLOY_STATE_DB:-deployment_state}" p
     case "$app_type" in backend|frontend) p="$app_type" ;; *) return 1 ;; esac
-    run_mysql "$db" -e "UPDATE tenant SET
+    run_mysql "$db" -e "INSERT INTO tenant_identity
+        (name, ${p}_deployment_status, ${p}_deployment_error)
+      VALUES ('$(provenance_sql_escape "$tenant")', 'failed',
+              '$(provenance_sql_escape "$message")')
+      ON DUPLICATE KEY UPDATE
         ${p}_deployment_status='failed',
-        ${p}_deployment_error='$(provenance_sql_escape "$message")'
-      WHERE name='$(provenance_sql_escape "$tenant")' LIMIT 1;" || return 1
+        ${p}_deployment_error='$(provenance_sql_escape "$message")';" || return 1
 }
 
 tenant_clear_identity() {
     local tenant="$1" app_type="$2" message="${3:-rollback left no known-good identity}"
-    local db="${MYSQL_MASTER_DB:-zatca_master}" p
+    local db="${DEPLOY_STATE_DB:-deployment_state}" p
     case "$app_type" in backend|frontend) p="$app_type" ;; *) return 1 ;; esac
-    run_mysql "$db" -e "UPDATE tenant SET
+    run_mysql "$db" -e "INSERT INTO tenant_identity
+        (name, ${p}_image_ref, ${p}_image_digest, ${p}_channel, ${p}_version,
+         ${p}_commit, ${p}_commit_short, ${p}_workflow_run, ${p}_workflow_run_url,
+         ${p}_built_at, ${p}_deployed_at, ${p}_deployment_status, ${p}_deployment_error)
+      VALUES ('$(provenance_sql_escape "$tenant")', '', '', '', '', '', '', '', '',
+              '', NULL, 'failed', '$(provenance_sql_escape "$message")')
+      ON DUPLICATE KEY UPDATE
         ${p}_image_ref='', ${p}_image_digest='', ${p}_channel='',
         ${p}_version='', ${p}_commit='', ${p}_commit_short='',
-        ${p}_workflow_run='', ${p}_workflow_run_url='', ${p}_built_at='', ${p}_deployed_at=NULL,
-        ${p}_deployment_status='failed',
-        ${p}_deployment_error='$(provenance_sql_escape "$message")'
-      WHERE name='$(provenance_sql_escape "$tenant")' LIMIT 1;"
+        ${p}_workflow_run='', ${p}_workflow_run_url='', ${p}_built_at='',
+        ${p}_deployed_at=NULL, ${p}_deployment_status='failed',
+        ${p}_deployment_error='$(provenance_sql_escape "$message")';"
 }
 
 tenant_current_identity() {
-    local tenant="$1" app_type="$2" db="${MYSQL_MASTER_DB:-zatca_master}" p
+    local tenant="$1" app_type="$2" db="${DEPLOY_STATE_DB:-deployment_state}" p
     case "$app_type" in backend|frontend) p="$app_type" ;; *) return 1 ;; esac
     run_mysql -N -B "$db" -e "SELECT
         IFNULL(${p}_image_ref,''), IFNULL(${p}_image_digest,''),
@@ -397,6 +392,6 @@ tenant_current_identity() {
         IFNULL(${p}_commit,''), IFNULL(${p}_commit_short,''),
         IFNULL(${p}_workflow_run,''), IFNULL(${p}_workflow_run_url,''),
         IFNULL(${p}_built_at,'')
-      FROM tenant WHERE name='$(provenance_sql_escape "$tenant")' LIMIT 1;" 2>/dev/null |
+      FROM tenant_identity WHERE name='$(provenance_sql_escape "$tenant")' LIMIT 1;" 2>/dev/null |
         head -n1
 }

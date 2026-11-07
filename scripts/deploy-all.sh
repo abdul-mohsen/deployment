@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-all.sh — Deploy a Docker image to all tenants (canary-first)
+# deploy-all.sh â€” Deploy a Docker image to all tenants (canary-first)
 # =============================================================================
 # Usage:
 #   ./scripts/deploy-all.sh <image> [--type backend|frontend] [--skip-canary]
@@ -31,7 +31,7 @@ NC='\033[0m'
 
 log()   { deployment_log INFO "$*"; echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { deployment_log WARN "$*"; echo -e "${YELLOW}[!]${NC} $*"; }
-error() { deployment_log ERROR "$*"; echo -e "${RED}[✗]${NC} $*" >&2; }
+error() { deployment_log ERROR "$*"; echo -e "${RED}[âœ—]${NC} $*" >&2; }
 info()  { deployment_log INFO "$*"; echo -e "${BLUE}[i]${NC} $*"; }
 
 CONFIG_FILE="$PROJECT_DIR/config.env"
@@ -56,6 +56,10 @@ done
 
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
 deployment_init_logging
+
+validate_database_identifier "${MYSQL_MASTER_DB:-zatca_master}" || exit 1
+validate_database_identifier "${DEPLOY_STATE_DB:-deployment_state}" || exit 1
+validate_nats_url "${NATS_URL:-nats://host.docker.internal:4222}" || exit 1
 
 if [ -z "$IMAGE" ]; then
     echo "Usage: $0 <image> [--type backend|frontend] [--tenant <name>] [--skip-canary]"
@@ -132,7 +136,7 @@ deploy_one() {
         return 1
     fi
     if [ -n "$override" ] && [ "$override" != "$IMAGE" ]; then
-        warn "${tenant}: pinned to '${override}' — skipping global deploy"
+        warn "${tenant}: pinned to '${override}' â€” skipping global deploy"
         return 0
     fi
 
@@ -223,7 +227,7 @@ deploy_one() {
         tenant_record_failure "$tenant" "$APP_TYPE" "image swap failed" 2>/dev/null || true
         tenant_record_audit "$tenant" "$APP_TYPE" "$image" "$resolved_ref" "$BUILD_DIGEST" \
             "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
-            "$BUILD_WORKFLOW_RUN" "$BUILD_BUILT_AT" "$previous_image" \
+            "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$previous_image" \
             "$(printf '%s' "$previous_identity" | cut -f2)" "failed" \
             "image swap failed" "$backup_id" "$backup_artifact" 2>/dev/null || true
         return 1
@@ -248,7 +252,7 @@ deploy_one() {
             tenant_record_failure "$tenant" "$APP_TYPE" "post-deploy /version identity verification failed" 2>/dev/null || true
             tenant_record_audit "$tenant" "$APP_TYPE" "$image" "$resolved_ref" "$BUILD_DIGEST" \
                 "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
-                "$BUILD_WORKFLOW_RUN" "$BUILD_BUILT_AT" "$previous_image" \
+                "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$previous_image" \
                 "$(printf '%s' "$previous_identity" | cut -f2)" "failed" \
                 "post-deploy /version identity verification failed" \
                 "$backup_id" "$backup_artifact" 2>/dev/null || true
@@ -336,7 +340,7 @@ restore_previous_identity() {
     fi
 }
 
-# Get matching apps — either specific tenants or all
+# Get matching apps â€” either specific tenants or all
 if [ ${#TARGET_TENANTS[@]} -gt 0 ]; then
     # Deploy to specific tenants only
     APPS=""
@@ -412,7 +416,7 @@ log "=== Canary: ${FIRST} ==="
 if deployment_run_boundary "deploy_one" deploy_one "$FIRST"; then
     :
 else
-    error "Canary deploy failed — aborting."
+    error "Canary deploy failed â€” aborting."
     exit 1
 fi
 
@@ -424,7 +428,7 @@ if ! wait_for_runtime_health "$FIRST" "$HEALTH_PATH"; then
    error "Required startup health check failed for ${FIRST}; aborting before remaining tenants."
    exit 1
 fi
-log "Canary healthy ✓"
+log "Canary healthy âœ“"
 
 if ! $SKIP_CANARY && [ -n "$REST" ]; then
    echo ""
@@ -438,7 +442,7 @@ if [ -n "$REST" ]; then
     while IFS= read -r app; do
         log "=== Deploying: ${app} ==="
         if deployment_run_boundary "deploy_one" deploy_one "$app"; then
-            log "${app} ✓"
+            log "${app} âœ“"
         else
             error "${app} FAILED"
             FAILED=$((FAILED + 1))

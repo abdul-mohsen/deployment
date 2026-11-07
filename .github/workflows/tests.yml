@@ -41,10 +41,13 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/tests/test-tenant-env-allowlist.sh
+          bash scripts/tests/test-create-tenant.sh
+          bash scripts/tests/test-deployment-state-provenance.sh
           bash scripts/tests/test-reconcile-runtime.sh
           bash scripts/tests/test-tenant-provenance.sh
           bash scripts/tests/test-runtime-probes.sh
           bash scripts/tests/test-deployctl.sh
+          bash scripts/tests/test-zatca-runtime.sh
 
       - name: Check deployment contracts
         shell: bash

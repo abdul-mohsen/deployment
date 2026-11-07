@@ -21,7 +21,6 @@ services:
       - "${ZATCA_NATS_PORT:-4222}:4222"
       - "127.0.0.1:${ZATCA_NATS_MONITOR_PORT:-8222}:8222"
     volumes:
-      - "${ZATCA_XML_ROOT:-/opt/zatca-xml}:/data/zatca-xml"
       - "${ZATCA_NATS_DATA_ROOT:-/opt/zatca-nats}:/data/nats"
     environment:
       DB_USER: ${ZATCA_DB_USER:?ZATCA_DB_USER must be set}
@@ -40,10 +39,10 @@ services:
       SMTP_PASS: ${ZATCA_SMTP_PASSWORD:-}
       SMTP_FROM: ${ZATCA_SMTP_FROM:-zatca-daemon@localhost}
     command:
+      - "--nats-mode=embedded"
       - "--nats-port=4222"
       - "--nats-monitor=8222"
       - "--nats-data=/data/nats"
-      - "--xml-dir=/data/zatca-xml"
     healthcheck:
       test:
         - CMD-SHELL

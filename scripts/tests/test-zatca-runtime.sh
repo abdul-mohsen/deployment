@@ -31,8 +31,6 @@ grep -qF '"${ZATCA_NATS_PORT:-4222}:4222"' "$COMPOSE_FILE" \
     || fail "daemon NATS client port is not published"
 grep -qF '"127.0.0.1:${ZATCA_NATS_MONITOR_PORT:-8222}:8222"' "$COMPOSE_FILE" \
     || fail "daemon monitor is not loopback-only"
-grep -qF 'ZATCA_XML_ROOT:-/opt/zatca-xml}:/data/zatca-xml' "$COMPOSE_FILE" \
-    || fail "XML storage is not persistent"
 grep -qF 'ZATCA_NATS_DATA_ROOT:-/opt/zatca-nats}:/data/nats' "$COMPOSE_FILE" \
     || fail "JetStream storage is not persistent"
 grep -qF 'DB_USER: ${ZATCA_DB_USER:?ZATCA_DB_USER must be set}' "$COMPOSE_FILE" \
@@ -43,8 +41,13 @@ grep -qF 'ENCRYPT_KEY: ${ZATCA_ENCRYPT_KEY:?ZATCA_ENCRYPT_KEY must be set}' "$CO
     || fail "daemon encryption key is not required"
 grep -qF 'MONITOR_PASS: ${ZATCA_MONITOR_PASSWORD:?ZATCA_MONITOR_PASSWORD must be set}' "$COMPOSE_FILE" \
     || fail "daemon monitor password is not required"
+grep -qF '"--nats-mode=embedded"' "$COMPOSE_FILE" \
+    || fail "daemon NATS ownership mode is not explicit"
 grep -qF '"--nats-monitor=8222"' "$COMPOSE_FILE" || fail "daemon monitor flag is not consumed"
 grep -qF '"--nats-data=/data/nats"' "$COMPOSE_FILE" || fail "daemon data flag is not consumed"
+if grep -qE -- '--xml-dir|ZATCA_XML_ROOT|--nats-url|NATS_URL' "$COMPOSE_FILE"; then
+    fail "Compose forwards flags or storage wiring removed from the daemon contract"
+fi
 grep -qF '/healthz' "$COMPOSE_FILE" || fail "container readiness probe is missing"
 if grep -qE 'MAX_WORKERS|MAX_PENDING|MAX_ACK_PENDING' "$COMPOSE_FILE"; then
     fail "Compose advertises limits the daemon does not consume"
@@ -69,10 +72,11 @@ pass "health and bounded queue signals"
 echo
 echo "=== tenant reload and recovery wiring ==="
 grep -qF -- '--recreate' "$RELOAD_SCRIPT" || fail "reload does not recreate startup-loaded daemon"
-grep -qF 'ZATCA_XML_ROOT' "$RELOAD_SCRIPT" "$SETUP_SCRIPT" "$COMPOSE_FILE" \
-    || fail "reload path does not retain XML volume contract"
 grep -qF 'ZATCA_NATS_DATA_ROOT' "$SETUP_SCRIPT" "$COMPOSE_FILE" \
     || fail "reload path does not retain JetStream volume contract"
+if grep -qE 'XML_ROOT|xml-dir|zatca-xml' "$SETUP_SCRIPT" "$RELOAD_SCRIPT" "$COMPOSE_FILE"; then
+    fail "reload path retains removed XML storage wiring"
+fi
 grep -qF 'reload-zatca-daemon.sh' scripts/create-tenant.sh \
     || fail "tenant creation does not refresh daemon discovery"
 grep -qF 'reload-zatca-daemon.sh' scripts/remove-tenant.sh \
@@ -102,6 +106,9 @@ echo
 echo "=== configuration contract ==="
 grep -qF 'ZATCA_DAEMON_ENABLED=0' config.env.example \
     || fail "daemon opt-in is not documented in config example"
+if grep -qF 'ZATCA_XML_ROOT' config.env.example; then
+    fail "config example documents removed XML storage wiring"
+fi
 grep -qF 'ZATCA_MAX_PENDING=1000' config.env.example \
     || fail "pending threshold is not documented"
 grep -qF 'ZATCA_MAX_ACK_PENDING=100' config.env.example \

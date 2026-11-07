@@ -4,7 +4,7 @@
 # =============================================================================
 # The daemon contract loads enabled tenants and active branches at startup and
 # has no live reload endpoint. A controlled Compose recreation is therefore
-# the reload mechanism; XML and JetStream volumes remain persistent.
+# the reload mechanism; JetStream storage remains persistent.
 #
 # Usage:
 #   bash scripts/reload-zatca-daemon.sh --tenant acme --config /opt/deployment/config.env

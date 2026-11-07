@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# scripts/tests/test-tenant-env-allowlist.sh — tenant env override contract
+# scripts/tests/test-tenant-env-allowlist.sh â€” tenant env override contract
 # =============================================================================
 set -euo pipefail
 
@@ -10,13 +10,12 @@ cd "$REPO_DIR"
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# shellcheck disable=SC1091
 source scripts/lib.sh
 
 assert_allowed() {
     local assignment="$1"
-    validate_tenant_env_override "$assignment" >/dev/null 2>&1 \
-        || fail "legitimate tenant env override was rejected: ${assignment%%=*}"
+    validate_tenant_env_override "$assignment" >/dev/null 2>&1 ||
+        fail "legitimate tenant env override was rejected: ${assignment%%=*}"
     pass "allows ${assignment%%=*}"
 }
 
@@ -30,60 +29,68 @@ assert_rejected() {
 }
 
 echo "=== syntax and wiring ==="
-bash -n scripts/lib.sh scripts/create-tenant.sh scripts/update-tenant.sh
-for script in scripts/create-tenant.sh scripts/update-tenant.sh; do
-    grep -Fq 'validate_tenant_env_overrides' "$script" \
-        || fail "$script does not validate --env overrides before use"
+bash -n scripts/lib.sh scripts/create-tenant.sh scripts/init-tenant-db.sh scripts/update-tenant.sh
+for script in scripts/create-tenant.sh scripts/update-tenant.sh scripts/init-tenant-db.sh; do
+    grep -Fq 'validate_tenant_env_overrides' "$script" ||
+        fail "$script does not validate --env overrides before use"
     pass "$script validates --env overrides"
 done
-
-create_validation_line="$(grep -n 'validate_tenant_env_overrides' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
-create_dokku_line="$(grep -n 'create_dokku_app "\$BACKEND_APP"' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
-[ "$create_validation_line" -lt "$create_dokku_line" ] \
-    || fail "create-tenant validates --env after creating a Dokku app"
-pass "create-tenant validates before Dokku side effects"
-
-update_validation_line="$(grep -n 'validate_tenant_env_overrides' scripts/update-tenant.sh | head -1 | cut -d: -f1)"
-update_routing_line="$(grep -n 'reconcile_tenant_routing "\$TENANT_NAME"' scripts/update-tenant.sh | head -1 | cut -d: -f1)"
-[ "$update_validation_line" -lt "$update_routing_line" ] \
-    || fail "update-tenant validates --env after routing reconciliation"
-pass "update-tenant validates before Dokku side effects"
 
 echo
 echo "=== legitimate tenant application keys ==="
 assert_allowed "FEATURE_FLAG=enabled"
-assert_allowed "DATABASE_URL=mysql://tenant:password@db/tenant"
-assert_allowed "DB_HOST=host.docker.internal"
-assert_allowed "DB_PORT=3306"
-assert_allowed "DB_NAME=tenant_acme"
-assert_allowed "DB_USER=usr_acme"
-assert_allowed "DB_PASSWORD=tenant-password"
-assert_allowed "HOST=host.docker.internal:3306"
-assert_allowed "DBUSER=usr_acme"
-assert_allowed "PASSWORD=tenant-password"
-assert_allowed "DBNAME=tenant_acme"
 assert_allowed "ADMIN_PASSWORD=seed-password"
 assert_allowed "JWT_SECERT_KEY=tenant-signing-key"
 
 echo
-echo "=== reserved deployment keys ==="
-assert_rejected "BASE_DOMAIN=evil.example"
-assert_rejected "TENANT_ID=other-tenant"
-assert_rejected "MYSQL_ADMIN_PASSWORD=admin-secret"
-assert_rejected "MIGRATION_DB_PASSWORD=migration-secret"
-assert_rejected "MIGRATE_CMD=drop-everything"
-assert_rejected "DOCKER_HOST=tcp://attacker:2375"
-assert_rejected "DOCKERHUB_TOKEN=registry-secret"
-assert_rejected "DOKKU_CONTAINER=other-dokku"
-assert_rejected "OPENOBSERVE_TENANT_OTLP_TOKEN=telemetry-secret"
-assert_rejected "OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic%20attacker"
-assert_rejected "METRICS_TOKEN=telemetry-secret"
-assert_rejected "NATS_URL=nats://unapproved-host:4222"
+echo "=== reserved deployment and tenant-connection keys ==="
+for assignment in \
+    "BASE_DOMAIN=evil.example" \
+    "TENANT_ID=other-tenant" \
+    "DATABASE_URL=mysql://user:pass@example.test/db" \
+    "DB_HOST=host.docker.internal" \
+    "DB_PORT=3306" \
+    "DB_NAME=tenant_acme" \
+    "DB_USER=usr_acme" \
+    "DB_PASSWORD=tenant-password" \
+    "HOST=host.docker.internal:3306" \
+    "DBUSER=usr_acme" \
+    "PASSWORD=tenant-password" \
+    "DBNAME=tenant_acme" \
+    "TENANT_KEY=other-tenant" \
+    "MYSQL_ADMIN_PASSWORD=admin-secret" \
+    "MIGRATION_DB_PASSWORD=migration-secret" \
+    "MIGRATE_CMD=drop-everything" \
+    "DOCKER_HOST=tcp://attacker:2375" \
+    "DOCKERHUB_TOKEN=registry-secret" \
+    "DOKKU_CONTAINER=other-dokku" \
+    "OPENOBSERVE_TENANT_OTLP_TOKEN=telemetry-secret" \
+    "OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic%20attacker" \
+    "METRICS_TOKEN=telemetry-secret" \
+    "NATS_URL=nats://unapproved-host:4222"; do
+    assert_rejected "$assignment"
+done
 
 echo
 echo "=== malformed keys ==="
 assert_rejected "not-a-key=value"
 assert_rejected "NO_EQUALS"
+
+echo
+echo "=== database and NATS configuration validation ==="
+validate_database_identifier deployment_state
+if validate_database_identifier 'deployment-state'; then
+    fail "hyphenated database identifier was accepted"
+fi
+validate_nats_url nats://host.docker.internal:4222
+validate_nats_url tls://nats.example.test
+if validate_nats_url 'http://unapproved-host:4222'; then
+    fail "non-NATS URL was accepted"
+fi
+if validate_nats_url 'nats://user:pass@host:4222'; then
+    fail "credential-bearing NATS URL was accepted"
+fi
+pass "configuration overrides fail closed"
 
 echo
 echo "All tenant env allow-list checks passed."

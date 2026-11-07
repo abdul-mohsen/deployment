@@ -9,6 +9,8 @@
 #   source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # =============================================================================
 
+: "${DEPLOY_STATE_DB:=deployment_state}"
+
 # Structured deployment logging is opt-in so tests and helper-only callers can
 # source lib.sh without installing a process-wide ERR trap.
 deployment_init_logging() {
@@ -208,12 +210,15 @@ validate_tenant_env_override() {
             reason="control-plane key" ;;
 
         # Deployment/admin database credentials and connection controls.
-        DB_ADMIN_*|MYSQL_*|MYSQL_PWD)
+        DATABASE_URL|DB_HOST|DB_PORT|DB_NAME|DB_USER|DB_PASSWORD|\
+        DBUSER|PASSWORD|DBNAME|HOST|DB_ADMIN_*|MYSQL_*|MYSQL_PWD)
             reason="database-admin or deployment-managed database key" ;;
 
-        # Migrations are run by deployment (goose from the backend image); tenants cannot set them.
+        # Migrations, tenant identity, and daemon transport are owned by deployment.
         MIGRATE_CMD|MIGRATION_*)
             reason="migration-control key" ;;
+        TENANT_KEY|TENANT_KEY_*|NATS_MODE|NATS_URL|MSG_HOST|MSG_PORT)
+            reason="tenant identity or daemon transport key" ;;
 
         # Prevent a tenant override from changing Docker/Dokku execution.
         DOCKER_*|DOKKU_*)
@@ -235,6 +240,51 @@ validate_tenant_env_overrides() {
     for assignment in "$@"; do
         validate_tenant_env_override "$assignment" || return 1
     done
+}
+
+validate_database_identifier() {
+    local name="${1:-}"
+    if [[ "$name" =~ ^[A-Za-z0-9_]{1,64}$ ]]; then
+        return 0
+    fi
+    printf 'Invalid database identifier %q; expected 1-64 letters, digits, or underscores.\n' \
+        "$name" >&2
+    return 1
+}
+
+validate_nats_url() {
+    local url="${1:-}" authority host port
+    case "$url" in
+        nats://*|tls://*) ;;
+        *)
+            printf 'Invalid NATS URL %q; expected nats:// or tls:// with a host.\n' "$url" >&2
+            return 1
+            ;;
+    esac
+    [[ "$url" != *[[:space:]]* && "$url" != *,* ]] || {
+        printf 'Invalid NATS URL %q; credentials, lists, and whitespace are not accepted.\n' "$url" >&2
+        return 1
+    }
+    authority="${url#*://}"
+    authority="${authority%%/*}"
+    [[ -n "$authority" && "$authority" != *@* ]] || {
+        printf 'Invalid NATS URL %q; a host without embedded credentials is required.\n' "$url" >&2
+        return 1
+    }
+    host="$authority"
+    port=""
+    if [[ "$authority" == *:* ]]; then
+        host="${authority%:*}"
+        port="${authority##*:}"
+        [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || {
+            printf 'Invalid NATS URL %q; port must be 1-65535.\n' "$url" >&2
+            return 1
+        }
+    fi
+    [[ -n "$host" ]] || {
+        printf 'Invalid NATS URL %q; host is required.\n' "$url" >&2
+        return 1
+    }
 }
 
 # Detect whether this shell should use a local mysql client or a mysql helper
@@ -584,7 +634,7 @@ openobserve_otlp_headers() {
         openobserve_warn "base64 is unavailable; refusing unauthenticated OTLP wiring."
         return 1
     fi
-    encoded="$(printf 'ifritah-tenant:%s' "$token" | base64 | tr -d '\r\n')" || return 1
+    encoded="$(printf 'ifritah-tenant:%s' "$token" | base64 | tr -d '\n')" || return 1
     [ -n "$encoded" ] || return 1
     printf 'Authorization=Basic %s' "$encoded"
 }
@@ -1629,6 +1679,7 @@ goose_run() {
 #   Prints zatca_master.tenant.tenant_key for the tenant DB. Fails if it is empty.
 tenant_registry_key() {
     local db="$1" key db_sql
+    validate_database_identifier "${MYSQL_MASTER_DB:-zatca_master}" || return 1
     db_sql="${db//\'/\'\'}"
     key="$(run_mysql -N -B "${MYSQL_MASTER_DB:-zatca_master}" -e \
         "SELECT IFNULL(tenant_key, '') FROM tenant WHERE db_name='${db_sql}' LIMIT 1;")" || key=""
@@ -1677,6 +1728,7 @@ tenant_registry_entry_exists() {
 #   deployment never runs that DDL.
 require_registry_tenant_key() {
     local master="${MYSQL_MASTER_DB:-zatca_master}" has_column has_trigger
+    validate_database_identifier "$master" || return 1
     has_column="$(run_mysql -N -B -e "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='${master}' AND table_name='tenant' AND column_name='tenant_key';" | awk 'NF { print $1; exit }')"
     has_trigger="$(run_mysql -N -B -e "SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema='${master}' AND event_object_table='tenant' AND trigger_name='tenant_key_default' AND action_timing='BEFORE' AND event_manipulation='INSERT';" | awk 'NF { print $1; exit }')"
     if [ "$has_column" != "1" ] || [ "$has_trigger" != "1" ]; then
@@ -1694,6 +1746,7 @@ require_registry_tenant_key() {
 #   tenant_identity (read by status and by rollback), and the deploy log in
 #   tenant_deployment_audit.
 ensure_deployment_state_schema() {
+    validate_database_identifier "${DEPLOY_STATE_DB:-deployment_state}" || return 1
     run_mysql <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DEPLOY_STATE_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE TABLE IF NOT EXISTS \`${DEPLOY_STATE_DB}\`.tenant_image (
@@ -1714,6 +1767,7 @@ CREATE TABLE IF NOT EXISTS \`${DEPLOY_STATE_DB}\`.tenant_identity (
     backend_workflow_run_url  VARCHAR(512) NOT NULL DEFAULT '',
     backend_built_at          VARCHAR(64)  NOT NULL DEFAULT '',
     backend_deployment_status VARCHAR(32)  NOT NULL DEFAULT 'unknown',
+    backend_deployed_at       TIMESTAMP NULL DEFAULT NULL,
     frontend_image_ref         VARCHAR(512) NOT NULL DEFAULT '',
     frontend_image_digest      VARCHAR(255) NOT NULL DEFAULT '',
     frontend_channel           VARCHAR(64)  NOT NULL DEFAULT '',
@@ -1723,7 +1777,10 @@ CREATE TABLE IF NOT EXISTS \`${DEPLOY_STATE_DB}\`.tenant_identity (
     frontend_workflow_run      VARCHAR(128) NOT NULL DEFAULT '',
     frontend_workflow_run_url  VARCHAR(512) NOT NULL DEFAULT '',
     frontend_built_at          VARCHAR(64)  NOT NULL DEFAULT '',
-    frontend_deployment_status VARCHAR(32)  NOT NULL DEFAULT 'unknown'
+    frontend_deployment_status VARCHAR(32)  NOT NULL DEFAULT 'unknown',
+    frontend_deployed_at       TIMESTAMP NULL DEFAULT NULL,
+    backend_deployment_error   TEXT NULL,
+    frontend_deployment_error  TEXT NULL
 ) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS \`${DEPLOY_STATE_DB}\`.tenant_deployment_audit (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,

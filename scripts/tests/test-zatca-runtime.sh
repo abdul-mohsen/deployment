@@ -58,6 +58,10 @@ echo
 echo "=== readiness and reconciliation signals ==="
 grep -qF '/jsz?accounts=true&streams=true&consumers=true' "$HEALTH_SCRIPT" \
     || fail "health script does not inspect JetStream consumers"
+grep -qF 'fail-with-body' "$HEALTH_SCRIPT" \
+    || fail "health script discards actionable daemon readiness failures"
+grep -qF 'readiness_payload' "$HEALTH_SCRIPT" \
+    || fail "health script does not preserve daemon readiness diagnostics"
 grep -qF 'num_pending' "$HEALTH_SCRIPT" || fail "pending signal is missing"
 grep -qF 'num_ack_pending' "$HEALTH_SCRIPT" || fail "ack-pending signal is missing"
 grep -qF 'num_redelivered' "$HEALTH_SCRIPT" || fail "redelivery signal is missing"

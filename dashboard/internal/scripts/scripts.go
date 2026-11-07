@@ -391,6 +391,12 @@ func (s Script) ControlCommand() string {
 		return "dokku fix-hostname"
 	case "setup-nats":
 		return "setup nats"
+	case "setup-zatca-daemon":
+		return "setup zatca-daemon"
+	case "health-zatca-daemon":
+		return "setup zatca-health"
+	case "reload-zatca-daemon":
+		return "setup zatca-reload"
 	case "discover-dokku-nginx":
 		return "dokku discover-nginx"
 	case "watch-dokku-traffic":
@@ -671,6 +677,8 @@ func Catalog() []Script {
 				imageVersionFieldForScope(false, "role"),
 				{Name: "to", Flag: "--to", Type: "hidden"},
 				{Name: "list", Label: "List recent deploys", Flag: "--list", Type: "checkbox", Boolean: true},
+				{Name: "confirm_schema_compatible", Label: "Confirm no schema change needs a restore first", Flag: "--confirm-schema-compatible", Type: "checkbox", Boolean: true,
+					Help: "Required for a backend rollback. Schema changes are forward-only: if one needs a restore, restore the backup first, then check this."},
 			},
 		},
 		{
@@ -768,6 +776,23 @@ func Catalog() []Script {
 		{
 			Name: "setup-nats.sh", Title: "Setup NATS",
 			Summary: "Run a NATS JetStream server on the host (idempotent). Backends connect via host.docker.internal:4222.",
+		},
+		{
+			Name: "setup-zatca-daemon.sh", Title: "Setup ZATCA daemon",
+			Summary: "Start the optional daemon-owned NATS/JetStream service and gate it on readiness and queue health.",
+			Danger:  true,
+		},
+		{
+			Name: "health-zatca-daemon.sh", Title: "ZATCA daemon health",
+			Summary: "Check NATS readiness and report ZATCA pending, ack-pending, and redelivery signals.",
+		},
+		{
+			Name: "reload-zatca-daemon.sh", Title: "Reload ZATCA tenants",
+			Summary: "Recreate the startup-loaded daemon tenant map after a registry change while retaining queue and XML data.",
+			Danger:  true,
+			Fields: []Field{
+				{Name: "tenant", Label: "Tenant (optional)", Flag: "--tenant", Type: "text", Placeholder: "acme"},
+			},
 		},
 		{
 			Name: "discover-dokku-nginx.sh", Title: "Discover Dokku nginx",

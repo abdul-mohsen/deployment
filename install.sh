@@ -8,8 +8,7 @@
 # Usage:
 #   sudo bash install.sh --base-domain dev.example.com \
 #                        --acme-email admin@example.com \
-#                        --mysql-admin-user dokku_admin \
-#                        --mysql-admin-password 'strong-password' \
+#                        --mysql-password 'changeme' \
 #                        --dockerhub-user abdulmohsenssda
 #
 # Flags (all map 1:1 to config.env keys):
@@ -19,13 +18,11 @@
 #   --dokku-port         DOKKU_PORT           (default: 8080)
 #   --mysql-host         MYSQL_HOST           (default: host.docker.internal)
 #   --mysql-port         MYSQL_PORT           (default: 3306)
-#   --mysql-admin-user  MYSQL_ADMIN_USER     (default: dokku_admin)
-#   --mysql-admin-password MYSQL_ADMIN_PASSWORD (required when writing config)
-#   --mysql-user         legacy alias for --mysql-admin-user
-#   --mysql-password     legacy alias for --mysql-admin-password
+#   --mysql-user         MYSQL_ROOT_USER      (default: root)
+#   --mysql-password     MYSQL_ROOT_PASSWORD  (required)
 #   --master-db          MYSQL_MASTER_DB      (default: zatca_master)
 #   --dockerhub-user     DOCKERHUB_USERNAME   (required for auto-pull)
-#   --pull-tag           PULL_TAG             (default: dev)
+#   --pull-tag           PULL_TAG             (default: latest)
 #   --dev-tenant         DEV_TENANT           (default: dev)
 #   --dev-tag            DEV_TAG              (default: dev)
 #   --webhook-secret     WEBHOOK_SECRET       (default: auto-generated)
@@ -69,31 +66,20 @@ fi
 : "${DOKKU_PORT:=8080}"
 : "${MYSQL_HOST:=host.docker.internal}"
 : "${MYSQL_PORT:=3306}"
-if [ -z "${MYSQL_ADMIN_USER:-}" ]; then
-    if [ -n "${MYSQL_ROOT_USER:-}" ]; then
-        MYSQL_ADMIN_USER="$MYSQL_ROOT_USER"
-    elif [ -n "${MYSQL_ROOT_PASSWORD:-}" ] && [ -z "${MYSQL_ADMIN_PASSWORD:-}" ]; then
-        MYSQL_ADMIN_USER="root"
-    else
-        MYSQL_ADMIN_USER="dokku_admin"
-    fi
-fi
-: "${MYSQL_ADMIN_PASSWORD:=${MYSQL_ROOT_PASSWORD:-}}"
+: "${MYSQL_ROOT_USER:=dokku_admin}"
+: "${MYSQL_ROOT_PASSWORD:=}"
 : "${MYSQL_MASTER_DB:=zatca_master}"
 : "${MYSQL_TENANT_HOST:=%}"
 : "${DOCKERHUB_USERNAME:=}"
-: "${PULL_TAG:=dev}"
+: "${PULL_TAG:=latest}"
 : "${APPS:=backend frontend}"
-: "${APP_IMAGE_backend:=ifritah-api}"
-: "${APP_IMAGE_frontend:=ifritah-web}"
+: "${APP_IMAGE_backend:=api}"
+: "${APP_IMAGE_frontend:=web}"
 : "${DEV_TENANT:=dev}"
 : "${DEV_TAG:=dev}"
 : "${WEBHOOK_SECRET:=}"
 : "${STORAGE_ROOT:=/opt/tenant-data}"
 : "${BACKUP_DIR:=/opt/tenant-backups}"
-# Tenant schema migrations are applied from the selected backend image by
-# scripts/init-tenant-db.sh. Keep this legacy custom hook opt-in.
-: "${MIGRATE_CMD:=}"
 
 DEV_ONLY=true
 SKIP_DEV_TENANT=false
@@ -107,8 +93,8 @@ while [[ $# -gt 0 ]]; do
         --dokku-port)       DOKKU_PORT="$2"; shift 2 ;;
         --mysql-host)       MYSQL_HOST="$2"; shift 2 ;;
         --mysql-port)       MYSQL_PORT="$2"; shift 2 ;;
-        --mysql-admin-user|--mysql-user) MYSQL_ADMIN_USER="$2"; shift 2 ;;
-        --mysql-admin-password|--mysql-password) MYSQL_ADMIN_PASSWORD="$2"; shift 2 ;;
+        --mysql-user)       MYSQL_ROOT_USER="$2"; shift 2 ;;
+        --mysql-password)   MYSQL_ROOT_PASSWORD="$2"; shift 2 ;;
         --master-db)        MYSQL_MASTER_DB="$2"; shift 2 ;;
         --dockerhub-user)   DOCKERHUB_USERNAME="$2"; shift 2 ;;
         --pull-tag)         PULL_TAG="$2"; shift 2 ;;
@@ -145,7 +131,7 @@ fi
 if $WRITE_CONFIG; then
     # Required values
     [ -z "$BASE_DOMAIN" ]         && { error "--base-domain or BASE_DOMAIN is required"; exit 1; }
-    [ -z "$MYSQL_ADMIN_PASSWORD" ] && { error "--mysql-admin-password or MYSQL_ADMIN_PASSWORD is required"; exit 1; }
+    [ -z "$MYSQL_ROOT_PASSWORD" ] && { error "--mysql-password or MYSQL_ROOT_PASSWORD is required"; exit 1; }
     [ -z "$ACME_EMAIL" ] && ACME_EMAIL="admin@${BASE_DOMAIN}"
     [ -z "$WEBHOOK_SECRET" ] && WEBHOOK_SECRET="$(openssl rand -hex 32 2>/dev/null || head -c32 /dev/urandom | base64)"
 
@@ -164,8 +150,8 @@ BACKUP_DIR=${BACKUP_DIR}
 
 MYSQL_HOST=${MYSQL_HOST}
 MYSQL_PORT=${MYSQL_PORT}
-MYSQL_ADMIN_USER=${MYSQL_ADMIN_USER}
-MYSQL_ADMIN_PASSWORD=${MYSQL_ADMIN_PASSWORD}
+MYSQL_ROOT_USER=${MYSQL_ROOT_USER}
+MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
 MYSQL_MASTER_DB=${MYSQL_MASTER_DB}
 MYSQL_TENANT_HOST=${MYSQL_TENANT_HOST}
 
@@ -178,10 +164,6 @@ APP_IMAGE_frontend=${APP_IMAGE_frontend}
 
 DEV_TENANT=${DEV_TENANT}
 DEV_TAG=${DEV_TAG}
-
-# Single-quoted: \$DATABASE_URL must stay literal here. It's expanded inside
-# the backend container by Dokku at run time, not when config.env is sourced.
-MIGRATE_CMD='${MIGRATE_CMD}'
 
 WEBHOOK_SECRET=${WEBHOOK_SECRET}
 EOF
@@ -214,5 +196,5 @@ DEV_SCHEME="http"
 [ "${ENABLE_SSL:-false}" = "true" ] && DEV_SCHEME="https"
 info "Dev URL:        ${DEV_SCHEME}://${DEV_TENANT}.${BASE_DOMAIN}"
 info "Auto-deploy:    webhook can deploy the exact VERSION tag from your app repo"
-info "Manual prod:    bash scripts/deploy-all.sh ${DOCKERHUB_USERNAME:-<user>}/ifritah-api:<release-tag> --tenant <client>"
+info "Manual prod:    bash scripts/deploy-all.sh ${DOCKERHUB_USERNAME:-<user>}/api:v0.0.1 --tenant <client>"
 info "Logs:           bash scripts/tail-logs.sh ${DEV_TENANT}-backend"

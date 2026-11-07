@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# status.sh — Live status of all Dokku tenants on this server
+# status.sh â€” Live status of all Dokku tenants on this server
 # =============================================================================
 # Prints a single-pass report of:
 #   - Dokku container health
@@ -50,6 +50,8 @@ fi
 
 BASE_DOMAIN="${BASE_DOMAIN:-<unset>}"
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
+DEPLOY_STATE_DB="${DEPLOY_STATE_DB:-deployment_state}"
+validate_database_identifier "$DEPLOY_STATE_DB" || exit 1
 AUTO_PULL_STATUS_LINE="$(auto_pull_cron_status "$SCRIPT_DIR/auto-pull.sh")"
 IFS=$'\t' read -r AUTO_PULL_STATE AUTO_PULL_DIAGNOSTIC <<< "$AUTO_PULL_STATUS_LINE"
 
@@ -322,13 +324,14 @@ tenant_pin() {
         echo "|"; return
     fi
     run_mysql -N -B -e \
-        "SELECT IFNULL(backend_image,''), IFNULL(frontend_image,''), enabled
-           FROM \`${MYSQL_MASTER_DB}\`.tenant
-          WHERE name='${name//\'/}' LIMIT 1;" 2>/dev/null \
+        "SELECT IFNULL(i.backend_image,''), IFNULL(i.frontend_image,''), t.enabled
+           FROM \`${MYSQL_MASTER_DB}\`.tenant t
+           LEFT JOIN \`${DEPLOY_STATE_DB}\`.tenant_image i ON i.name = t.name
+          WHERE t.name='${name//\'/}' LIMIT 1;" 2>/dev/null \
         | awk -F'\t' '{printf "%s|%s|%s", $1, $2, $3}'
 }
 
-# Echoes the verified identity for the app kind:
+# Echoes the verified identity for the app kind from deployment-owned state:
 # image_ref|digest|version|commit|status
 tenant_provenance() {
     local name="$1" kind="$2" p
@@ -337,11 +340,11 @@ tenant_provenance() {
         echo "||||"
         return
     fi
-    run_mysql -N -B -e \
+    run_mysql -N -B "$DEPLOY_STATE_DB" -e \
         "SELECT IFNULL(${p}_image_ref,''), IFNULL(${p}_image_digest,''),
                 IFNULL(${p}_version,''), IFNULL(${p}_commit,''),
                 IFNULL(${p}_deployment_status,'unknown')
-           FROM \`${MYSQL_MASTER_DB}\`.tenant
+           FROM tenant_identity
           WHERE name='${name//\'/}' LIMIT 1;" 2>/dev/null \
         | awk -F'\t' '{printf "%s|%s|%s|%s|%s", $1,$2,$3,$4,$5}'
 }
@@ -382,12 +385,12 @@ render_once() {
     if ! $JSON; then
         echo ""
         echo "${B}===========================================================${N}"
-        echo "${B}  Dokku Status — *.${BASE_DOMAIN}   $(date '+%F %T %Z')${N}"
+        echo "${B}  Dokku Status â€” *.${BASE_DOMAIN}   $(date '+%F %T %Z')${N}"
         echo "${B}===========================================================${N}"
         printf "  Dokku container : %s\n" "$(colorize_state "$dstate")"
         printf "  Dokku host ports: %s\n" "${dports:-<none>}"
         [ -n "$(tenant_name_prefix)" ] && printf "  Tenant prefix   : %s\n" "$(tenant_name_prefix)"
-        printf "  Auto-pull cron  : %s — %s\n" "$AUTO_PULL_STATE" "$AUTO_PULL_DIAGNOSTIC"
+        printf "  Auto-pull cron  : %s â€” %s\n" "$AUTO_PULL_STATE" "$AUTO_PULL_DIAGNOSTIC"
         printf "  Repo commit     : %s (%s)\n" \
             "$(git -c safe.directory='*' -C "$SCRIPT_DIR/.." rev-parse --short HEAD 2>/dev/null || echo unknown)" \
             "$(git -c safe.directory='*' -C "$SCRIPT_DIR/.." branch --show-current 2>/dev/null || echo unknown)"
@@ -395,7 +398,7 @@ render_once() {
     fi
 
     if [ "$dstate" != "running" ]; then
-        $JSON || echo "${R}Dokku is not running — no app data to report.${N}"
+        $JSON || echo "${R}Dokku is not running â€” no app data to report.${N}"
         $JSON && printf '{"dokku":"%s",%s,"apps":[]}\n' "$dstate" "$(json_auto_pull_field)"
         return
     fi
@@ -427,8 +430,8 @@ render_once() {
             docker exec -i dokku dokku apps:list 2>&1 | sed 's/^/    /' || true
             echo ""
             echo "  Hints:"
-            echo "    • Did setup-dev-tenant.sh complete?  sudo bash scripts/setup-dev-tenant.sh"
-            echo "    • Create one manually:                 dokku apps:create dev-backend"
+            echo "    â€¢ Did setup-dev-tenant.sh complete?  sudo bash scripts/setup-dev-tenant.sh"
+            echo "    â€¢ Create one manually:                 dokku apps:create dev-backend"
         fi
         return
     fi

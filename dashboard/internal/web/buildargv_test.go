@@ -4,6 +4,7 @@ import (
 	"html/template"
 	"net/url"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -261,6 +262,34 @@ func TestBuildArgv_SetTenantImageHonorsSelectedRole(t *testing.T) {
 	}
 	if strings.Contains(joined, "--frontend ") {
 		t.Fatalf("frontend pin should not be emitted for backend selection: %s", joined)
+	}
+}
+
+func TestBuildArgv_RollbackTenant_ConfirmSchemaCompatibleIsOptIn(t *testing.T) {
+	setVersionTestEnv(t)
+	sc := scripts.Find("rollback-tenant.sh")
+	if sc == nil {
+		t.Fatal("rollback-tenant.sh not in catalog")
+	}
+	form := url.Values{
+		"_pos_name": {"acme"},
+		"type":      {"backend"},
+		"to":        {"ssdawweq/ifritah-api:v0.0.1"},
+	}
+	unchecked, err := buildArgv(sc, form)
+	if err != nil {
+		t.Fatalf("buildArgv unchecked: %v", err)
+	}
+	if slices.Contains(unchecked, "--confirm-schema-compatible") {
+		t.Fatalf("flag added while the box is unchecked: %v", unchecked)
+	}
+	form.Set("confirm_schema_compatible", "on")
+	checked, err := buildArgv(sc, form)
+	if err != nil {
+		t.Fatalf("buildArgv checked: %v", err)
+	}
+	if !slices.Contains(checked, "--confirm-schema-compatible") {
+		t.Fatalf("checked box did not add the flag: %v", checked)
 	}
 }
 

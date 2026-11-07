@@ -27,6 +27,13 @@ warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[x]${NC} $*" >&2; }
 info()  { echo -e "${BLUE}[i]${NC} $*"; }
 
+zatca_daemon_enabled() {
+    case "${ZATCA_DAEMON_ENABLED:-0}" in
+        1|true|yes) return 0 ;;
+        *)          return 1 ;;
+    esac
+}
+
 # Parse --config early (before sourcing)
 CONFIG_FILE="$PROJECT_DIR/config.env"
 for i in $(seq 1 $#); do
@@ -258,6 +265,9 @@ SQLEOF
 UPDATE tenant SET enabled=0 WHERE db_name='${TENANT_DB_NAME}';
 DELETE FROM tenant WHERE db_name='${TENANT_DB_NAME}' AND name='${TENANT_NAME}';
 SQLEOF
+    run_mysql "$DEPLOY_STATE_DB" <<SQLEOF 2>/dev/null || true
+DELETE FROM tenant_image WHERE name='${TENANT_NAME}';
+SQLEOF
 }
 
 remove_host_nginx_vhost() {
@@ -320,6 +330,12 @@ destroy_app "$FRONTEND_APP"
 remove_tenant_registry_leftovers
 remove_common_dokku_leftovers
 drop_database
+if ! $DRY_RUN && zatca_daemon_enabled; then
+    log "Refreshing ZATCA daemon tenant discovery..."
+    bash "$SCRIPT_DIR/reload-zatca-daemon.sh" \
+        --config "$CONFIG_FILE" \
+        --tenant "$TENANT_NAME"
+fi
 remove_host_nginx_vhost
 remove_network
 remove_storage_data

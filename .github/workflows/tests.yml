@@ -41,14 +41,21 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/tests/test-tenant-env-allowlist.sh
+          bash scripts/tests/test-create-tenant.sh
+          bash scripts/tests/test-deployment-state-provenance.sh
           bash scripts/tests/test-reconcile-runtime.sh
           bash scripts/tests/test-tenant-provenance.sh
           bash scripts/tests/test-runtime-probes.sh
           bash scripts/tests/test-deployctl.sh
+          bash scripts/tests/test-zatca-runtime.sh
 
       - name: Check deployment contracts
         shell: bash
         run: bash scripts/tests/test-release-contract.sh
+
+      - name: Check backend rollback schema guard
+        shell: bash
+        run: bash scripts/tests/test-rollback-tenant.sh
 
       - name: Check deployment logging contracts
         shell: bash

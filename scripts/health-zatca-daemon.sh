@@ -2,10 +2,12 @@
 # =============================================================================
 # health-zatca-daemon.sh — Readiness and bounded JetStream queue signals.
 # =============================================================================
-# The daemon exposes the authenticated NATS monitor. This check verifies
-# JetStream readiness, then reports the ZATCA stream's pending, ack-pending,
-# and redelivery counters. ZATCA_MAX_PENDING and ZATCA_MAX_ACK_PENDING are
-# deployment thresholds; they are not daemon configuration knobs.
+# The daemon exposes the authenticated NATS monitor. Its /healthz endpoint
+# includes tenant reconciliation and expected-consumer readiness; this check
+# preserves that diagnostic when readiness fails, then reports the ZATCA
+# stream's pending, ack-pending, and redelivery counters. ZATCA_MAX_PENDING
+# and ZATCA_MAX_ACK_PENDING are deployment thresholds; they are not daemon
+# configuration knobs.
 #
 # Usage:
 #   bash scripts/health-zatca-daemon.sh --config /opt/deployment/config.env
@@ -120,14 +122,15 @@ user = "health:${ZATCA_MONITOR_PASSWORD}"
 fail
 silent
 show-error
+fail-with-body
 connect-timeout = ${TIMEOUT_SECONDS}
 max-time = ${TIMEOUT_SECONDS}
 output = -
 CURL_CONFIG
 }
 
-monitor_get "/healthz" >/dev/null \
-    || fail "daemon readiness check failed at ${MONITOR_BASE}/healthz"
+readiness_payload="$(monitor_get "/healthz" 2>&1)" \
+    || fail "daemon readiness check failed at ${MONITOR_BASE}/healthz: ${readiness_payload}"
 
 jsz_payload="$(monitor_get "/jsz?accounts=true&streams=true&consumers=true" 2>/dev/null)" \
     || fail "daemon JetStream monitor check failed at ${MONITOR_BASE}/jsz"

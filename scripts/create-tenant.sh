@@ -24,6 +24,7 @@
 #   --env KEY=VALUE           Set env var (repeatable)
 #   --git-only                Create apps without deploying (deploy via git push)
 #   --dry-run                 Show plan without executing
+#   --update                  Re-run provisioning for an existing tenant
 #   --config <path>           Path to config.env file (default: ../config.env)
 #
 # Examples:
@@ -96,6 +97,9 @@ NO_DATABASE=false
 GIT_ONLY=false
 DRY_RUN=false
 FORCE_UPDATE=false
+EXISTING_TENANT_DATABASE=false
+UPDATE_BACKUP_ID=""
+UPDATE_BACKUP_ARTIFACT=""
 declare -a ENV_VARS=()
 declare -A PREVIOUS_CONFIG=()
 declare -A PREVIOUS_IDENTITY=()
@@ -304,6 +308,8 @@ record_deployment_failure() {
 
 record_verified_image_identity() {
     local app_type="$1" image="$2" resolved_ref
+    local backup_id="${UPDATE_BACKUP_ID:-}"
+    local backup_artifact="${UPDATE_BACKUP_ARTIFACT:-}"
     resolved_ref="${image%@*}@${BUILD_DIGEST}"
     if ! tenant_record_identity "$TENANT_NAME" "$app_type" "$image" "$BUILD_IMAGE_REF" \
         "$BUILD_DIGEST" "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" \
@@ -314,7 +320,7 @@ record_verified_image_identity() {
     tenant_record_audit "$TENANT_NAME" "$app_type" "$image" "$resolved_ref" "$BUILD_DIGEST" \
         "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
         "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" \
-        "" "" "verified" ""
+        "" "" "verified" "" "$backup_id" "$backup_artifact"
 }
 
 find_existing_tenant_network() {
@@ -531,6 +537,54 @@ create_dokku_app() {
     exit 1
 }
 
+require_update_backup() {
+    if [ "$FORCE_UPDATE" != "true" ] ||
+        [ -z "$BACKEND_IMAGE" ] ||
+        [ "$EXISTING_TENANT_DATABASE" != "true" ]; then
+        return 0
+    fi
+
+    local backup_info backup_id backup_artifact
+    log "Creating verified pre-migration backup for ${TENANT_NAME}..."
+    if ! backup_info="$(create_verified_tenant_db_backup "$TENANT_NAME" "$CONFIG_FILE")"; then
+        error "Verified pre-migration backup failed; refusing to mutate existing tenant."
+        return 1
+    fi
+
+    IFS=$'\t' read -r backup_id backup_artifact _ <<< "$backup_info"
+    if [ -z "$backup_id" ] || [ -z "$backup_artifact" ]; then
+        error "Verified pre-migration backup identity is incomplete; refusing to mutate existing tenant."
+        return 1
+    fi
+
+    UPDATE_BACKUP_ID="$backup_id"
+    UPDATE_BACKUP_ARTIFACT="$backup_artifact"
+    log "Verified pre-migration backup ready: ${UPDATE_BACKUP_ID}"
+}
+
+initialize_tenant_schema() {
+    if [ -z "$BACKEND_IMAGE" ]; then
+        warn "No backend image supplied; skipping schema initialization."
+        warn "Run later: bash scripts/init-tenant-db.sh $TENANT_NAME --backend-image <image> --schema-only"
+        return 0
+    fi
+
+    ensure_tenant_image_available "$BACKEND_IMAGE"
+    if ! resolve_build_identity "$BACKEND_IMAGE"; then
+        error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
+        return 1
+    fi
+    log "Running goose migrations from backend image..."
+    if ! bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
+        --schema-only \
+        --backend-image "$BACKEND_IMAGE" \
+        --config "$CONFIG_FILE"; then
+        error "Tenant database schema initialization failed."
+        return 1
+    fi
+    DB_PROVISIONED=true
+}
+
 # ---- Show plan ----
 echo ""
 info "=== Tenant Provisioning Plan ==="
@@ -571,13 +625,14 @@ fi
 
 # The registry row below gets its tenant_key from ZATCA's trigger. Refuse before
 # anything is created if zatca_master is not migrated yet.
+existing_database=false
+existing_registry=false
 if ! $NO_DATABASE && [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" != "changeme" ]; then
     require_registry_tenant_key || exit 1
 
-    existing_database=false
-    existing_registry=false
     if tenant_database_exists "$TENANT_DB_NAME"; then
         existing_database=true
+        EXISTING_TENANT_DATABASE=true
     else
         rc=$?
         if [ "$rc" -ne 1 ]; then
@@ -602,6 +657,13 @@ if ! $NO_DATABASE && [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" !
         fi
         warn "Existing tenant state detected; --update is limited to explicit recovery of this tenant."
     fi
+fi
+
+# A verified rollback point is needed only when --update will replay backend
+# migrations against a database that already exists. Recovery of a partially
+# provisioned tenant creates the missing database and must remain retryable.
+if ! require_update_backup; then
+    exit 1
 fi
 
 # =============================================================================
@@ -821,21 +883,8 @@ SQLEOF
 
         log "Database ready: $TENANT_DB_NAME"
 
-        if [ -n "$BACKEND_IMAGE" ]; then
-            ensure_tenant_image_available "$BACKEND_IMAGE"
-            if ! resolve_build_identity "$BACKEND_IMAGE"; then
-                error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
-                exit 1
-            fi
-            log "Running goose migrations from backend image..."
-            bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
-                --schema-only \
-                --backend-image "$BACKEND_IMAGE" \
-                --config "$CONFIG_FILE"
-            DB_PROVISIONED=true
-        else
-            warn "No backend image supplied; skipping schema initialization."
-            warn "Run later: bash scripts/init-tenant-db.sh $TENANT_NAME --backend-image <image> --schema-only"
+        if ! initialize_tenant_schema; then
+            exit 1
         fi
     fi
 fi

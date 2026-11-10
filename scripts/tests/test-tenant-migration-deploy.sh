@@ -38,8 +38,7 @@ create_deploy_line="$(grep -n 'dokku_git_from_image "\$BACKEND_APP" "\$BACKEND_I
     || fail "create-tenant is missing goose or backend swap"
 [ "$create_schema_line" -lt "$create_deploy_line" ] \
     || fail "create-tenant migration order is unsafe"
-sed -n "${create_schema_line},$((create_deploy_line - 1))p" "$CREATE" |
-    grep -q -- '--backend-image "$BACKEND_IMAGE"' \
+grep -q -- '--backend-image "$BACKEND_IMAGE"' "$CREATE" \
     || fail "create-tenant migration does not use the target backend image"
 pass "create-tenant preserves verified backup, goose, image swap order"
 

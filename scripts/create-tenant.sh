@@ -24,6 +24,7 @@
 #   --env KEY=VALUE           Set env var (repeatable)
 #   --git-only                Create apps without deploying (deploy via git push)
 #   --dry-run                 Show plan without executing
+#   --update                  Re-run provisioning for an existing tenant
 #   --migrate <cmd>           Run migration after initial deploy (e.g. "npm run migrate")
 #   --config <path>           Path to config.env file (default: ../config.env)
 #
@@ -366,6 +367,42 @@ create_dokku_app() {
     exit 1
 }
 
+require_update_backup() {
+    if [ "$FORCE_UPDATE" != "true" ]; then
+        return 0
+    fi
+
+    log "Taking verified pre-migration backup for $TENANT_NAME..."
+    if ! bash "$SCRIPT_DIR/backup-tenant.sh" "$TENANT_NAME" \
+            --origin auto --owner create-tenant-update --require-verified --no-prune \
+            --config "$CONFIG_FILE"; then
+        error "Verified pre-migration backup failed — refusing to update tenant database."
+        return 1
+    fi
+}
+
+initialize_tenant_schema() {
+    if [ -z "$BACKEND_IMAGE" ]; then
+        warn "No backend image supplied; skipping schema initialization."
+        warn "Run later: bash scripts/init-tenant-db.sh $TENANT_NAME --backend-image <image> --schema-only"
+        return 0
+    fi
+
+    log "Initializing tenant database schema from backend image..."
+    if ! bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
+            --schema-only \
+            --backend-image "$BACKEND_IMAGE" \
+            --config "$CONFIG_FILE" \
+            --env "DB_HOST=$MYSQL_APP_HOST" \
+            --env "DB_PORT=$MYSQL_PORT" \
+            --env "DB_USER=$TENANT_DB_USER" \
+            --env "DB_PASSWORD=$TENANT_DB_PASS"; then
+        error "Tenant database schema initialization failed."
+        return 1
+    fi
+    DB_PROVISIONED=true
+}
+
 # ---- Show plan ----
 echo ""
 info "=== Tenant Provisioning Plan ==="
@@ -402,6 +439,12 @@ echo ""
 if $DRY_RUN; then
     warn "Dry run — no changes made."
     exit 0
+fi
+
+# Updates must have a verified rollback point before any provisioning or
+# migration work can change the existing tenant.
+if ! require_update_backup; then
+    exit 1
 fi
 
 # =============================================================================
@@ -618,20 +661,8 @@ SQLEOF
 
         log "Database ready: $TENANT_DB_NAME"
 
-        if [ -n "$BACKEND_IMAGE" ]; then
-            log "Initializing tenant database schema from backend image..."
-            bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
-                --schema-only \
-                --backend-image "$BACKEND_IMAGE" \
-                --config "$CONFIG_FILE" \
-                --env "DB_HOST=$MYSQL_APP_HOST" \
-                --env "DB_PORT=$MYSQL_PORT" \
-                --env "DB_USER=$TENANT_DB_USER" \
-                --env "DB_PASSWORD=$TENANT_DB_PASS"
-            DB_PROVISIONED=true
-        else
-            warn "No backend image supplied; skipping schema initialization."
-            warn "Run later: bash scripts/init-tenant-db.sh $TENANT_NAME --backend-image <image> --schema-only"
+        if ! initialize_tenant_schema; then
+            exit 1
         fi
     fi
 fi

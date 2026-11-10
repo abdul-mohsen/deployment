@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-all.sh — Deploy a Docker image to all tenants (canary-first)
+# deploy-all.sh â€” Deploy a Docker image to all tenants (canary-first)
 # =============================================================================
 # Usage:
 #   ./scripts/deploy-all.sh <image> [--type backend|frontend] [--skip-canary]
@@ -9,11 +9,11 @@
 #   ./scripts/deploy-all.sh <image> --config /opt/deployment/config.dev.env
 #
 # Examples:
-#   ./scripts/deploy-all.sh myuser/api:v2.1                    # backend to all
-#   ./scripts/deploy-all.sh myuser/api:v2.1 --type backend
-#   ./scripts/deploy-all.sh myuser/web:v2.1 --type frontend
-#   ./scripts/deploy-all.sh myuser/api:v2.1 --tenant acme      # single tenant only
-#   ./scripts/deploy-all.sh myuser/api:v2.1 --skip-canary      # no canary check
+#   ./scripts/deploy-all.sh myuser/ifritah-api:v2.1                    # backend to all
+#   ./scripts/deploy-all.sh myuser/ifritah-api:v2.1 --type backend
+#   ./scripts/deploy-all.sh myuser/ifritah-web:v2.1 --type frontend
+#   ./scripts/deploy-all.sh myuser/ifritah-api:v2.1 --tenant acme      # single tenant only
+#   ./scripts/deploy-all.sh myuser/ifritah-api:v2.1 --skip-canary      # no canary check
 # =============================================================================
 
 set -euo pipefail
@@ -21,6 +21,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/lib.sh"
+source "$SCRIPT_DIR/tenant-provenance.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -28,10 +29,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-log()   { echo -e "${GREEN}[+]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-error() { echo -e "${RED}[✗]${NC} $*" >&2; }
-info()  { echo -e "${BLUE}[i]${NC} $*"; }
+log()   { deployment_log INFO "$*"; echo -e "${GREEN}[+]${NC} $*"; }
+warn()  { deployment_log WARN "$*"; echo -e "${YELLOW}[!]${NC} $*"; }
+error() { deployment_log ERROR "$*"; echo -e "${RED}[âœ—]${NC} $*" >&2; }
+info()  { deployment_log INFO "$*"; echo -e "${BLUE}[i]${NC} $*"; }
 
 CONFIG_FILE="$PROJECT_DIR/config.env"
 
@@ -54,6 +55,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+deployment_init_logging
+
+validate_database_identifier "${MYSQL_MASTER_DB:-zatca_master}" || exit 1
+validate_database_identifier "${DEPLOY_STATE_DB:-deployment_state}" || exit 1
+validate_nats_url "${NATS_URL:-nats://host.docker.internal:4222}" || exit 1
 
 if [ -z "$IMAGE" ]; then
     echo "Usage: $0 <image> [--type backend|frontend] [--tenant <name>] [--skip-canary]"
@@ -62,9 +68,20 @@ fi
 
 SUFFIX="-${APP_TYPE}"
 BASE_DOMAIN="${BASE_DOMAIN:-app.example.com}"
+public_protocol >/dev/null || exit 1
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
-MIGRATE_CMD="${MIGRATE_CMD:-}"
 IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"
+VERIFY_RETRIES="${TENANT_VERIFY_RETRIES:-15}"
+VERIFY_DELAY="${TENANT_VERIFY_DELAY:-2}"
+declare -A PREVIOUS_CONFIG=()
+
+RUNTIME_IDENTITY_KEYS=(
+    APP_VERSION APP_COMMIT APP_COMMIT_SHORT APP_BUILD_CHANNEL APP_CHANNEL
+    APP_IMAGE_CHANNEL APP_BUILD_WORKFLOW_RUN APP_WORKFLOW_RUN
+    APP_WORKFLOW_RUN_ID APP_WORKFLOW_RUN_URL APP_BUILT_AT APP_BUILD_AT APP_CREATED
+    APP_IMAGE_REF APP_IMAGE_DIGEST APP_IMAGE_RESOLVED_REF APP_IMAGE_VERSION
+    APP_IMAGE_TAG APP_IMAGE_COMMIT APP_IMAGE_COMMIT_SHORT APP_SOURCE APP_DEPLOYED_AT
+)
 
 ensure_deploy_image_available() {
     local image="$1"
@@ -105,45 +122,284 @@ image_tag() {
 get_tenant_override() {
     local tenant="$1"
     local col="${APP_TYPE}_image"
-    [ -z "${MYSQL_ROOT_PASSWORD:-}" ] && { echo ""; return; }
-    run_mysql -N -B "$MYSQL_MASTER_DB" -e \
-        "SELECT $col FROM tenant WHERE name='${tenant}' AND enabled=1 LIMIT 1;" 2>/dev/null \
-        | head -1 || echo ""
+    ! mysql_admin_configured && { echo ""; return; }
+    run_mysql -N -B "$DEPLOY_STATE_DB" -e \
+        "SELECT i.$col FROM \`${DEPLOY_STATE_DB}\`.tenant_image i JOIN \`${MYSQL_MASTER_DB}\`.tenant t ON t.name = i.name WHERE i.name='${tenant}' AND t.enabled=1 LIMIT 1;" \
+        | head -1
 }
 
-# Deploy one app, honoring per-tenant override and running migrations
+# Deploy one app, honoring per-tenant override and verifying BuildIdentity.
 deploy_one() {
     local app="$1"
     local tenant="${app%${SUFFIX}}"
+    deployment_set_tenant "$tenant"
     local image="$IMAGE"
+    local previous_image previous_identity backup_info="" backup_id="" backup_artifact=""
+    local migrations_attempted=false
 
     # Per-tenant override (only for backend; frontend rarely needs pinning)
     local override
-    override=$(get_tenant_override "$tenant")
+    if ! override=$(get_tenant_override "$tenant"); then
+        error "${tenant}: cannot read the image pin from ${DEPLOY_STATE_DB}.tenant_image; not deploying"
+        return 1
+    fi
     if [ -n "$override" ] && [ "$override" != "$IMAGE" ]; then
-        warn "${tenant}: pinned to '${override}' — skipping global deploy"
+        warn "${tenant}: pinned to '${override}' â€” skipping global deploy"
         return 0
     fi
 
+    previous_image="$(dokku git:report "$app" 2>/dev/null |
+        awk -F': ' 'tolower($1) ~ /source-image/ {print $2; exit}' || true)"
+    if ! capture_runtime_config "$app"; then
+        error "${app}: failed to capture current runtime identity"
+        return 1
+    fi
+    if ! previous_identity="$(tenant_current_identity "$tenant" "$APP_TYPE")"; then
+        error "${app}: failed to read current durable identity"
+        return 1
+    fi
+    split_tab_fields "$previous_identity"
+    local previous_digest="${TAB_FIELDS[1]-}"
+    local resolved_ref="${image%@*}@${BUILD_DIGEST}"
+
+    if [ "$APP_TYPE" = "backend" ]; then
+        if ! backup_info="$(create_verified_tenant_db_backup "$tenant" "$CONFIG_FILE")"; then
+            error "${tenant}: verified pre-migration database backup unavailable; refusing deployment"
+            tenant_record_failure "$tenant" "$APP_TYPE" \
+                "verified pre-migration database backup unavailable" 2>/dev/null || true
+            return 1
+        fi
+        split_tab_fields "$backup_info"
+        backup_id="${TAB_FIELDS[0]-}"
+        backup_artifact="${TAB_FIELDS[1]-}"
+        if [ -z "$backup_id" ] || [ -z "$backup_artifact" ]; then
+            error "${tenant}: incomplete backup identity; refusing deployment"
+            tenant_record_failure "$tenant" "$APP_TYPE" \
+                "pre-migration backup identity incomplete" 2>/dev/null || true
+            return 1
+        fi
+    fi
+
+    if ! tenant_record_audit "$tenant" "$APP_TYPE" "$image" "$resolved_ref" "$BUILD_DIGEST" \
+        "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
+        "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$previous_image" \
+        "$previous_digest" "started" "" \
+        "$backup_id" "$backup_artifact"; then
+        error "${tenant}: deployment audit is unavailable; refusing an untracked swap"
+        tenant_record_failure "$tenant" "$APP_TYPE" "deployment audit start failed" 2>/dev/null || true
+        return 1
+    fi
+
+    if [ "$APP_TYPE" = "backend" ]; then
+        migrations_attempted=true
+        log "  Running goose migrations on ${tenant} before image swap"
+        if ! "$SCRIPT_DIR/init-tenant-db.sh" "$tenant" --schema-only \
+            --backend-image "$image" --config "$CONFIG_FILE"; then
+            error "  Migration failed on ${app}; refusing image swap. Restore backup ${backup_id} before retry."
+            tenant_record_failure "$tenant" "$APP_TYPE" \
+                "migration replay failed; restore pre-migration backup before retry" 2>/dev/null || true
+            tenant_record_audit "$tenant" "$APP_TYPE" "$image" "$resolved_ref" "$BUILD_DIGEST" \
+                "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
+                "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$previous_image" \
+                "$previous_digest" "failed" \
+                "migration replay failed; restore backup before retry" \
+                "$backup_id" "$backup_artifact" 2>/dev/null || true
+            return 1
+        fi
+    fi
+
+    local resolved_ref="${image%@*}@${BUILD_DIGEST}"
     if ! dokku config:set --no-restart "$app" \
-            APP_IMAGE_VERSION="$(image_tag "$image")" \
-            APP_IMAGE_REF="$image"; then
+            APP_VERSION="$BUILD_VERSION" \
+            APP_COMMIT="$BUILD_COMMIT" \
+            APP_COMMIT_SHORT="$BUILD_COMMIT_SHORT" \
+            APP_BUILD_CHANNEL="$BUILD_CHANNEL" \
+            APP_CHANNEL="$BUILD_CHANNEL" \
+            APP_IMAGE_CHANNEL="$BUILD_CHANNEL" \
+            APP_WORKFLOW_RUN_ID="$BUILD_WORKFLOW_RUN_ID" \
+            APP_WORKFLOW_RUN_URL="$BUILD_WORKFLOW_RUN_URL" \
+            APP_BUILD_WORKFLOW_RUN="$BUILD_WORKFLOW_RUN_ID" \
+            APP_WORKFLOW_RUN="$BUILD_WORKFLOW_RUN_ID" \
+            APP_BUILT_AT="$BUILD_BUILT_AT" \
+            APP_BUILD_AT="$BUILD_BUILT_AT" \
+            APP_CREATED="$BUILD_BUILT_AT" \
+            APP_IMAGE_VERSION="$BUILD_VERSION" \
+            APP_IMAGE_TAG="$(image_tag "$image")" \
+            APP_IMAGE_COMMIT="$BUILD_COMMIT" \
+            APP_IMAGE_COMMIT_SHORT="$BUILD_COMMIT_SHORT" \
+            APP_SOURCE="$BUILD_SOURCE" \
+            APP_IMAGE_REF="$BUILD_IMAGE_REF" \
+            APP_IMAGE_DIGEST="$BUILD_DIGEST" \
+            APP_IMAGE_RESOLVED_REF="$resolved_ref" \
+            APP_DEPLOYED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; then
+        if ! restore_runtime_config "$app"; then
+            error "${app}: failed to restore runtime identity after config failure"
+        fi
+        tenant_record_failure "$tenant" "$APP_TYPE" "failed to set runtime identity" 2>/dev/null || true
+        tenant_record_audit "$tenant" "$APP_TYPE" "$image" "$resolved_ref" "$BUILD_DIGEST" \
+            "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
+            "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$previous_image" \
+            "$previous_digest" "failed" \
+            "failed to set runtime identity" "$backup_id" "$backup_artifact" 2>/dev/null || true
         return 1
     fi
 
     if ! dokku_git_from_image "$app" "$image"; then
+        if ! restore_runtime_config "$app"; then
+            error "${app}: failed to restore runtime identity after image swap failure"
+        fi
+        tenant_record_failure "$tenant" "$APP_TYPE" "image swap failed" 2>/dev/null || true
+        tenant_record_audit "$tenant" "$APP_TYPE" "$image" "$resolved_ref" "$BUILD_DIGEST" \
+            "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
+            "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$previous_image" \
+            "$previous_digest" "failed" \
+            "image swap failed" "$backup_id" "$backup_artifact" 2>/dev/null || true
         return 1
     fi
 
-    # Run DB migration if configured (backend only)
-    if [ "$APP_TYPE" = "backend" ] && [ -n "$MIGRATE_CMD" ]; then
-        log "  Running migration on ${app}: ${MIGRATE_CMD}"
-        dokku run "$app" $MIGRATE_CMD || warn "  Migration failed on ${app}"
+    local attempt
+    for ((attempt=1; attempt<=VERIFY_RETRIES; attempt++)); do
+        if verify_runtime_identity "$app" "$BUILD_VERSION" "$BUILD_COMMIT" \
+            "$BUILD_DIGEST" "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" \
+            "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
+            break
+        fi
+        if [ "$attempt" -eq "$VERIFY_RETRIES" ]; then
+            error "${app}: /version identity verification failed"
+            if [ "$migrations_attempted" = true ]; then
+                error "${app}: automatic rollback refused; image rollback cannot restore migrated DB schema/data."
+                error "Restore backup ${backup_id} (${backup_artifact}) explicitly before retry."
+            elif [ -n "$previous_image" ]; then
+                if ! dokku_git_from_image "$app" "$previous_image"; then
+                    error "${app}: failed to restore the previous image"
+                fi
+            fi
+            if [ "$migrations_attempted" = false ] &&
+                ! restore_runtime_config "$app"; then
+                error "${app}: failed to restore runtime identity after verification failure"
+            fi
+            tenant_record_failure "$tenant" "$APP_TYPE" "post-deploy /version identity verification failed" 2>/dev/null || true
+            tenant_record_audit "$tenant" "$APP_TYPE" "$image" "$resolved_ref" "$BUILD_DIGEST" \
+                "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
+                "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$previous_image" \
+                "$previous_digest" "failed" \
+                "post-deploy /version identity verification failed" \
+                "$backup_id" "$backup_artifact" 2>/dev/null || true
+            return 1
+        fi
+        sleep "$VERIFY_DELAY"
+    done
+
+    if ! tenant_record_identity "$tenant" "$APP_TYPE" "$image" "$BUILD_IMAGE_REF" \
+        "$BUILD_DIGEST" "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" \
+        "$BUILD_COMMIT_SHORT" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
+        error "${app}: failed to persist verified deployment identity"
+        if [ "$migrations_attempted" = true ]; then
+            error "${app}: automatic rollback refused after migration; restore backup ${backup_id} before retry."
+        elif [ -n "$previous_image" ]; then
+            if ! dokku_git_from_image "$app" "$previous_image"; then
+                error "${app}: failed to restore the previous image"
+            fi
+        fi
+        if [ "$migrations_attempted" = false ] &&
+            ! restore_runtime_config "$app"; then
+            error "${app}: failed to restore runtime identity after persistence failure"
+        fi
+        tenant_record_failure "$tenant" "$APP_TYPE" "failed to persist verified deployment identity" 2>/dev/null || true
+        return 1
+    fi
+    if ! tenant_record_audit "$tenant" "$APP_TYPE" "$image" "$resolved_ref" "$BUILD_DIGEST" \
+        "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
+        "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$previous_image" \
+        "$previous_digest" "verified" "" \
+        "$backup_id" "$backup_artifact" 2>/dev/null; then
+        error "${app}: failed to record successful deployment audit"
+        if [ "$migrations_attempted" = true ]; then
+            error "${app}: automatic rollback refused after migration; image rollback cannot restore migrated DB schema/data."
+            error "Restore backup ${backup_id} (${backup_artifact}) explicitly before retry."
+        else
+            if [ -n "$previous_image" ]; then
+                if ! dokku_git_from_image "$app" "$previous_image"; then
+                    error "${app}: failed to restore the previous image"
+                fi
+            fi
+            if ! restore_runtime_config "$app"; then
+                error "${app}: failed to restore runtime identity after audit failure"
+            fi
+            if ! restore_previous_identity "$tenant" "$APP_TYPE" "$previous_identity"; then
+                error "${app}: failed to restore durable identity after audit failure"
+            fi
+        fi
+        tenant_record_failure "$tenant" "$APP_TYPE" "deployment audit completion failed" 2>/dev/null || true
+        return 1
     fi
     return 0
 }
 
-# Get matching apps — either specific tenants or all
+capture_runtime_config() {
+    local app="$1" key value
+    for key in "${RUNTIME_IDENTITY_KEYS[@]}"; do
+        if ! value="$(dokku config:get "$app" "$key" 2>/dev/null)"; then
+            error "Failed to read current runtime identity for ${app} (${key})."
+            return 1
+        fi
+        PREVIOUS_CONFIG["$app:$key"]="$value"
+    done
+}
+
+restore_runtime_config() {
+    local app="$1" key value
+    local -a set_args=() unset_args=()
+    for key in "${RUNTIME_IDENTITY_KEYS[@]}"; do
+        value="${PREVIOUS_CONFIG["$app:$key"]:-}"
+        if [ -n "$value" ]; then
+            set_args+=("$key=$value")
+        else
+            unset_args+=("$key")
+        fi
+    done
+    if [ "${#set_args[@]}" -gt 0 ] &&
+        ! dokku config:set --no-restart "$app" "${set_args[@]}"; then
+        error "Failed to restore runtime identity for ${app}."
+        return 1
+    fi
+    if [ "${#unset_args[@]}" -gt 0 ] &&
+        ! dokku config:unset --no-restart "$app" "${unset_args[@]}"; then
+        error "Failed to clear runtime identity for ${app}."
+        return 1
+    fi
+}
+
+restore_previous_identity() {
+    local tenant="$1" app_type="$2" previous="$3"
+    local old_ref old_digest old_channel old_version old_commit old_short old_workflow old_workflow_url old_built
+    split_tab_fields "$previous"
+    old_ref="${TAB_FIELDS[0]-}"
+    old_digest="${TAB_FIELDS[1]-}"
+    old_channel="${TAB_FIELDS[2]-}"
+    old_version="${TAB_FIELDS[3]-}"
+    old_commit="${TAB_FIELDS[4]-}"
+    old_short="${TAB_FIELDS[5]-}"
+    old_workflow="${TAB_FIELDS[6]-}"
+    old_workflow_url="${TAB_FIELDS[7]-}"
+    old_built="${TAB_FIELDS[8]-}"
+    if [ -n "$old_ref" ] || [ -n "$old_digest" ]; then
+        if ! tenant_record_identity "$tenant" "$app_type" "$old_ref" "$old_ref" "$old_digest" \
+            "$old_channel" "$old_version" "$old_commit" "$old_short" \
+            "$old_workflow" "$old_workflow_url" "$old_built"; then
+            error "Failed to restore durable identity for ${tenant}-${app_type}."
+            return 1
+        fi
+    else
+        if ! tenant_clear_identity "$tenant" "$app_type" \
+            "deployment rolled back; no prior verified identity"; then
+            error "Failed to clear durable identity for ${tenant}-${app_type}."
+            return 1
+        fi
+    fi
+}
+
+# Get matching apps â€” either specific tenants or all
 if [ ${#TARGET_TENANTS[@]} -gt 0 ]; then
     # Deploy to specific tenants only
     APPS=""
@@ -182,7 +438,31 @@ if [ -z "$APPS" ]; then
 fi
 
 APP_COUNT=$(echo "$APPS" | wc -l)
+
+# Repair persisted tenant routing before pulling or deploying the image.
+# The shared routing helper also reconciles opt-in private OpenObserve wiring.
+# A failed pull/rebuild must not prevent an existing tenant from moving to the
+# configured BASE_DOMAIN.
+while IFS= read -r app; do
+    tenant="${app%${SUFFIX}}"
+    frontend_app="${tenant}-frontend"
+    if dokku apps:exists "$frontend_app" 2>/dev/null; then
+        log "Synchronizing tenant routing: ${tenant}.${BASE_DOMAIN}"
+        reconcile_tenant_routing "$tenant"
+    else
+        warn "${tenant}: frontend app not found; skipping routing reconciliation"
+    fi
+done <<< "$APPS"
+
 ensure_deploy_image_available "$IMAGE"
+if ! ensure_deployment_state_schema; then
+    error "Deployment state schema is unavailable; refusing an untracked deployment."
+    exit 1
+fi
+if ! resolve_build_identity "$IMAGE"; then
+    error "Image is missing or has inconsistent OCI BuildIdentity labels: $IMAGE"
+    exit 1
+fi
 
 log "Deploying ${IMAGE} to ${APP_COUNT} ${APP_TYPE} app(s)"
 echo ""
@@ -192,31 +472,27 @@ FIRST=$(echo "$APPS" | head -1)
 REST=$(echo "$APPS" | tail -n +2)
 
 log "=== Canary: ${FIRST} ==="
-if ! deploy_one "$FIRST"; then
-    error "Canary deploy failed — aborting."
+if deployment_run_boundary "deploy_one" deploy_one "$FIRST"; then
+    :
+else
+    error "Canary deploy failed â€” aborting."
     exit 1
 fi
 
+TENANT="${FIRST%-${APP_TYPE}}"
+HEALTH_PATH="/"
+[ "$APP_TYPE" = "backend" ] && HEALTH_PATH="/healthz"
+log "Waiting for required ${APP_TYPE} startup health check: ${FIRST}${HEALTH_PATH}"
+if ! wait_for_runtime_health "$FIRST" "$HEALTH_PATH"; then
+   error "Required startup health check failed for ${FIRST}; aborting before remaining tenants."
+   exit 1
+fi
+log "Canary healthy âœ“"
+
 if ! $SKIP_CANARY && [ -n "$REST" ]; then
-    TENANT="${FIRST%-${APP_TYPE}}"
-    HEALTH_URL="https://${TENANT}.${BASE_DOMAIN}"
-    if [ "$APP_TYPE" = "backend" ]; then
-        HEALTH_URL="${HEALTH_URL}/api/health"
-    fi
-
-    # Wait for container to be ready
-    sleep 5
-
-    log "Health check: ${HEALTH_URL}"
-    if curl -sf --max-time 10 "$HEALTH_URL" > /dev/null 2>&1; then
-        log "Canary healthy ✓"
-    else
-        warn "Health check failed (may not have /api/health endpoint — continuing)"
-    fi
-
-    echo ""
-    info "Canary deployed to ${FIRST}. Proceeding to remaining apps..."
-    echo ""
+   echo ""
+   info "Canary deployed to ${FIRST}. Proceeding to remaining apps..."
+   echo ""
 fi
 
 # ---- Deploy to remaining apps ----
@@ -224,8 +500,8 @@ if [ -n "$REST" ]; then
     FAILED=0
     while IFS= read -r app; do
         log "=== Deploying: ${app} ==="
-        if deploy_one "$app"; then
-            log "${app} ✓"
+        if deployment_run_boundary "deploy_one" deploy_one "$app"; then
+            log "${app} âœ“"
         else
             error "${app} FAILED"
             FAILED=$((FAILED + 1))

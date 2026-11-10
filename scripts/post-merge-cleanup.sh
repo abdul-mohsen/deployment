@@ -12,8 +12,8 @@
 #   3. Removes the public domain/proxy from backend apps. Only frontend apps
 #      should own <tenant>.$BASE_DOMAIN; otherwise Dokku generates duplicate
 #      nginx server_name blocks.
-#   4. Sets BACKEND_URL / PORT / APP_DOMAIN on the frontend, BASEURL on the
-#      backend, then `ps:rebuild`s both apps so the new wiring is applied.
+#   4. Sets BACKEND_URL / PORT / APP_DOMAIN / API_URL on the frontend, BASEURL
+#      on the backend, then `ps:rebuild`s both apps so the new wiring is applied.
 #   5. Validates Dokku nginx config and rebuilds proxy config.
 #
 # Usage:
@@ -36,11 +36,22 @@ DRY_RUN="${DRY_RUN:-0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+source "$SCRIPT_DIR/lib.sh"
 
-# Try to source config.env for BASE_DOMAIN if not provided
-if [ -z "${BASE_DOMAIN:-}" ] && [ -f "$PROJECT_DIR/config.env" ]; then
-    # shellcheck disable=SC1091
-    source "$PROJECT_DIR/config.env"
+# Load config.env when it supplies BASE_DOMAIN or the optional telemetry flag.
+# Preserve an explicitly supplied BASE_DOMAIN while still allowing operators
+# to migrate existing tenants with OpenObserve enabled from config.env.
+if [ -f "$PROJECT_DIR/config.env" ]; then
+    if [ -z "${BASE_DOMAIN:-}" ] ||
+        [ -z "${OPENOBSERVE_TENANT_TELEMETRY_ENABLED+x}" ]; then
+        _base_domain_override="${BASE_DOMAIN:-}"
+        # shellcheck disable=SC1091
+        source "$PROJECT_DIR/config.env"
+        if [ -n "$_base_domain_override" ]; then
+            BASE_DOMAIN="$_base_domain_override"
+        fi
+        unset _base_domain_override
+    fi
 fi
 BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set (in env or $PROJECT_DIR/config.env)}"
 
@@ -67,6 +78,11 @@ dk() {
 }
 
 dk_dokku() { dk dokku "$@"; }
+
+# lib.sh uses the normal Dokku command name. This repair script runs from the
+# host, where Dokku is inside the container, so route those calls through the
+# same wrapper used by the rest of this script.
+dokku() { dk_dokku "$@"; }
 
 validate_docker_network_name() {
     local network="$1"
@@ -174,6 +190,10 @@ for t in "${TENANTS[@]}"; do
     be="${t}-backend"; fe="${t}-frontend"
     net="$TENANT_NETWORK"
     domain="${t}.${BASE_DOMAIN}"
+    public_url="$(public_tenant_url "$t")" || {
+        error "  invalid public URL for tenant $t; skipping"
+        continue
+    }
 
     log "=== ${t} ==="
 
@@ -185,6 +205,15 @@ for t in "${TENANTS[@]}"; do
     if ! dk_dokku apps:exists "$fe" >/dev/null 2>&1; then
         warn "  $fe does not exist; skipping"
         continue
+    fi
+
+    if [ "$DRY_RUN" = "1" ]; then
+        info "  [dry-run] would reconcile optional OpenObserve telemetry wiring"
+    else
+        # The shared helper validates the fixed internal network, persists the
+        # Dokku hook, and connects live containers without making telemetry a
+        # deployment prerequisite.
+        openobserve_reconcile_tenant_apps "$t" "$be" "$fe" || true
     fi
 
     info "  network: $net"
@@ -206,7 +235,8 @@ for t in "${TENANTS[@]}"; do
     dk_dokku config:set --no-restart "$fe" \
         BACKEND_URL="http://${be}.web:${BACKEND_PORT}" \
         PORT="$FRONTEND_PORT" \
-        APP_DOMAIN="$domain" >/dev/null
+        APP_DOMAIN="$domain" \
+        API_URL="${public_url}/api" >/dev/null
 
     info "  rebuild: $be, $fe"
     dk_dokku ps:rebuild "$be" || warn "  $be rebuild failed (deploy not yet done?)"
@@ -226,5 +256,9 @@ dk_dokku proxy:build-config --all >/dev/null || warn "proxy:build-config failed"
 
 log "Done. Verify next:"
 for t in "${TENANTS[@]}"; do
-    echo "  curl -I http://${t}.${BASE_DOMAIN}/"
+    if site_url="$(public_tenant_url "$t")"; then
+        echo "  curl -I ${site_url}/"
+    else
+        echo "  (invalid public URL for ${t})"
+    fi
 done

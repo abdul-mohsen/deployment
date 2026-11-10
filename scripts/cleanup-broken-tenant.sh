@@ -27,6 +27,13 @@ warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
 error() { echo -e "${RED}[x]${NC} $*" >&2; }
 info()  { echo -e "${BLUE}[i]${NC} $*"; }
 
+zatca_daemon_enabled() {
+    case "${ZATCA_DAEMON_ENABLED:-0}" in
+        1|true|yes) return 0 ;;
+        *)          return 1 ;;
+    esac
+}
+
 # Parse --config early (before sourcing)
 CONFIG_FILE="$PROJECT_DIR/config.env"
 for i in $(seq 1 $#); do
@@ -73,8 +80,6 @@ fi
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
 MYSQL_HOST="${MYSQL_HOST:-127.0.0.1}"
 MYSQL_PORT="${MYSQL_PORT:-3306}"
-MYSQL_ROOT_USER="${MYSQL_ROOT_USER:-root}"
-MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
 MYSQL_TENANT_HOST="${MYSQL_TENANT_HOST:-%}"
 DOKKU_CONTAINER="${DOKKU_CONTAINER:-dokku}"
@@ -240,8 +245,8 @@ BASH
 }
 
 drop_database() {
-    if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
-        warn "MYSQL_ROOT_PASSWORD not set; skipping tenant DB/user cleanup."
+    if ! mysql_admin_configured; then
+        warn "MYSQL_ADMIN_PASSWORD not set; skipping tenant DB/user cleanup."
         return 0
     fi
 
@@ -259,6 +264,9 @@ SQLEOF
     run_mysql "$MYSQL_MASTER_DB" <<SQLEOF 2>/dev/null || true
 UPDATE tenant SET enabled=0 WHERE db_name='${TENANT_DB_NAME}';
 DELETE FROM tenant WHERE db_name='${TENANT_DB_NAME}' AND name='${TENANT_NAME}';
+SQLEOF
+    run_mysql "$DEPLOY_STATE_DB" <<SQLEOF 2>/dev/null || true
+DELETE FROM tenant_image WHERE name='${TENANT_NAME}';
 SQLEOF
 }
 
@@ -322,6 +330,12 @@ destroy_app "$FRONTEND_APP"
 remove_tenant_registry_leftovers
 remove_common_dokku_leftovers
 drop_database
+if ! $DRY_RUN && zatca_daemon_enabled; then
+    log "Refreshing ZATCA daemon tenant discovery..."
+    bash "$SCRIPT_DIR/reload-zatca-daemon.sh" \
+        --config "$CONFIG_FILE" \
+        --tenant "$TENANT_NAME"
+fi
 remove_host_nginx_vhost
 remove_network
 remove_storage_data

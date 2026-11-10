@@ -356,27 +356,29 @@ mkdir -p "${STORAGE_ROOT}"
 if [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" != "changeme" ]; then
     log "Setting up master database: ${MYSQL_MASTER_DB}"
 
+    # zatca_master.tenant (the registry, incl. tenant_key) belongs to the zatca_master
+    # schema. This repo writes rows there but never creates or alters its tables.
     run_mysql <<SQLEOF
 CREATE DATABASE IF NOT EXISTS \`${MYSQL_MASTER_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE \`${MYSQL_MASTER_DB}\`;
-CREATE TABLE IF NOT EXISTS tenant (
-    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    name            VARCHAR(100)  NOT NULL COMMENT 'Friendly tenant name',
-    db_name         VARCHAR(100)  NOT NULL UNIQUE COMMENT 'MySQL database name for this tenant',
-    zatca_env       VARCHAR(20)   NOT NULL DEFAULT 'production' COMMENT 'sandbox, simulation, or production',
-    alert_email     VARCHAR(255)  NOT NULL DEFAULT '' COMMENT 'Email for failure alerts',
-    enabled         TINYINT(1)    NOT NULL DEFAULT 1 COMMENT '0 = paused',
+SQLEOF
+    if require_registry_tenant_key; then
+        log "Registry ready: ${MYSQL_MASTER_DB}.tenant has tenant_key and trigger tenant_key_default"
+    else
+        warn "Create tenants only after ZATCA's zatca_master migrations are applied (see above)."
+    fi
+
+    # Deployment-owned state (per-tenant image pins). Not zatca_master, not a tenant DB.
+    run_mysql <<SQLEOF
+CREATE DATABASE IF NOT EXISTS \`${DEPLOY_STATE_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE TABLE IF NOT EXISTS \`${DEPLOY_STATE_DB}\`.tenant_image (
+    name            VARCHAR(100)  NOT NULL PRIMARY KEY COMMENT 'Tenant name, as in zatca_master.tenant.name',
     backend_image   VARCHAR(255)  NOT NULL DEFAULT '' COMMENT 'Per-tenant override (empty = use global latest)',
     frontend_image  VARCHAR(255)  NOT NULL DEFAULT '' COMMENT 'Per-tenant override (empty = use global latest)',
-    created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_enabled (enabled)
+    updated_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
--- Add columns if upgrading from older schema
-ALTER TABLE tenant ADD COLUMN IF NOT EXISTS backend_image  VARCHAR(255) NOT NULL DEFAULT '';
-ALTER TABLE tenant ADD COLUMN IF NOT EXISTS frontend_image VARCHAR(255) NOT NULL DEFAULT '';
 SQLEOF
 
-    log "Master database ready: ${MYSQL_MASTER_DB}.tenant"
+    log "Master database ready: ${MYSQL_MASTER_DB}; deployment state: ${DEPLOY_STATE_DB}.tenant_image"
 else
     warn "MYSQL_ROOT_PASSWORD not configured. Skipping master DB setup."
     warn "Edit config.env and re-run setup.sh to create master database."
@@ -491,8 +493,7 @@ if prompt_yn "Create your first tenant now?" "y"; then
                 TENANT_CMD="$TENANT_CMD --backend-image $BACKEND_IMG --frontend-image $FRONTEND_IMG"
             else
                 info "Creating tenant without images. Deploy later:"
-                info "  dokku git:from-image ${TENANT_NAME}-backend $BACKEND_IMG"
-                info "  dokku git:from-image ${TENANT_NAME}-frontend $FRONTEND_IMG"
+                info "  bash scripts/update-tenant.sh ${TENANT_NAME} --backend-image $BACKEND_IMG --frontend-image $FRONTEND_IMG"
                 TENANT_CMD="$TENANT_CMD --git-only"
             fi
         else

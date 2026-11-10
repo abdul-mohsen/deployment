@@ -30,8 +30,8 @@ bash -n scripts/deployctl.sh && pass "syntax deployctl"
 
 echo
 echo "=== deployctl command mapping ==="
-expect_plan "bash scripts/create-tenant.sh acme --backend-image repo/api:v1 --frontend-image repo/web:v1" \
-    tenant create acme --backend-image repo/api:v1 --frontend-image repo/web:v1
+expect_plan "bash scripts/create-tenant.sh acme --backend-image repo/ifritah-api:v1 --frontend-image repo/ifritah-web:v1" \
+    tenant create acme --backend-image repo/ifritah-api:v1 --frontend-image repo/ifritah-web:v1
 
 expect_plan "bash scripts/update-tenant.sh acme --restart --config /opt/deployment/config.prod.env" \
     --config /opt/deployment/config.prod.env tenant update acme --restart
@@ -50,14 +50,20 @@ expect_plan "bash scripts/status.sh --tenant acme --json --config /opt/deploymen
 expect_plan "bash scripts/tail-logs.sh --tenant acme --type backend --since 1h" \
     tenant logs acme --type backend --since 1h
 
-expect_plan "bash scripts/deploy-all.sh repo/api:v2 --type backend --tenant acme" \
-    fleet sync repo/api:v2 --type backend --tenant acme
+expect_plan "bash scripts/deploy-all.sh repo/ifritah-api:v2 --type backend --tenant acme" \
+    fleet sync repo/ifritah-api:v2 --type backend --tenant acme
 
 expect_plan "bash scripts/backup-tenant.sh --all" \
     fleet backup
 
 expect_plan "bash scripts/restore-tenant.sh acme --from acme_20250101_120000" \
     tenant restore acme --from acme_20250101_120000
+
+expect_plan "bash scripts/rollback-tenant.sh acme --to repo/ifritah-api:v1 --confirm-schema-compatible" \
+    tenant rollback acme --to repo/ifritah-api:v1 --confirm-schema-compatible
+
+expect_plan "bash scripts/rollback-tenant.sh acme --to repo/ifritah-api:v1" \
+    tenant rollback acme --to repo/ifritah-api:v1
 
 expect_plan "bash scripts/manage-backups.sh list acme --json" \
     tenant backups list acme --json

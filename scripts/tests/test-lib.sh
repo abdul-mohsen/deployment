@@ -51,4 +51,109 @@ got="$(dokku_host_port)"
 [ "$got" = "8080" ] && pass "falls back to 8080 when nothing else is set" || fail "expected 8080 got '$got'"
 
 echo ""
+echo "=== goose_run passes only the names cmd/migrate reads ==="
+docker() { printf '%s\n' "$@" > "$tmpdir/goose-args"; }
+goose_run example/api:v1 up host.docker.internal 3306 tenant_acme usr_acme pw123
+goose_args="$(cat "$tmpdir/goose-args")"
+for want in "HOST=host.docker.internal:3306" "DBNAME=tenant_acme" "DBUSER=usr_acme" "PASSWORD=pw123" "/app/migrate" "up"; do
+    if printf '%s\n' "$goose_args" | grep -qxF -- "$want"; then
+        pass "goose gets $want"
+    else
+        fail "goose must pass $want"
+    fi
+done
+if printf '%s\n' "$goose_args" | grep -q '^DATABASE_URL=\|^DB_'; then
+    fail "goose must not pass DATABASE_URL or DB_* settings"
+else
+    pass "goose passes no DATABASE_URL or DB_* settings"
+fi
+
+echo ""
+echo "=== goose_run exact command contract and allow-list ==="
+cat > "$tmpdir/expected-goose-up" <<'EOF'
+run
+--rm
+--add-host=host.docker.internal:host-gateway
+-e
+HOST=host.docker.internal:3306
+-e
+DBNAME=tenant_acme
+-e
+DBUSER=usr_acme
+-e
+PASSWORD=pw123
+--entrypoint
+/app/migrate
+example/api:v1
+up
+EOF
+goose_run example/api:v1 up host.docker.internal 3306 tenant_acme usr_acme pw123
+cmp -s "$tmpdir/expected-goose-up" "$tmpdir/goose-args" \
+    && pass "goose up uses the exact /app/migrate argv contract" \
+    || fail "goose up argv or environment contract changed"
+
+cat > "$tmpdir/expected-goose-status" <<'EOF'
+run
+--rm
+--add-host=host.docker.internal:host-gateway
+-e
+HOST=host.docker.internal:3306
+-e
+DBNAME=tenant_acme
+-e
+DBUSER=usr_acme
+-e
+PASSWORD=pw123
+--entrypoint
+/app/migrate
+example/api:v1
+status
+EOF
+goose_run example/api:v1 status host.docker.internal 3306 tenant_acme usr_acme pw123
+cmp -s "$tmpdir/expected-goose-status" "$tmpdir/goose-args" \
+    && pass "goose status uses the exact read-only /app/migrate argv contract" \
+    || fail "goose status argv or environment contract changed"
+
+: > "$tmpdir/goose-args"
+if goose_run example/api:v1 migrate host.docker.internal 3306 tenant_acme usr_acme pw123 2>/dev/null; then
+    fail "unsupported goose command was accepted"
+fi
+[ ! -s "$tmpdir/goose-args" ] \
+    && pass "unsupported goose commands are rejected before Docker" \
+    || fail "unsupported goose command reached Docker"
+unset -f docker
+
+echo ""
+echo "=== require_registry_tenant_key refuses an unmigrated zatca_master ==="
+MYSQL_MASTER_DB=zatca_master
+run_mysql() {
+    case "$*" in
+        *"information_schema.columns"*) echo "${STUB_COLUMNS:-1}" ;;
+        *"information_schema.triggers"*) echo "${STUB_TRIGGERS:-1}" ;;
+    esac
+}
+if STUB_COLUMNS=1 STUB_TRIGGERS=1 require_registry_tenant_key 2>/dev/null; then
+    pass "migrated registry (tenant_key + tenant_key_default) is accepted"
+else
+    fail "migrated registry must be accepted"
+fi
+if STUB_COLUMNS=0 STUB_TRIGGERS=1 require_registry_tenant_key 2>/dev/null; then
+    fail "registry without tenant_key must be refused"
+else
+    pass "registry without tenant_key is refused"
+fi
+if STUB_COLUMNS=1 STUB_TRIGGERS=0 require_registry_tenant_key 2>/dev/null; then
+    fail "registry without tenant_key_default must be refused"
+else
+    pass "registry without tenant_key_default is refused"
+fi
+refusal="$(STUB_COLUMNS=0 require_registry_tenant_key 2>&1 || true)"
+if printf '%s' "$refusal" | grep -q "Apply ZATCA's zatca_master migrations first"; then
+    pass "refusal tells the operator to apply ZATCA's zatca_master migrations first"
+else
+    fail "refusal must name ZATCA's zatca_master migrations"
+fi
+unset -f run_mysql
+
+echo ""
 echo "=== all lib.sh tests passed ==="

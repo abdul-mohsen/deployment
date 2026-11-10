@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "payload_schema": "openobserve-search-state-v1",
+  "views": [
+    {
+      "view_name": "Ifritah - Request ID correlation",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "24h",
+      "description": "Replace REQUEST_ID_VALUE with a validated request_id, then correlate trace_id and service records.",
+      "query": "SELECT event_time, request_id, trace_id, span_id, service_name, route, status_code, duration_ms, outcome, error_code FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND request_id = 'REQUEST_ID_VALUE' ORDER BY _timestamp ASC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - Trace ID correlation",
+      "stream": "ifritah_traces_v1",
+      "stream_type": "traces",
+      "relative_time": "24h",
+      "description": "Replace TRACE_ID_VALUE with a lower-case W3C trace ID.",
+      "query": "SELECT event_time, trace_id, span_id, parent_span_id, service_name, operation, route, duration_ms, status_code, error_type FROM \"ifritah_traces_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND trace_id = 'TRACE_ID_VALUE' ORDER BY _timestamp ASC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - 5xx requests",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "1h",
+      "description": "Server-error request completions grouped by stable service and route fields.",
+      "query": "SELECT event_time, tenant_id, request_id, trace_id, service_name, route, status_code, duration_ms, error_code, outcome FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND event_type = 'http.request.completed' AND status_class = '5xx' ORDER BY _timestamp DESC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - Panic and exception events",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "24h",
+      "description": "Recovered panic and bounded exception categories only.",
+      "query": "SELECT event_time, request_id, trace_id, service_name, route, panic_type, exception_type, error_type, stack_fingerprint, outcome FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND (event_type = 'http.panic_recovered' OR panic_type IS NOT NULL OR exception_type IS NOT NULL) ORDER BY _timestamp DESC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - Authentication failures",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "24h",
+      "description": "Rejected auth decisions using stable operation and error_code fields.",
+      "query": "SELECT event_time, tenant_scope, tenant_id, actor_id, operation, error_code, outcome, service_name FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '24 hours' AND event_type = 'auth.decision' AND outcome = 'rejected' ORDER BY _timestamp DESC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - Migration and deployment failures",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "7d",
+      "description": "Deployment operation failures, including migration stage, without command text.",
+      "query": "SELECT event_time, operation_id, tenant_id, script, deployment_stage, build_version, build_commit, image_digest, scripts_revision, error_code, outcome FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '7 days' AND event_type = 'deployment.operation' AND outcome = 'failure' AND deployment_stage IN ('migration', 'backup', 'image_swap', 'verify', 'rollback') ORDER BY _timestamp DESC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - Dependency timeouts",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "1h",
+      "description": "Dependency failures and timeouts by bounded dependency and operation.",
+      "query": "SELECT event_time, service_name, dependency, operation, attempt, duration_ms, error_code, outcome, trace_id FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND event_type = 'dependency.call.completed' AND outcome IN ('timeout', 'failure') ORDER BY _timestamp DESC LIMIT 200"
+    },
+    {
+      "view_name": "Ifritah - Tenant and service latency",
+      "stream": "ifritah_logs_v1",
+      "stream_type": "logs",
+      "relative_time": "1h",
+      "description": "Replace TENANT_ID_VALUE with a normalized tenant_id for a bounded service latency summary.",
+      "query": "SELECT service_name, AVG(duration_ms) AS avg_duration_ms, COUNT(*) AS request_count FROM \"ifritah_logs_v1\" WHERE _timestamp >= now() - INTERVAL '1 hour' AND event_type = 'http.request.completed' AND tenant_id = 'TENANT_ID_VALUE' GROUP BY service_name ORDER BY avg_duration_ms DESC LIMIT 64"
+    },
+    {
+      "view_name": "Ifritah - Collector drops and queue pressure",
+      "stream": "ifritah_gateway_dropped_records_total",
+      "stream_type": "metrics",
+      "query_type": "promql",
+      "relative_time": "1h",
+      "description": "Dedicated health-path view for gateway drops and durable queue pressure.",
+      "query": "sum(increase(ifritah_gateway_dropped_records_total[10m])) + sum(ifritah_gateway_queue_files)"
+    },
+    {
+      "view_name": "Ifritah - Resource and restart health",
+      "stream": "ifritah_container_cpu_usage_ratio",
+      "stream_type": "metrics",
+      "query_type": "promql",
+      "relative_time": "1h",
+      "description": "Container CPU by approved role; use PromQL metric streams for resource investigation.",
+      "query": "avg by (container_role) (ifritah_container_cpu_usage_ratio)"
+    },
+    {
+      "view_name": "Ifritah - Container memory health",
+      "stream": "ifritah_container_memory_working_set_bytes",
+      "stream_type": "metrics",
+      "query_type": "promql",
+      "relative_time": "1h",
+      "description": "Container working set by approved role.",
+      "query": "sum by (container_role) (ifritah_container_memory_working_set_bytes)"
+    },
+    {
+      "view_name": "Ifritah - Host disk and restart health",
+      "stream": "ifritah_container_restarts_total",
+      "stream_type": "metrics",
+      "query_type": "promql",
+      "relative_time": "1h",
+      "description": "Container restart counters; host disk uses node_filesystem_avail_bytes in PromQL.",
+      "query": "sum by (container_role) (rate(ifritah_container_restarts_total[10m]))"
+    },
+    {
+      "view_name": "Ifritah - Telemetry gateway health",
+      "stream": "ifritah_gateway_up",
+      "stream_type": "metrics",
+      "query_type": "promql",
+      "relative_time": "24h",
+      "description": "Dedicated health-path heartbeat for the private telemetry gateway.",
+      "query": "max by (signal) (ifritah_gateway_up)"
+    }
+  ]
+}

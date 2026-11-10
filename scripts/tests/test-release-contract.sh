@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_DIR"
+
+pass() { echo "PASS: $*"; }
+fail() { echo "FAIL: $*"; exit 1; }
+
+contains() {
+    local file="$1" text="$2" description="$3"
+    grep -Fq -- "$text" "$file" || fail "$description"
+    pass "$description"
+}
+
+not_contains() {
+    local file="$1" text="$2" description="$3" status=0
+    grep -Fq -- "$text" "$file" || status=$?
+    [ "$status" -eq 1 ] || fail "$description"
+    pass "$description"
+}
+
+not_contains_any() {
+    local description="$1"
+    shift
+    local path
+    for path in "$@"; do
+        if [ -d "$path" ]; then
+            grep -R -Fq -- '/api/health' "$path" && fail "$description"
+        elif grep -Fq -- '/api/health' "$path"; then
+            fail "$description"
+        fi
+    done
+    pass "$description"
+}
+
+echo "=== /healthz contract ==="
+contains dashboard/internal/web/web.go 'r.Get("/healthz"' \
+    "dashboard exposes /healthz"
+contains dashboard/internal/web/web.go 'Write([]byte("ok"))' \
+    "dashboard /healthz returns ok"
+contains scripts/create-tenant.sh "echo '/healthz' >" \
+    "tenant checks use /healthz"
+contains scripts/deploy-all.sh 'wait_for_runtime_health "$FIRST" "$HEALTH_PATH"' \
+    "deploy health probes block on the required runtime health endpoint"
+contains scripts/status.sh 'path="/healthz"' \
+    "status health probes use /healthz"
+contains templates/backend/Dockerfile 'http://localhost:3000/healthz' \
+    "backend container healthcheck uses /healthz"
+not_contains_any "legacy /api/health probes are absent" \
+    scripts/*.sh templates dashboard REQUIREMENTS.md
+
+echo
+echo "=== Backend build targets ==="
+not_contains templates/backend/Dockerfile './cmd/server' \
+    "backend Dockerfile builds no cmd/server package"
+contains templates/backend/Dockerfile '-o /app/server .' \
+    "backend Dockerfile builds the server from the root package"
+contains templates/backend/Dockerfile './cmd/migrate' \
+    "backend Dockerfile builds the goose runner from cmd/migrate"
+
+echo
+echo "=== BuildIdentity environment and label schema ==="
+for file in templates/backend/Dockerfile templates/frontend/Dockerfile; do
+    for key in \
+        APP_VERSION APP_IMAGE_VERSION APP_IMAGE_COMMIT APP_IMAGE_CHANNEL \
+        APP_IMAGE_REF APP_WORKFLOW_RUN_ID APP_WORKFLOW_RUN_URL APP_BUILT_AT; do
+        contains "$file" "$key" "$file declares $key"
+    done
+    for label in \
+        org.opencontainers.image.version \
+        org.opencontainers.image.revision \
+        org.opencontainers.image.source \
+        org.opencontainers.image.created \
+        com.ifritah.build.channel \
+        com.ifritah.build.image_ref \
+        com.ifritah.build.workflow_run_id \
+        com.ifritah.build.workflow_run_url; do
+        contains "$file" "$label" "$file declares $label"
+    done
+done
+
+for file in templates/backend/.github/workflows/deploy.yml \
+            templates/frontend/.github/workflows/deploy.yml; do
+    for key in \
+        APP_VERSION APP_IMAGE_VERSION APP_IMAGE_COMMIT APP_IMAGE_CHANNEL \
+        APP_IMAGE_REF APP_WORKFLOW_RUN_ID APP_WORKFLOW_RUN_URL APP_BUILT_AT; do
+        contains "$file" "$key" "$file passes $key"
+    done
+    for label in \
+        org.opencontainers.image.version \
+        org.opencontainers.image.revision \
+        org.opencontainers.image.source \
+        org.opencontainers.image.created \
+        com.ifritah.build.channel \
+        com.ifritah.build.image_ref \
+        com.ifritah.build.workflow_run_id \
+        com.ifritah.build.workflow_run_url; do
+        contains "$file" "$label" "$file publishes $label"
+    done
+done
+
+echo
+echo "=== Dashboard image identity and publication ==="
+for key in \
+    APP_VERSION APP_IMAGE_VERSION APP_IMAGE_TAG APP_IMAGE_CHANNEL \
+    APP_IMAGE_REF APP_IMAGE_COMMIT APP_IMAGE_COMMIT_SHORT \
+    APP_WORKFLOW_RUN_ID APP_WORKFLOW_RUN_URL APP_SOURCE APP_BUILT_AT; do
+    contains dashboard/Dockerfile "$key" "dashboard Dockerfile declares $key"
+done
+for label in \
+    org.opencontainers.image.version \
+    org.opencontainers.image.revision \
+    org.opencontainers.image.source \
+    org.opencontainers.image.created \
+    com.ifritah.build.channel \
+    com.ifritah.build.tag \
+    com.ifritah.build.image_ref \
+    com.ifritah.build.commit \
+    com.ifritah.build.workflow_run_id \
+    com.ifritah.build.workflow_run_url; do
+    contains dashboard/Dockerfile "$label" "dashboard Dockerfile declares $label"
+    contains .github/workflows/dashboard-image.yml "$label" "dashboard workflow publishes $label"
+done
+contains .github/workflows/dashboard-image.yml 'branches: [main]' \
+    "dashboard workflow targets main"
+contains .github/workflows/dashboard-image.yml 'DOCKERHUB_USERNAME is missing or invalid' \
+    "dashboard workflow validates Docker Hub owner"
+contains .github/workflows/dashboard-image.yml 'docker buildx imagetools inspect' \
+    "dashboard workflow verifies published manifests"
+contains .github/workflows/dashboard-image.yml 'id: publish' \
+    "dashboard workflow exposes the published image digest"
+contains .github/workflows/dashboard-image.yml 'PUBLISHED_DIGEST: ${{ steps.publish.outputs.digest }}' \
+    "dashboard workflow verifies the build action digest without truncating inspect output"
+contains dashboard/prod-up.sh 'DASHBOARD_IMAGE_DIGEST' \
+    "dashboard startup resolves the pulled image digest"
+contains dashboard/prod-up.sh 'DEPLOYMENT_SCRIPTS_REVISION' \
+    "dashboard startup resolves the mounted script revision"
+contains dashboard/prod-up.sh 'Dashboard image/scripts revision mismatch' \
+    "dashboard startup rejects image/script revision drift"
+contains dashboard/docker-compose.prod.yml 'APP_IMAGE_DIGEST' \
+    "dashboard compose passes the resolved image digest"
+contains dashboard/docker-compose.prod.yml 'DEPLOYMENT_SCRIPTS_REVISION' \
+    "dashboard compose passes the mounted script revision"
+contains dashboard/docker-compose.prod.yml 'APP_IMAGE_COMMIT' \
+    "dashboard compose passes the verified image revision"
+contains dashboard/docker-compose.dev.yml 'DEPLOYMENT_SCRIPTS_REVISION' \
+    "dev compose passes the mounted script revision"
+contains update.sh 'git -C "$SCRIPT_DIR" merge --ff-only origin/main' \
+    "deployment update fast-forwards only from main"
+contains update.sh 'bash "${SCRIPT_DIR}/dashboard/prod-up.sh"' \
+    "deployment update validates dashboard before stopping the old container"
+contains scripts/restart-stack.sh 'Do not preempt that stop-safe path' \
+    "stack restart preserves production dashboard preflight"
+contains .github/workflows/dashboard-image.yml "'scripts/**'" \
+    "dashboard image rebuilds when deployment scripts change"
+contains scripts/backup-tenant.sh '--no-tablespaces' \
+    "database backups avoid requiring PROCESS for tablespaces"
+contains scripts/init-tenant-db.sh 'goose_run "$image" up' \
+    "tenant schema changes run through the Goose migration entrypoint"
+contains scripts/lib.sh '--entrypoint /app/migrate' \
+    "Goose runner uses the backend image migration entrypoint"
+contains scripts/init-tenant-db.sh 'Backend image is required to run goose migrations' \
+    "tenant migration setup fails closed without a backend image"
+
+echo
+echo "=== deploy-all audit failure preserves migrated image/schema compatibility ==="
+audit_line="$(grep -nF '    if ! tenant_record_audit "$tenant" "$APP_TYPE"' \
+    scripts/deploy-all.sh | tail -1 | cut -d: -f1 || true)"
+[ -n "$audit_line" ] || fail "deploy-all final audit failure block is missing"
+audit_block="$(sed -n "${audit_line},$((audit_line + 20))p" scripts/deploy-all.sh)"
+guard_line="$(printf '%s\n' "$audit_block" |
+    grep -nF 'if [ "$migrations_attempted" = true ]; then' |
+    head -1 | cut -d: -f1 || true)"
+rollback_branch_line="$(printf '%s\n' "$audit_block" |
+    grep -nF '        else' |
+    head -1 | cut -d: -f1 || true)"
+previous_image_guard_line="$(printf '%s\n' "$audit_block" |
+    grep -nF 'if [ -n "$previous_image" ]; then' |
+    head -1 | cut -d: -f1 || true)"
+rollback_line="$(printf '%s\n' "$audit_block" |
+    grep -nF 'dokku_git_from_image "$app" "$previous_image"' |
+    head -1 | cut -d: -f1 || true)"
+rollback_count="$(printf '%s\n' "$audit_block" |
+    grep -cF 'dokku_git_from_image "$app" "$previous_image"' || true)"
+[ -n "$guard_line" ] && [ -n "$rollback_branch_line" ] &&
+    [ -n "$previous_image_guard_line" ] && [ -n "$rollback_line" ] \
+    || fail "deploy-all audit failure lacks a migration rollback guard"
+[ "$guard_line" -lt "$rollback_branch_line" ] &&
+    [ "$rollback_branch_line" -lt "$previous_image_guard_line" ] &&
+    [ "$previous_image_guard_line" -lt "$rollback_line" ] \
+    || fail "deploy-all previous-image rollback is not confined to the non-migrated branch"
+[ "$rollback_count" -eq 1 ] \
+    || fail "deploy-all audit failure has an unconditional or duplicate previous-image rollback"
+printf '%s\n' "$audit_block" |
+    grep -qF 'automatic rollback refused after migration' \
+    || fail "deploy-all audit failure lacks the post-migration rollback refusal"
+printf '%s\n' "$audit_block" |
+    grep -qF 'Restore backup ${backup_id} (${backup_artifact}) explicitly before retry.' \
+    || fail "deploy-all audit failure lacks restore-before-retry guidance"
+pass "deploy-all preserves migrated image/schema compatibility when audit persistence fails"
+
+contains scripts/tenant-provenance.sh 'BUILD_WORKFLOW_RUN_ID' \
+    "tenant provenance reads workflow run identity"
+contains scripts/tenant-provenance.sh 'BUILD_IMAGE_REF' \
+    "tenant provenance reads image reference identity"
+contains scripts/tenant-provenance.sh 'BUILD_DIGEST' \
+    "tenant provenance verifies image digest identity"
+
+echo
+echo "All release contract checks passed."

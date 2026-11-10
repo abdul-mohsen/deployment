@@ -83,8 +83,20 @@ grep -q 'proxy:disable "$BACKEND_APP"' scripts/create-tenant.sh \
     || FAIL "create-tenant must disable backend proxy"
 grep -q 'domains:clear "$be"' scripts/post-merge-cleanup.sh \
     && grep -q 'proxy:disable "$be"' scripts/post-merge-cleanup.sh \
-    && PASS "cleanup removes existing backend public proxy" \
+    && grep -q 'API_URL="\${public_url}/api"' scripts/post-merge-cleanup.sh \
+    && PASS "cleanup removes existing backend public proxy and refreshes frontend URL" \
     || FAIL "cleanup must remove existing backend public proxy"
+grep -q 'BASE_DOMAIN="\${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"' scripts/update-tenant.sh \
+    && grep -q 'reconcile_tenant_routing "\$TENANT_NAME"' scripts/update-tenant.sh \
+    && grep -q 'domains:clear "\$backend_app"' scripts/lib.sh \
+    && grep -q 'APP_DOMAIN="\$tenant_domain"' scripts/lib.sh \
+    && grep -q 'API_URL="\${public_url_value}/api"' scripts/lib.sh \
+    && PASS "tenant update reconciles persisted routing values" \
+    || FAIL "tenant update must reconcile persisted routing values"
+grep -q 'reconcile_tenant_routing "\$tenant"' scripts/deploy-all.sh \
+    && grep -q 'routing-only' dashboard/internal/web/web.go \
+    && PASS "fleet and lifecycle actions reconcile routing before deploy" \
+    || FAIL "fleet and lifecycle actions must reconcile routing before deploy"
 grep -q 'ensure_tenant_network "$TENANT_NETWORK"' scripts/create-tenant.sh \
     && grep -q 'docker network inspect \$network' scripts/create-tenant.sh \
     && grep -q 'docker network create \$network' scripts/create-tenant.sh \
@@ -282,17 +294,17 @@ else
     PASS "deployment repo does not bundle backend schema/migrations"
 fi
 grep -q -- '--backend-image' scripts/init-tenant-db.sh \
-    && grep -q 'docker run --rm --entrypoint sh "\$image"' scripts/init-tenant-db.sh \
-    && PASS "init-tenant-db reads schema from backend image" \
-    || FAIL "init-tenant-db must stream schema/migrations from backend image"
+    && grep -q 'goose_run "\$image" up' scripts/init-tenant-db.sh \
+    && grep -q -- '--entrypoint /app/migrate' scripts/lib.sh \
+    && PASS "init-tenant-db runs goose (/app/migrate up) from the backend image" \
+    || FAIL "init-tenant-db must run goose from the backend image"
 grep -q 'TENANT_IMAGE_PULL_POLICY="${TENANT_IMAGE_PULL_POLICY:-always}"' scripts/init-tenant-db.sh \
     && grep -q 'docker pull "\$image"' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db refreshes backend image before schema read" \
     || FAIL "init-tenant-db must pull backend image before reading schema"
-grep -q '| run_tenant_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
-    && ! grep -q '| run_mysql "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
-    && PASS "init-tenant-db imports default schema paths as tenant DB user" \
-    || FAIL "init-tenant-db must import default schema paths as tenant DB user"
+grep -q '"\$(tenant_db_user)" "\$(tenant_db_password)"' scripts/init-tenant-db.sh \
+    && PASS "init-tenant-db runs goose as the tenant DB user" \
+    || FAIL "init-tenant-db must run goose as the tenant DB user"
 if grep -q 'TENANT_ADMIN_MIGRATION_FILES\|migration_requires_admin\|apply_image_sql_file_as_admin\|verify_admin_trigger_privilege' scripts/init-tenant-db.sh; then
     FAIL "init-tenant-db must not special-case privileged trigger migrations"
 else
@@ -312,10 +324,15 @@ grep -q 'validate_tenant_schema' scripts/init-tenant-db.sh \
     && grep -q 'tenant_missing_required_tables' scripts/init-tenant-db.sh \
     && PASS "init-tenant-db verifies required base schema tables" \
     || FAIL "init-tenant-db must verify required base schema tables"
-grep -q 'TENANT_IGNORED_SCHEMA_FILES="${TENANT_IGNORED_SCHEMA_FILES:-car_part.sql}"' scripts/init-tenant-db.sh \
-    && grep -q 'schema_file_is_ignored' scripts/init-tenant-db.sh \
-    && PASS "init-tenant-db ignores car_part schema" \
-    || FAIL "init-tenant-db must ignore car_part schema"
+if grep -q 'TENANT_SCHEMA_IMAGE_PATH\|TENANT_MIGRATIONS_IMAGE_DIR\|TENANT_IGNORED_SCHEMA_FILES\|find_image_file\|apply_image_sql_file' scripts/init-tenant-db.sh; then
+    FAIL "init-tenant-db must not copy schema or migration files from the backend image"
+else
+    PASS "init-tenant-db copies no schema or migration files from the backend image"
+fi
+grep -q 'tenant_registry_key "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
+    && grep -q 'tenant_key=VALUES(tenant_key)' scripts/init-tenant-db.sh \
+    && PASS "init-tenant-db seeds company.tenant_key from the zatca_master registry" \
+    || FAIL "init-tenant-db must seed company.tenant_key from zatca_master.tenant"
 grep -q 'IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"' scripts/deploy-all.sh \
     && grep -q 'docker pull "\$image"' scripts/deploy-all.sh \
     && grep -q 'dokku_git_from_image "\$app" "\$image"' scripts/deploy-all.sh \
@@ -324,7 +341,8 @@ grep -q 'IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"' scripts/deploy-all.sh
     || FAIL "deploy-all must pull image and handle same-ref git:from-image deploys"
 grep -q 'init-tenant-db.sh" "\$TENANT_NAME"' scripts/create-tenant.sh \
     && grep -q -- '--backend-image "\$BACKEND_IMAGE"' scripts/create-tenant.sh \
-    && grep -q -- '--env "DB_USER=\$TENANT_DB_USER"' scripts/create-tenant.sh \
+    && ! grep -q -- '--env "DB_USER=\$TENANT_DB_USER"' scripts/create-tenant.sh \
+    && grep -q 'validate_tenant_env_overrides' scripts/init-tenant-db.sh \
     && grep -q 'init-tenant-db.sh" "\${seed_args\[@\]}"' scripts/create-tenant.sh \
     && PASS "create-tenant applies schema and seed phases" \
     || FAIL "create-tenant must call init-tenant-db.sh for schema and seed phases"
@@ -337,15 +355,43 @@ for f in scripts/list-tenants.sh scripts/tail-logs.sh scripts/update-tenant.sh s
         && PASS "$f uses shared dokku wrapper" \
         || FAIL "$f must source lib.sh before calling dokku"
 done
+if grep -R -n -i -E 'atlas|TENANT_SCHEMA_IMAGE_PATH|TENANT_MIGRATIONS_IMAGE_DIR|TENANT_IGNORED_SCHEMA_FILES|MIGRATE_CMD|ensure_tenant_(provenance|audit)_columns' scripts/*.sh install.sh config.env.example install.env.example REQUIREMENTS.md README.md templates dashboard/internal/scripts; then
+    FAIL "legacy migration knobs or Atlas references remain (see above)"
+else
+    PASS "no legacy migration knobs or Atlas references in deployment files"
+fi
+if grep -q -- '--migrate)' scripts/create-tenant.sh; then
+    FAIL "create-tenant must not take a --migrate command; goose is fixed"
+else
+    PASS "create-tenant has no --migrate knob"
+fi
+if grep -q 'ALTER TABLE tenant\|CREATE TABLE IF NOT EXISTS tenant ' scripts/setup.sh; then
+    FAIL "setup.sh must not ALTER or CREATE the zatca_master registry"
+else
+    PASS "setup.sh does not ALTER or CREATE the zatca_master registry"
+fi
+grep -q 'ensure_deployment_state_schema' scripts/setup.sh \
+    && grep -q 'tenant_image (' scripts/lib.sh \
+    && grep -q 'tenant_identity (' scripts/lib.sh \
+    && PASS "setup.sh creates the deployment-owned state tables" \
+    || FAIL "setup.sh must create the deployment-owned state tables"
+grep -q 'init-tenant-db.sh" "\$tenant" --schema-only' scripts/deploy-all.sh \
+    && grep -q 'init-tenant-db.sh" "\$TENANT_NAME" \\' scripts/update-tenant.sh \
+    && ! grep -q -- '--schema-only' scripts/rollback-tenant.sh \
+    && grep -q -- '--confirm-schema-compatible' scripts/rollback-tenant.sh \
+    && PASS "every backend deploy path runs goose before the image is deployed; rollback-tenant runs no goose" \
+    || FAIL "deploy-all and update-tenant must run goose before deploying a backend image; rollback-tenant must not run goose and must require --confirm-schema-compatible"
+grep -qF "UPDATE company SET tenant_key = '\${tenant_key_sql}' WHERE id = 1;" scripts/init-tenant-db.sh \
+    && PASS "tenant_key is written with UPDATE ... WHERE id" \
+    || FAIL "tenant_key write must be an UPDATE with a WHERE clause"
+grep -q 'require_registry_tenant_key' scripts/create-tenant.sh \
+    && PASS "create-tenant refuses to create a tenant until zatca_master has tenant_key" \
+    || FAIL "create-tenant must call require_registry_tenant_key before provisioning"
 if grep -q 'MIGRATE_CMD=atlas' config.env.example; then
     FAIL "config example must not point to an unavailable Atlas command"
 else
-    PASS "config example leaves backend MIGRATE_CMD empty"
+    PASS "config example does not point at Atlas"
 fi
-grep -q 'TENANT_SCHEMA_IMAGE_PATH=' config.env.example \
-    && grep -q 'TENANT_MIGRATIONS_IMAGE_DIR=' config.env.example \
-    && PASS "config example points at backend image schema paths" \
-    || FAIL "config example must document backend image schema paths"
 
 echo
 echo "=== 13. tenant prefixes isolate shared dev/prod targets ==="

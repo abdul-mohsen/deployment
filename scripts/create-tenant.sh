@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# create-tenant.sh — Provision a new tenant on Dokku
+# create-tenant.sh â€” Provision a new tenant on Dokku
 # =============================================================================
 # Creates a complete tenant with:
 #   - Backend app (API) at <tenant>.<domain>/api
@@ -24,7 +24,6 @@
 #   --env KEY=VALUE           Set env var (repeatable)
 #   --git-only                Create apps without deploying (deploy via git push)
 #   --dry-run                 Show plan without executing
-#   --migrate <cmd>           Run migration after initial deploy (e.g. "npm run migrate")
 #   --config <path>           Path to config.env file (default: ../config.env)
 #
 # Examples:
@@ -39,6 +38,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/lib.sh"
+source "$SCRIPT_DIR/tenant-provenance.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -48,8 +48,21 @@ NC='\033[0m'
 
 log()   { echo -e "${GREEN}[+]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-error() { echo -e "${RED}[✗]${NC} $*" >&2; }
+error() { echo -e "${RED}[âœ—]${NC} $*" >&2; }
 info()  { echo -e "${BLUE}[i]${NC} $*"; }
+
+mysql_password_sql_literal() {
+    local password="$1"
+    password="${password//\'/\'\'}"
+    printf "'%s'" "$password"
+}
+
+zatca_daemon_enabled() {
+    case "${ZATCA_DAEMON_ENABLED:-0}" in
+        1|true|yes) return 0 ;;
+        *)          return 1 ;;
+    esac
+}
 
 # ---- Load config ----
 CONFIG_FILE="${CONFIG_FILE:-$PROJECT_DIR/config.env}"
@@ -83,19 +96,17 @@ NO_DATABASE=false
 GIT_ONLY=false
 DRY_RUN=false
 FORCE_UPDATE=false
-MIGRATE_CMD=""
 declare -a ENV_VARS=()
+declare -A PREVIOUS_CONFIG=()
+declare -A PREVIOUS_IDENTITY=()
 
-has_env_var() {
-    local key="$1"
-    local ev
-    for ev in "${ENV_VARS[@]+${ENV_VARS[@]}}"; do
-        if [[ "$ev" == "$key="* ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
+RUNTIME_IDENTITY_KEYS=(
+    APP_VERSION APP_COMMIT APP_COMMIT_SHORT APP_BUILD_CHANNEL APP_CHANNEL
+    APP_IMAGE_CHANNEL APP_BUILD_WORKFLOW_RUN APP_WORKFLOW_RUN
+    APP_WORKFLOW_RUN_ID APP_WORKFLOW_RUN_URL APP_BUILT_AT APP_BUILD_AT APP_CREATED
+    APP_IMAGE_REF APP_IMAGE_DIGEST APP_IMAGE_RESOLVED_REF APP_IMAGE_VERSION
+    APP_IMAGE_TAG APP_IMAGE_COMMIT APP_IMAGE_COMMIT_SHORT APP_SOURCE APP_DEPLOYED_AT
+)
 
 env_value() {
     local key="$1"
@@ -107,6 +118,30 @@ env_value() {
         fi
     done
     return 0
+}
+
+redact_env_var() {
+    local entry="$1" key value normalized_key
+    if [[ "$entry" != *=* ]]; then
+        printf '%s' "$entry"
+        return 0
+    fi
+
+    key="${entry%%=*}"
+    value="${entry#*=}"
+    normalized_key="${key^^}"
+    case "$normalized_key" in
+        *PASSWORD*|*PASSWD*|*TOKEN*|*SECRET*|*KEY*|*CREDENTIAL*|*AUTH*|*COOKIE*|*SESSION*|*DSN*|*DATABASE_URL*)
+            printf '%s=***' "$key"
+            ;;
+        *)
+            if [[ "$value" == *"://"*"@"* ]]; then
+                printf '%s=***' "$key"
+            else
+                printf '%s' "$entry"
+            fi
+            ;;
+    esac
 }
 
 validate_docker_network_name() {
@@ -153,6 +188,137 @@ image_tag() {
     if [[ "$tail" == *:* ]]; then
         printf '%s' "${tail##*:}"
     fi
+}
+
+set_runtime_build_identity() {
+    local app="$1" image="$2" resolved_ref
+    resolved_ref="${image%@*}@${BUILD_DIGEST}"
+    dokku config:set --no-restart "$app" \
+        APP_VERSION="$BUILD_VERSION" \
+        APP_COMMIT="$BUILD_COMMIT" \
+        APP_COMMIT_SHORT="$BUILD_COMMIT_SHORT" \
+        APP_BUILD_CHANNEL="$BUILD_CHANNEL" \
+        APP_CHANNEL="$BUILD_CHANNEL" \
+        APP_IMAGE_CHANNEL="$BUILD_CHANNEL" \
+        APP_WORKFLOW_RUN_ID="$BUILD_WORKFLOW_RUN_ID" \
+        APP_WORKFLOW_RUN_URL="$BUILD_WORKFLOW_RUN_URL" \
+        APP_BUILD_WORKFLOW_RUN="$BUILD_WORKFLOW_RUN_ID" \
+        APP_WORKFLOW_RUN="$BUILD_WORKFLOW_RUN_ID" \
+        APP_BUILT_AT="$BUILD_BUILT_AT" \
+        APP_BUILD_AT="$BUILD_BUILT_AT" \
+        APP_CREATED="$BUILD_BUILT_AT" \
+        APP_IMAGE_VERSION="$BUILD_VERSION" \
+        APP_IMAGE_TAG="$(image_tag "$image")" \
+        APP_IMAGE_COMMIT="$BUILD_COMMIT" \
+        APP_IMAGE_COMMIT_SHORT="$BUILD_COMMIT_SHORT" \
+        APP_SOURCE="$BUILD_SOURCE" \
+        APP_IMAGE_REF="$BUILD_IMAGE_REF" \
+        APP_IMAGE_DIGEST="$BUILD_DIGEST" \
+        APP_IMAGE_RESOLVED_REF="$resolved_ref" \
+        APP_DEPLOYED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+}
+
+capture_runtime_config() {
+    local app="$1" key value
+    for key in "${RUNTIME_IDENTITY_KEYS[@]}"; do
+        if ! value="$(dokku config:get "$app" "$key" 2>/dev/null)"; then
+            error "Failed to read current runtime identity for ${app} (${key})."
+            return 1
+        fi
+        PREVIOUS_CONFIG["$app:$key"]="$value"
+    done
+}
+
+restore_runtime_config() {
+    local app="$1" key value
+    local -a set_args=() unset_args=()
+    for key in "${RUNTIME_IDENTITY_KEYS[@]}"; do
+        value="${PREVIOUS_CONFIG["$app:$key"]:-}"
+        if [ -n "$value" ]; then
+            set_args+=("$key=$value")
+        else
+            unset_args+=("$key")
+        fi
+    done
+    if [ "${#set_args[@]}" -gt 0 ] &&
+        ! dokku config:set --no-restart "$app" "${set_args[@]}"; then
+        error "Failed to restore runtime identity for ${app}."
+        return 1
+    fi
+    if [ "${#unset_args[@]}" -gt 0 ] &&
+        ! dokku config:unset --no-restart "$app" "${unset_args[@]}"; then
+        error "Failed to clear runtime identity for ${app}."
+        return 1
+    fi
+}
+
+restore_previous_identity() {
+    local app_type="$1"
+    local previous="${PREVIOUS_IDENTITY[$app_type]:-}"
+    local old_ref old_digest old_channel old_version old_commit old_short
+    local old_workflow old_workflow_url old_built
+    split_tab_fields "$previous"
+    old_ref="${TAB_FIELDS[0]-}"
+    old_digest="${TAB_FIELDS[1]-}"
+    old_channel="${TAB_FIELDS[2]-}"
+    old_version="${TAB_FIELDS[3]-}"
+    old_commit="${TAB_FIELDS[4]-}"
+    old_short="${TAB_FIELDS[5]-}"
+    old_workflow="${TAB_FIELDS[6]-}"
+    old_workflow_url="${TAB_FIELDS[7]-}"
+    old_built="${TAB_FIELDS[8]-}"
+    if [ -n "$old_ref" ] || [ -n "$old_digest" ]; then
+        if ! tenant_record_identity "$TENANT_NAME" "$app_type" "$old_ref" "$old_ref" \
+            "$old_digest" "$old_channel" "$old_version" "$old_commit" "$old_short" \
+            "$old_workflow" "$old_workflow_url" "$old_built"; then
+            error "Failed to restore durable identity for ${TENANT_NAME}-${app_type}."
+            return 1
+        fi
+    else
+        if ! tenant_clear_identity "$TENANT_NAME" "$app_type" \
+            "deployment failed; no prior verified identity"; then
+            error "Failed to clear durable identity for ${TENANT_NAME}-${app_type}."
+            return 1
+        fi
+    fi
+}
+
+record_deployment_failure() {
+    local app_type="$1" image="$2" message="$3"
+    local app="${TENANT_NAME}-${app_type}" resolved_ref="${image%@*}@${BUILD_DIGEST}"
+    local previous_ref="" previous_digest=""
+    local restore_status=0
+    split_tab_fields "${PREVIOUS_IDENTITY[$app_type]:-}"
+    previous_ref="${TAB_FIELDS[0]-}"
+    previous_digest="${TAB_FIELDS[1]-}"
+
+    if ! restore_runtime_config "$app"; then
+        restore_status=1
+    fi
+    if ! restore_previous_identity "$app_type"; then
+        restore_status=1
+    fi
+    tenant_record_failure "$TENANT_NAME" "$app_type" "$message" 2>/dev/null || true
+    tenant_record_audit "$TENANT_NAME" "$app_type" "$image" "$resolved_ref" "$BUILD_DIGEST" \
+        "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
+        "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" \
+        "$previous_ref" "$previous_digest" "failed" "$message" 2>/dev/null || true
+    return "$restore_status"
+}
+
+record_verified_image_identity() {
+    local app_type="$1" image="$2" resolved_ref
+    resolved_ref="${image%@*}@${BUILD_DIGEST}"
+    if ! tenant_record_identity "$TENANT_NAME" "$app_type" "$image" "$BUILD_IMAGE_REF" \
+        "$BUILD_DIGEST" "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" \
+        "$BUILD_COMMIT_SHORT" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" \
+        "$BUILD_BUILT_AT"; then
+        return 1
+    fi
+    tenant_record_audit "$TENANT_NAME" "$app_type" "$image" "$resolved_ref" "$BUILD_DIGEST" \
+        "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
+        "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" \
+        "" "" "verified" ""
 }
 
 find_existing_tenant_network() {
@@ -221,7 +387,6 @@ while [[ $# -gt 0 ]]; do
         --git-only)       GIT_ONLY=true; shift ;;
         --dry-run)        DRY_RUN=true; shift ;;
         --update)         FORCE_UPDATE=true; shift ;;
-        --migrate)        MIGRATE_CMD="$2"; shift 2 ;;
         --config)         CONFIG_FILE="$2"; shift 2 ;;
         -*)               error "Unknown option: $1"; exit 1 ;;
         *)
@@ -235,6 +400,16 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Reject deployment-owned or malformed overrides before they are displayed,
+# applied to Dokku, or used by tenant seed commands.
+if ! validate_tenant_env_overrides "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; then
+    error "Refusing invalid or reserved --env override."
+    exit 1
+fi
+validate_database_identifier "${MYSQL_MASTER_DB:-zatca_master}" || exit 1
+validate_database_identifier "${DEPLOY_STATE_DB:-deployment_state}" || exit 1
+validate_nats_url "${NATS_URL:-nats://host.docker.internal:4222}" || exit 1
 
 # ---- Validate ----
 if [ -z "$TENANT_NAME" ]; then
@@ -265,34 +440,28 @@ BASE_DOMAIN="${BASE_DOMAIN:?BASE_DOMAIN not set in config.env}"
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tenant-data}"
 
 MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
-HAS_DATABASE_URL=false
-HAS_DB_PARTS=false
-if has_env_var "DATABASE_URL"; then
-    HAS_DATABASE_URL=true
-fi
-if has_env_var "DB_HOST" && has_env_var "DB_PORT" && has_env_var "DB_NAME" && has_env_var "DB_USER" && has_env_var "DB_PASSWORD"; then
-    HAS_DB_PARTS=true
-fi
 
 BACKEND_APP="${TENANT_NAME}-backend"
 FRONTEND_APP="${TENANT_NAME}-frontend"
+TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
 TENANT_DOMAIN="${TENANT_NAME}.${BASE_DOMAIN}"
 TENANT_NETWORK="${TENANT_APP_NETWORK:-web}"
-# Export so init-tenant-db.sh (invoked as child bash) inherits these — it uses
+# Export so init-tenant-db.sh (invoked as child bash) inherits these â€” it uses
 # them to reach the backend container directly over the tenant network for
 # seed user registration (bypasses the frontend proxy CSRF).
 export TENANT_NETWORK
 export BACKEND_PORT
 
-if [ -n "$BACKEND_IMAGE" ] && ! $HAS_DATABASE_URL && ! $HAS_DB_PARTS; then
+# A backend tenant needs goose migrations and the registry tenant_key, so it
+# needs MySQL provisioning. External DB env vars cannot replace it.
+if [ -n "$BACKEND_IMAGE" ]; then
     if $NO_DATABASE; then
-        error "Backend image deploy requires database settings, but --no-database was set and no DATABASE_URL/DB_* env vars were provided."
-        error "Either remove --no-database and configure MySQL, or provide explicit DB env vars."
+        error "Backend image deploy requires MySQL provisioning (goose migrations and tenant_key), but --no-database was set."
         exit 1
     fi
     if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
-        error "Backend image deploy requires database provisioning, but MYSQL_ROOT_PASSWORD is not configured in config.env."
-        error "Set MYSQL_ROOT_PASSWORD, run scripts/verify-mysql.sh, then retry; or provide DATABASE_URL/DB_* via --env; or use --git-only."
+        error "Backend image deploy requires MySQL provisioning, but MYSQL_ROOT_PASSWORD is not configured in config.env."
+        error "Set MYSQL_ROOT_PASSWORD, run scripts/verify-mysql.sh, then retry; or use --git-only."
         exit 1
     fi
 fi
@@ -300,21 +469,21 @@ fi
 # Check if apps already exist
 if dokku apps:exists "$BACKEND_APP" 2>/dev/null; then
     if [ "$FORCE_UPDATE" = "true" ]; then
-        warn "App '$BACKEND_APP' already exists — continuing with --update (will re-deploy and re-seed)."
+        warn "App '$BACKEND_APP' already exists â€” continuing with --update (will re-deploy and re-seed)."
     else
         error "App '$BACKEND_APP' already exists. Tenant may already be provisioned."
-        error "→ To update an existing tenant's image or env vars, use: update-tenant.sh $TENANT_NAME"
-        error "→ To re-run provisioning anyway (e.g. after a partial failure), add --update to this command."
+        error "â†’ To update an existing tenant's image or env vars, use: update-tenant.sh $TENANT_NAME"
+        error "â†’ To re-run provisioning anyway (e.g. after a partial failure), add --update to this command."
         exit 1
     fi
 fi
 if dokku apps:exists "$FRONTEND_APP" 2>/dev/null; then
     if [ "$FORCE_UPDATE" = "true" ]; then
-        warn "App '$FRONTEND_APP' already exists — continuing with --update."
+        warn "App '$FRONTEND_APP' already exists â€” continuing with --update."
     else
         error "App '$FRONTEND_APP' already exists. Tenant may already be provisioned."
-        error "→ To update an existing tenant's image or env vars, use: update-tenant.sh $TENANT_NAME"
-        error "→ To re-run provisioning anyway (e.g. after a partial failure), add --update to this command."
+        error "â†’ To update an existing tenant's image or env vars, use: update-tenant.sh $TENANT_NAME"
+        error "â†’ To re-run provisioning anyway (e.g. after a partial failure), add --update to this command."
         exit 1
     fi
 fi
@@ -349,7 +518,7 @@ if c2 != c:
 \"
   nginx -s reload 2>/dev/null || true
 fi
-" 2>&1 || warn "Could not fix nginx upstream for ${app} — tenant may not be accessible until next deploy"
+" 2>&1 || warn "Could not fix nginx upstream for ${app} â€” tenant may not be accessible until next deploy"
 }
 
 create_dokku_app() {
@@ -374,14 +543,14 @@ if [ -n "${TENANT_NAME_PREFIX:-}" ]; then
     info "  Tenant prefix:  $(tenant_name_prefix)"
 fi
 info "  Domain:         $TENANT_DOMAIN"
-info "  Backend app:    $BACKEND_APP  → internal only (${BACKEND_APP}.web:${BACKEND_PORT})"
-info "  Frontend app:   $FRONTEND_APP → $TENANT_DOMAIN"
+info "  Backend app:    $BACKEND_APP  â†’ internal only (${BACKEND_APP}.web:${BACKEND_PORT})"
+info "  Frontend app:   $FRONTEND_APP â†’ $TENANT_DOMAIN"
 info "  Docker network: $TENANT_NETWORK"
 info "  Backend port:   $BACKEND_PORT"
 info "  Frontend port:  $FRONTEND_PORT"
 info "  Storage:        $STORAGE_ROOT/$TENANT_NAME/{uploads,data}"
 if ! $NO_DATABASE; then
-    info "  Database:       MySQL → tenant_${TENANT_NAME} on ${MYSQL_HOST:-127.0.0.1}"
+    info "  Database:       MySQL â†’ tenant_${TENANT_NAME} on ${MYSQL_HOST:-127.0.0.1}"
 else
     info "  Database:       skipped (--no-database)"
 fi
@@ -395,13 +564,48 @@ if $GIT_ONLY; then
     info "  Deploy method:  git push (no image deploy now)"
 fi
 for ev in "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; do
-    info "  Env var:        $ev"
+    info "  Env var:        $(redact_env_var "$ev")"
 done
 echo ""
 
 if $DRY_RUN; then
-    warn "Dry run — no changes made."
+    warn "Dry run â€” no changes made."
     exit 0
+fi
+
+# The registry row below gets its tenant_key from ZATCA's trigger. Refuse before
+# anything is created if zatca_master is not migrated yet.
+if ! $NO_DATABASE && [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" != "changeme" ]; then
+    require_registry_tenant_key || exit 1
+
+    existing_database=false
+    existing_registry=false
+    if tenant_database_exists "$TENANT_DB_NAME"; then
+        existing_database=true
+    else
+        rc=$?
+        if [ "$rc" -ne 1 ]; then
+            error "Could not determine whether tenant database '$TENANT_DB_NAME' exists; refusing provisioning."
+            exit 1
+        fi
+    fi
+    if tenant_registry_entry_exists "$TENANT_NAME" "$TENANT_DB_NAME"; then
+        existing_registry=true
+    else
+        rc=$?
+        if [ "$rc" -ne 1 ]; then
+            error "Could not determine whether the tenant registry entry exists; refusing provisioning."
+            exit 1
+        fi
+    fi
+    if [ "$existing_database" = true ] || [ "$existing_registry" = true ]; then
+        if [ "$FORCE_UPDATE" != "true" ]; then
+            error "Existing tenant state detected (database=${existing_database}, registry=${existing_registry})."
+            error "Fresh provisioning refuses to adopt existing state; use update-tenant.sh for an existing tenant."
+            exit 1
+        fi
+        warn "Existing tenant state detected; --update is limited to explicit recovery of this tenant."
+    fi
 fi
 
 # =============================================================================
@@ -424,7 +628,7 @@ dokku domains:add "$FRONTEND_APP" "$TENANT_DOMAIN"
 
 # ---- 3. Inter-app networking ----
 # /api routing happens INSIDE the frontend Go app (it reads BACKEND_URL and
-# proxies HTTP itself). We do NOT write a Dokku nginx /api snippet here —
+# proxies HTTP itself). We do NOT write a Dokku nginx /api snippet here â€”
 # referencing a sibling app from a custom nginx.conf.d snippet breaks
 # `nginx:validate-config` (the upstream alias doesn't resolve from the
 # dokku-nginx context), which silently blocks reloads for ALL tenants.
@@ -449,7 +653,7 @@ dokku network:set "$FRONTEND_APP" attach-post-create "$TENANT_NETWORK"
 # nginx can resolve <app>.web hostnames via Docker DNS (used by fix_nginx_upstream).
 # Without this, dokku's nginx runs only on 'bridge' and returns 502 when the
 # upstream block references a service hostname from a user-defined network.
-# `docker network connect` errors if already connected — swallow that.
+# `docker network connect` errors if already connected â€” swallow that.
 DOKKU_CONTAINER="${DOKKU_CONTAINER:-dokku}"
 if docker network inspect "$TENANT_NETWORK" --format '{{range $k,$v := .Containers}}{{$v.Name}}{{"\n"}}{{end}}' 2>/dev/null | grep -qx "$DOKKU_CONTAINER"; then
     info "${DOKKU_CONTAINER} already attached to ${TENANT_NETWORK}"
@@ -457,7 +661,7 @@ else
     if docker network connect "$TENANT_NETWORK" "$DOKKU_CONTAINER" 2>&1; then
         info "Attached ${DOKKU_CONTAINER} to ${TENANT_NETWORK}"
     else
-        warn "Could not attach ${DOKKU_CONTAINER} to ${TENANT_NETWORK} — inter-app proxy may fail with 502"
+        warn "Could not attach ${DOKKU_CONTAINER} to ${TENANT_NETWORK} â€” inter-app proxy may fail with 502"
     fi
 fi
 
@@ -524,7 +728,7 @@ if [ -n "$MSG_HOST" ]; then
         ${MSG_PORT:+MSG_PORT="$MSG_PORT"}
 fi
 
-# Docker host access — ensure containers can reach host services
+# Docker host access â€” ensure containers can reach host services
 dokku docker-options:add "$BACKEND_APP" deploy,run "--add-host=host.docker.internal:host-gateway" 2>/dev/null || true
 
 # User-provided env vars
@@ -544,15 +748,15 @@ MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
 MYSQL_TENANT_HOST="${MYSQL_TENANT_HOST:-%}"
 MYSQL_APP_HOST="$(mysql_host_for_container "${MYSQL_HOST:-host.docker.internal}")"
 
-TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
 TENANT_DB_USER="usr_${TENANT_NAME//-/_}"
 DB_PROVISIONED=false
+TENANT_REGISTERED=false
 
 if ! $NO_DATABASE; then
     if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
-        warn "MYSQL_ROOT_PASSWORD not set in config.env — skipping database creation."
+        warn "MYSQL_ROOT_PASSWORD not set in config.env â€” skipping database creation."
     else
-        # Generate a random password — but if the tenant backend already has a
+        # Generate a random password â€” but if the tenant backend already has a
         # DB_PASSWORD in Dokku config (re-run scenario), reuse it so the running
         # container does not get a mismatched credential.
         TENANT_DB_PASS=""
@@ -562,6 +766,7 @@ if ! $NO_DATABASE; then
         if [ -z "$TENANT_DB_PASS" ]; then
             TENANT_DB_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24)
         fi
+        TENANT_DB_PASS_SQL="$(mysql_password_sql_literal "$TENANT_DB_PASS")"
 
         log "Creating MySQL database: $TENANT_DB_NAME (user: $TENANT_DB_USER@'$MYSQL_TENANT_HOST')"
 
@@ -574,11 +779,12 @@ if ! $NO_DATABASE; then
             info "[dev-diag] SQL: DROP @'localhost'; CREATE/ALTER @'${MYSQL_TENANT_HOST}'; GRANT ON ${TENANT_DB_NAME}.*"
             set +e
         fi
-        run_mysql <<SQLEOF
+        run_mysql --binary-mode <<SQLEOF
+SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'NO_BACKSLASH_ESCAPES');
 CREATE DATABASE IF NOT EXISTS \`${TENANT_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 DROP USER IF EXISTS '${TENANT_DB_USER}'@'localhost';
-CREATE USER IF NOT EXISTS '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY '${TENANT_DB_PASS}';
-ALTER USER '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY '${TENANT_DB_PASS}';
+CREATE USER IF NOT EXISTS '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY ${TENANT_DB_PASS_SQL};
+ALTER USER '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}' IDENTIFIED BY ${TENANT_DB_PASS_SQL};
 GRANT ALL PRIVILEGES ON \`${TENANT_DB_NAME}\`.* TO '${TENANT_DB_USER}'@'${MYSQL_TENANT_HOST}';
 SQLEOF
         _mysql_rc=$?
@@ -599,10 +805,11 @@ INSERT INTO tenant (name, db_name)
 VALUES ('${TENANT_NAME}', '${TENANT_DB_NAME}')
 ON DUPLICATE KEY UPDATE enabled=1;
 SQLEOF
+        TENANT_REGISTERED=true
 
         # Inject DB env vars into the backend container.
         # Both naming conventions: modern (DB_HOST/DB_USER/...) and legacy
-        # ifritah-go (HOST/DBUSER/PASSWORD/DBNAME — HOST is host:port).
+        # ifritah-go (HOST/DBUSER/PASSWORD/DBNAME â€” HOST is host:port).
         DATABASE_URL="mysql://${TENANT_DB_USER}:${TENANT_DB_PASS}@${MYSQL_APP_HOST}:${MYSQL_PORT}/${TENANT_DB_NAME}"
         dokku config:set --no-restart "$BACKEND_APP" \
             DATABASE_URL="$DATABASE_URL" \
@@ -619,20 +826,36 @@ SQLEOF
         log "Database ready: $TENANT_DB_NAME"
 
         if [ -n "$BACKEND_IMAGE" ]; then
-            log "Initializing tenant database schema from backend image..."
+            ensure_tenant_image_available "$BACKEND_IMAGE"
+            if ! resolve_build_identity "$BACKEND_IMAGE"; then
+                error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
+                exit 1
+            fi
+            log "Running goose migrations from backend image..."
             bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
                 --schema-only \
                 --backend-image "$BACKEND_IMAGE" \
-                --config "$CONFIG_FILE" \
-                --env "DB_HOST=$MYSQL_APP_HOST" \
-                --env "DB_PORT=$MYSQL_PORT" \
-                --env "DB_USER=$TENANT_DB_USER" \
-                --env "DB_PASSWORD=$TENANT_DB_PASS"
+                --config "$CONFIG_FILE"
             DB_PROVISIONED=true
         else
             warn "No backend image supplied; skipping schema initialization."
             warn "Run later: bash scripts/init-tenant-db.sh $TENANT_NAME --backend-image <image> --schema-only"
         fi
+    fi
+fi
+
+# ---- 7b. Optional OpenObserve application wiring --------------------------
+# The shared helper keeps telemetry opt-in and fails open if the collector
+# network is unavailable.
+openobserve_reconcile_tenant_apps "$TENANT_NAME" "$BACKEND_APP" "$FRONTEND_APP" || true
+
+# Image deployments must have a durable deployment-state schema available so a
+# successful runtime identity check is persisted before provisioning completes.
+if [ "$GIT_ONLY" = false ] &&
+    { [ -n "$BACKEND_IMAGE" ] || [ -n "$FRONTEND_IMAGE" ]; }; then
+    if ! ensure_tenant_provenance_schema; then
+        error "Deployment state schema is unavailable; refusing an untracked image deployment."
+        exit 1
     fi
 fi
 
@@ -643,7 +866,7 @@ fi
 # CHECKS file into each app's working dir on the dokku host so health checks
 # are configured before first deploy.
 log "Configuring health checks..."
-dokku_shell "mkdir -p /home/dokku/${BACKEND_APP} && echo '/api/health' > /home/dokku/${BACKEND_APP}/CHECKS" || warn "could not seed backend CHECKS"
+dokku_shell "mkdir -p /home/dokku/${BACKEND_APP} && echo '/healthz' > /home/dokku/${BACKEND_APP}/CHECKS" || warn "could not seed backend CHECKS"
 dokku_shell "mkdir -p /home/dokku/${FRONTEND_APP} && echo '/' > /home/dokku/${FRONTEND_APP}/CHECKS" || warn "could not seed frontend CHECKS"
 
 # ---- 9. Deploy (if images provided) ----
@@ -651,29 +874,116 @@ if ! $GIT_ONLY; then
     if [ -n "$BACKEND_IMAGE" ]; then
         log "Deploying backend from image: $BACKEND_IMAGE"
         ensure_tenant_image_available "$BACKEND_IMAGE"
-        dokku config:set --no-restart "$BACKEND_APP" \
-            APP_IMAGE_VERSION="$(image_tag "$BACKEND_IMAGE")" \
-            APP_IMAGE_REF="$BACKEND_IMAGE"
-        dokku_git_from_image "$BACKEND_APP" "$BACKEND_IMAGE"
+        if ! resolve_build_identity "$BACKEND_IMAGE"; then
+            error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
+            exit 1
+        fi
+        if ! capture_runtime_config "$BACKEND_APP"; then
+            error "Failed to capture current runtime identity for ${BACKEND_APP}."
+            exit 1
+        fi
+        if ! previous_identity="$(tenant_current_identity "$TENANT_NAME" backend)"; then
+            error "Failed to read current durable identity for ${TENANT_NAME}-backend."
+            exit 1
+        fi
+        PREVIOUS_IDENTITY["backend"]="$previous_identity"
+        if ! set_runtime_build_identity "$BACKEND_APP" "$BACKEND_IMAGE"; then
+            error "Failed to set verified backend BuildIdentity for ${BACKEND_APP}."
+            record_deployment_failure backend "$BACKEND_IMAGE" \
+                "failed to set runtime identity"
+            exit 1
+        fi
+        if ! dokku_git_from_image "$BACKEND_APP" "$BACKEND_IMAGE"; then
+            error "Backend image deployment failed for ${BACKEND_APP}."
+            record_deployment_failure backend "$BACKEND_IMAGE" \
+                "image swap failed"
+            exit 1
+        fi
+        if ! wait_for_runtime_health "$BACKEND_APP" "/healthz"; then
+            error "Backend startup health check failed for ${BACKEND_APP}; refusing to continue provisioning."
+            record_deployment_failure backend "$BACKEND_IMAGE" \
+                "startup health check failed"
+            exit 1
+        fi
+        if ! verify_runtime_identity "$BACKEND_APP" "$BUILD_VERSION" "$BUILD_COMMIT" \
+            "$BUILD_DIGEST" "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" \
+            "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
+            error "Backend /version did not report the expected BuildIdentity for ${BACKEND_APP}; refusing to continue provisioning."
+            record_deployment_failure backend "$BACKEND_IMAGE" \
+                "post-deploy /version identity verification failed"
+            exit 1
+        fi
+        if ! record_verified_image_identity backend "$BACKEND_IMAGE"; then
+            error "Failed to persist verified backend provenance for ${BACKEND_APP}; refusing to finish provisioning."
+            record_deployment_failure backend "$BACKEND_IMAGE" \
+                "failed to persist verified deployment identity"
+            exit 1
+        fi
     else
-        info "No backend image — deploy later with: git push dokku@${BASE_DOMAIN}:${BACKEND_APP} main"
+        info "No backend image â€” deploy later with: git push dokku@${BASE_DOMAIN}:${BACKEND_APP} main"
     fi
 
     if [ -n "$FRONTEND_IMAGE" ]; then
         log "Deploying frontend from image: $FRONTEND_IMAGE"
         ensure_tenant_image_available "$FRONTEND_IMAGE"
-        dokku config:set --no-restart "$FRONTEND_APP" \
-            APP_IMAGE_VERSION="$(image_tag "$FRONTEND_IMAGE")" \
-            APP_IMAGE_REF="$FRONTEND_IMAGE" \
-            COOKIE_SECURE=false
-        dokku_git_from_image "$FRONTEND_APP" "$FRONTEND_IMAGE"
+        if ! resolve_build_identity "$FRONTEND_IMAGE"; then
+            error "Image is missing or inconsistent OCI BuildIdentity labels: $FRONTEND_IMAGE"
+            exit 1
+        fi
+        if ! capture_runtime_config "$FRONTEND_APP"; then
+            error "Failed to capture current runtime identity for ${FRONTEND_APP}."
+            exit 1
+        fi
+        if ! previous_identity="$(tenant_current_identity "$TENANT_NAME" frontend)"; then
+            error "Failed to read current durable identity for ${TENANT_NAME}-frontend."
+            exit 1
+        fi
+        PREVIOUS_IDENTITY["frontend"]="$previous_identity"
+        if ! set_runtime_build_identity "$FRONTEND_APP" "$FRONTEND_IMAGE"; then
+            error "Failed to set verified frontend BuildIdentity for ${FRONTEND_APP}."
+            record_deployment_failure frontend "$FRONTEND_IMAGE" \
+                "failed to set runtime identity"
+            exit 1
+        fi
+        if ! dokku config:set --no-restart "$FRONTEND_APP" COOKIE_SECURE=false; then
+            error "Failed to set frontend cookie configuration for ${FRONTEND_APP}."
+            record_deployment_failure frontend "$FRONTEND_IMAGE" \
+                "failed to set frontend cookie configuration"
+            exit 1
+        fi
+        if ! dokku_git_from_image "$FRONTEND_APP" "$FRONTEND_IMAGE"; then
+            error "Frontend image deployment failed for ${FRONTEND_APP}."
+            record_deployment_failure frontend "$FRONTEND_IMAGE" \
+                "image swap failed"
+            exit 1
+        fi
+        if ! wait_for_runtime_health "$FRONTEND_APP" "/"; then
+            error "Frontend startup health check failed for ${FRONTEND_APP}; refusing to continue provisioning."
+            record_deployment_failure frontend "$FRONTEND_IMAGE" \
+                "startup health check failed"
+            exit 1
+        fi
+        if ! verify_runtime_identity "$FRONTEND_APP" "$BUILD_VERSION" "$BUILD_COMMIT" \
+            "$BUILD_DIGEST" "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" \
+            "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
+            error "Frontend /version did not report the expected BuildIdentity for ${FRONTEND_APP}; refusing to continue provisioning."
+            record_deployment_failure frontend "$FRONTEND_IMAGE" \
+                "post-deploy /version identity verification failed"
+            exit 1
+        fi
+        if ! record_verified_image_identity frontend "$FRONTEND_IMAGE"; then
+            error "Failed to persist verified frontend provenance for ${FRONTEND_APP}; refusing to finish provisioning."
+            record_deployment_failure frontend "$FRONTEND_IMAGE" \
+                "failed to persist verified deployment identity"
+            exit 1
+        fi
 
         # Dokku's nginx config uses the bridge network IP which changes on every container
         # restart. Fix it immediately to use the Docker service hostname on the web network,
         # which is stable and resolved via Docker's internal DNS (127.0.0.11).
         fix_nginx_upstream "$FRONTEND_APP" "${FRONTEND_APP}.web" "8000"
     else
-        info "No frontend image — deploy later with: git push dokku@${BASE_DOMAIN}:${FRONTEND_APP} main"
+        info "No frontend image â€” deploy later with: git push dokku@${BASE_DOMAIN}:${FRONTEND_APP} main"
     fi
 fi
 
@@ -688,11 +998,7 @@ if $DB_PROVISIONED && ! $GIT_ONLY; then
     if [ -n "$ADMIN_USER$ADMIN_PASSWORD$MANAGER_USER$MANAGER_PASSWORD" ]; then
         if [ -n "$BACKEND_IMAGE" ] && [ -n "$FRONTEND_IMAGE" ]; then
             log "Seeding tenant users..."
-            seed_args=("$TENANT_NAME" --seed-only --config "$CONFIG_FILE" \
-                --env "DB_HOST=$MYSQL_APP_HOST" \
-                --env "DB_PORT=$MYSQL_PORT" \
-                --env "DB_USER=$TENANT_DB_USER" \
-                --env "DB_PASSWORD=$TENANT_DB_PASS")
+            seed_args=("$TENANT_NAME" --seed-only --config "$CONFIG_FILE")
             [ -n "$ADMIN_USER" ] && seed_args+=(--env "ADMIN_USER=$ADMIN_USER")
             [ -n "$ADMIN_PASSWORD" ] && seed_args+=(--env "ADMIN_PASSWORD=$ADMIN_PASSWORD")
             [ -n "$MANAGER_USER" ] && seed_args+=(--env "MANAGER_USER=$MANAGER_USER")
@@ -709,25 +1015,20 @@ if $DB_PROVISIONED && ! $GIT_ONLY; then
 fi
 
 # ---- 11. External nginx ----
-info "Host nginx (operator-managed) wildcards *.${BASE_DOMAIN} → 127.0.0.1:${DOKKU_PORT}; nothing to do per-tenant."
+info "Host nginx (operator-managed) wildcards *.${BASE_DOMAIN} â†’ 127.0.0.1:${DOKKU_PORT}; nothing to do per-tenant."
 info "Verify once on the host that the wildcard vhost forwards with 'Host \$host' preserved, then: sudo nginx -t && sudo systemctl reload nginx"
 
-# ---- 12. Run database migration ----
-if [ -n "$MIGRATE_CMD" ] && [ -n "$BACKEND_IMAGE" ]; then
-    log "Running database migration: $MIGRATE_CMD"
-    if dokku run "$BACKEND_APP" $MIGRATE_CMD; then
-        log "Migration completed successfully."
-    else
-        warn "Migration failed. You may need to run it manually:"
-        warn "  dokku run $BACKEND_APP $MIGRATE_CMD"
-    fi
-elif [ -n "$MIGRATE_CMD" ] && [ -z "$BACKEND_IMAGE" ]; then
-    warn "--migrate specified but no backend image deployed yet. Skipping migration."
-    warn "Run manually after deploy: dokku run $BACKEND_APP $MIGRATE_CMD"
+# The daemon loads enabled tenant rows and branch workers in memory. Refresh it
+# only after the registry row and tenant database have been committed.
+if $TENANT_REGISTERED && zatca_daemon_enabled; then
+    log "Refreshing ZATCA daemon tenant discovery..."
+    bash "$SCRIPT_DIR/reload-zatca-daemon.sh" \
+        --config "$CONFIG_FILE" \
+        --tenant "$TENANT_NAME"
 fi
 
 # ---- DNS wildcard check ----
-# Fail loudly if *.BASE_DOMAIN doesn't resolve — the tenant URL below will
+# Fail loudly if *.BASE_DOMAIN doesn't resolve â€” the tenant URL below will
 # 404 in a browser otherwise, with no obvious hint that DNS is the problem.
 dns_ok=true
 if command -v getent >/dev/null 2>&1; then
@@ -763,7 +1064,7 @@ if ! $dns_ok; then
     warn "  Every future tenant will resolve automatically once the wildcard is live."
     warn ""
 fi
-log "  Routing: host nginx (operator-managed TLS) → 127.0.0.1:${DOKKU_PORT} → Dokku → ${TENANT_DOMAIN}"
+log "  Routing: host nginx (operator-managed TLS) â†’ 127.0.0.1:${DOKKU_PORT} â†’ Dokku â†’ ${TENANT_DOMAIN}"
 log "  No per-tenant host port; Dokku routes by Host header."
 log ""
 log "  Dashboard: http://localhost:8088 (Apps page)"

@@ -1,0 +1,257 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: Ifritah observability
+    folder: Ifritah Operations
+    interval: 1m
+    rules:
+      - uid: ifritah_component_down
+        title: Observability component is down
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: ifritah-prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: ifritah-prometheus
+              editorMode: code
+              expr: min(up{job=~"alloy|loki|prometheus|grafana"})
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              reducer: last
+              refId: B
+              type: reduce
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 1
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        dashboardUid: ifritah-ops
+        panelId: 6
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: An observability service is not responding to Prometheus.
+          description: Check the component availability panel, then inspect the affected container and recent dashboard logs.
+          runbook: observability-operations
+        labels:
+          severity: critical
+          component: observability
+        isPaused: false
+
+      - uid: ifritah_dashboard_errors
+        title: Dashboard error logs detected
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: ifritah-loki
+            model:
+              datasource:
+                type: loki
+                uid: ifritah-loki
+              editorMode: code
+              expr: sum(count_over_time({app="ifritah-dashboard"} | json | level="ERROR" [5m]))
+              intervalMs: 1000
+              maxDataPoints: 43200
+              queryType: range
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              reducer: last
+              refId: B
+              type: reduce
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        dashboardUid: ifritah-logs
+        panelId: 2
+        noDataState: OK
+        execErrState: Alerting
+        for: 10m
+        annotations:
+          summary: The dashboard emitted one or more error-level events.
+          description: Open the structured dashboard log stream and correlate the error_type, error_code, operation, and request_id fields without exposing raw error messages.
+          runbook: alert-triage
+        labels:
+          severity: warning
+          component: dashboard
+        isPaused: false
+
+      - uid: ifritah_dashboard_panics
+        title: Dashboard panic recovery detected
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+            datasourceUid: ifritah-loki
+            model:
+              datasource:
+                type: loki
+                uid: ifritah-loki
+              editorMode: code
+              expr: sum(count_over_time({app="ifritah-dashboard"} | json | msg="http panic recovered" [10m]))
+              intervalMs: 1000
+              maxDataPoints: 43200
+              queryType: range
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              reducer: last
+              refId: B
+              type: reduce
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: threshold
+        dashboardUid: ifritah-logs
+        panelId: 3
+        noDataState: OK
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: The dashboard recovered an HTTP handler panic.
+          description: Treat as a service-impacting defect. Preserve the request_id from the log, inspect the matching request, and verify the dashboard remains healthy.
+          runbook: alert-triage
+        labels:
+          severity: critical
+          component: dashboard
+        isPaused: false

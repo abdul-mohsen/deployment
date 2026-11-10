@@ -2,10 +2,10 @@
 package web
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -26,6 +26,7 @@ type backupManifest struct {
 	Timestamp     string `json:"timestamp"`
 	Origin        string `json:"origin"`
 	Owner         string `json:"owner"`
+	Label         string `json:"label,omitempty"`
 	FilesArtifact string `json:"files_artifact"`
 	DBArtifact    string `json:"db_artifact"`
 	Verified      bool   `json:"verified"`
@@ -47,15 +48,43 @@ func validBackupID(id string) bool {
 	return true
 }
 
+func backupDirPath(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return "/opt/tenant-backups"
+	}
+	return dir
+}
+
+// backupArtifactPath only permits artifacts stored directly in the configured
+// backup directory. Manifest contents are server-controlled files, but still
+// must not be able to turn a download into an arbitrary file read.
+func backupArtifactPath(dir, artifact string) (string, error) {
+	if artifact == "" || filepath.IsAbs(artifact) ||
+		filepath.Base(artifact) != artifact ||
+		strings.ContainsAny(artifact, `/\`) {
+		return "", fmt.Errorf("invalid backup artifact")
+	}
+	root, err := filepath.Abs(backupDirPath(dir))
+	if err != nil {
+		return "", err
+	}
+	path, err := filepath.Abs(filepath.Join(root, artifact))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("backup artifact escapes backup directory")
+	}
+	return path, nil
+}
+
 // ── listBackupsForTenant reads .meta.json files directly from the backup dir ──
 // This avoids running a sidecar container just to list files — the backup dir
 // is mounted directly into the dashboard container via BACKUP_DIR env / volume.
 
 func (s *server) listBackupsForTenant(ctx context.Context, tenant string) ([]backupManifest, error) {
-	backupDir := s.cfg.BackupDir
-	if backupDir == "" {
-		backupDir = "/opt/tenant-backups"
-	}
+	backupDir := backupDirPath(s.cfg.BackupDir)
 
 	// Glob for all manifest files belonging to this tenant
 	pattern := filepath.Join(backupDir, tenant+"_*.meta.json")
@@ -107,7 +136,8 @@ func (s *server) listBackupsForTenant(ctx context.Context, tenant string) ([]bac
 }
 
 // runScriptCapture runs a script and captures stdout+stderr, returning combined output.
-// The backup dir is mounted so scripts can write/read backup files on the host.
+// Backup and tenant-storage directories are mounted so lifecycle scripts operate
+// on the same host files as the dashboard and Dokku.
 func (s *server) runScriptCapture(ctx context.Context, scriptName string, argv []string) ([]byte, error) {
 	if s.cfg.ScriptsHostPath == "" {
 		return nil, fmt.Errorf("SCRIPTS_HOST_PATH not configured")
@@ -139,15 +169,21 @@ exec bash "scripts/deployctl.sh" "script" "$NAME" "$@"%s`, configFlag)
 	if backupDir == "" {
 		backupDir = "/opt/tenant-backups"
 	}
+	storageRoot := s.cfg.StorageRoot
+	if storageRoot == "" {
+		storageRoot = "/opt/tenant-data"
+	}
 
 	full := []string{
 		"run", "--rm", "-i",
 		"-e", "MYSQL_CLIENT_MODE=docker",
 		"-e", "TENANT_NAME_PREFIX=" + os.Getenv("TENANT_NAME_PREFIX"),
 		"-e", "BACKUP_DIR=" + backupDir,
+		"-e", "STORAGE_ROOT=" + storageRoot,
 		"-v", dockerSocket,
 		"-v", s.cfg.ScriptsHostPath + ":/opt/deployment:ro",
 		"-v", backupDir + ":" + backupDir,
+		"-v", storageRoot + ":" + storageRoot,
 		"--network", "host",
 		s.cfg.RunnerImage,
 		"bash", "-c", bashScript,
@@ -168,10 +204,16 @@ func (s *server) handleTenantBackup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid name", http.StatusBadRequest)
 		return
 	}
-	_ = r.ParseForm()
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
 	label := strings.TrimSpace(r.FormValue("label"))
-	if label != "" {
-		_ = s.tenantState.SetBackupLabel(tenant, label)
+	if len(label) > 120 || strings.IndexFunc(label, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		http.Error(w, "backup label must be at most 120 characters and contain no control characters", http.StatusBadRequest)
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
@@ -185,9 +227,22 @@ func (s *server) handleTenantBackup(w http.ResponseWriter, r *http.Request) {
 		f.Flush()
 	}
 
-	argv := []string{tenant, "--origin", "user", "--owner", "dashboard"}
-	if err := s.runner.Run(ctx, w, "backup-tenant.sh", argv); err != nil {
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+	argv := []string{tenant, "--origin", "user", "--owner", "dashboard", "--require-verified"}
+	if label != "" {
+		argv = append(argv, "--label", label)
+	}
+	activity := activityKey("tenant", tenant)
+	s.recordActivity(activity, fmt.Sprintf("--- create backup for %s @ %s ---", tenant, time.Now().UTC().Format(time.RFC3339)))
+	s.recordActivity(activity, "Starting backup for "+tenant+"...")
+	runErr := s.runner.RunWithCallback(ctx, w, "backup-tenant.sh", argv, func(line string) {
+		s.recordActivity(activity, line)
+	})
+	if runErr != nil {
+		s.recordActivity(activity, "ERROR: "+runErr.Error())
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", runErr.Error())
+		s.recordActivity(activity, "--- backup failed ---")
+	} else {
+		s.recordActivity(activity, "--- backup complete ---")
 	}
 	fmt.Fprint(w, "event: done\ndata: end\n\n")
 	if f, ok := w.(http.Flusher); ok {
@@ -225,7 +280,7 @@ func (s *server) handleTenantBackupDownload(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	backupDir := s.cfg.BackupDir
+	backupDir := backupDirPath(s.cfg.BackupDir)
 	metaPath := filepath.Join(backupDir, backupID+".meta.json")
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -243,7 +298,11 @@ func (s *server) handleTenantBackupDownload(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	sqlPath := filepath.Join(backupDir, m.DBArtifact)
+	sqlPath, err := backupArtifactPath(backupDir, m.DBArtifact)
+	if err != nil {
+		http.Error(w, "invalid SQL artifact path", http.StatusInternalServerError)
+		return
+	}
 	f, err := os.Open(sqlPath)
 	if err != nil {
 		http.Error(w, "SQL artifact file not found", http.StatusNotFound)
@@ -258,24 +317,46 @@ func (s *server) handleTenantBackupDownload(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(m.DBArtifact)))
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	buf := make([]byte, 32*1024)
-	var fErr error
-	for {
-		n, readErr := f.Read(buf)
-		if n > 0 {
-			if _, wErr := w.Write(buf[:n]); wErr != nil {
-				break
-			}
-		}
-		if readErr != nil {
-			fErr = readErr
-			break
-		}
+	_, _ = io.Copy(w, f)
+}
+
+// ── POST /tenants/{name}/backups/{id}/verify ─────────────────────────────────
+
+func (s *server) handleTenantBackupVerify(w http.ResponseWriter, r *http.Request) {
+	tenant := chi.URLParam(r, "name")
+	backupID := chi.URLParam(r, "id")
+	if !validAppName(tenant) || !validBackupID(backupID) {
+		http.Error(w, "invalid params", http.StatusBadRequest)
+		return
 	}
-	_ = fErr
-	_ = scanner
+
+	backupDir := s.cfg.BackupDir
+	metaPath := filepath.Join(backupDir, backupID+".meta.json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		http.Error(w, "backup not found", http.StatusNotFound)
+		return
+	}
+	var m backupManifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		http.Error(w, "invalid backup manifest", http.StatusInternalServerError)
+		return
+	}
+	if m.Tenant != "" && m.Tenant != tenant {
+		http.Error(w, "backup belongs to a different tenant", http.StatusForbidden)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	output, err := s.runScriptCapture(ctx, "manage-backups.sh", []string{"verify", backupID})
+	if err != nil {
+		http.Error(w, "verify failed: "+string(output), http.StatusBadGateway)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write(output)
 }
 
 // ── POST /tenants/{name}/backups/{id}/delete ─────────────────────────────────
@@ -289,7 +370,7 @@ func (s *server) handleTenantBackupDelete(w http.ResponseWriter, r *http.Request
 	}
 
 	// Verify the backup belongs to this tenant and is user-origin
-	backupDir := s.cfg.BackupDir
+	backupDir := backupDirPath(s.cfg.BackupDir)
 	metaPath := filepath.Join(backupDir, backupID+".meta.json")
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -315,10 +396,16 @@ func (s *server) handleTenantBackupDelete(w http.ResponseWriter, r *http.Request
 
 	// manage-backups.sh delete <id> --force (dashboard has operator authority)
 	argv := []string{"delete", backupID, "--force"}
-	if _, err := s.runScriptCapture(ctx, "manage-backups.sh", argv); err != nil {
+	activity := activityKey("tenant", tenant)
+	s.recordActivity(activity, fmt.Sprintf("--- delete backup %s @ %s ---", backupID, time.Now().UTC().Format(time.RFC3339)))
+	out, err := s.runScriptCapture(ctx, "manage-backups.sh", argv)
+	s.recordActivityBlock(activity, string(out))
+	if err != nil {
+		s.recordActivity(activity, "ERROR: "+err.Error())
 		http.Error(w, "delete failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.recordActivity(activity, "--- backup delete complete ---")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -346,8 +433,19 @@ func (s *server) handleTenantRestore(w http.ResponseWriter, r *http.Request) {
 
 	// restore-tenant.sh <tenant> --from <id> (takes safety backup by default)
 	argv := []string{tenant, "--from", backupID}
-	if err := s.runner.Run(ctx, w, "restore-tenant.sh", argv); err != nil {
-		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+	activity := activityKey("tenant", tenant)
+	s.recordActivity(activity, fmt.Sprintf("--- restore %s from %s @ %s ---", tenant, backupID, time.Now().UTC().Format(time.RFC3339)))
+	s.recordActivity(activity, "Restoring "+tenant+" from backup "+backupID+"...")
+	s.recordActivity(activity, "A safety backup of the current state will be taken first.")
+	runErr := s.runner.RunWithCallback(ctx, w, "restore-tenant.sh", argv, func(line string) {
+		s.recordActivity(activity, line)
+	})
+	if runErr != nil {
+		s.recordActivity(activity, "ERROR: "+runErr.Error())
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", runErr.Error())
+		s.recordActivity(activity, "--- restore failed ---")
+	} else {
+		s.recordActivity(activity, "--- restore complete ---")
 	}
 	fmt.Fprint(w, "event: done\ndata: end\n\n")
 	if f, ok := w.(http.Flusher); ok {
@@ -369,11 +467,8 @@ func (s *server) handleAccountingExport(w http.ResponseWriter, r *http.Request) 
 	dbName := "tenant_" + strings.ReplaceAll(tenant, "-", "_")
 	host := s.cfg.MySQLHost
 	port := s.cfg.MySQLPort
-	user := strings.TrimSpace(os.Getenv("MYSQL_ROOT_USER"))
-	if user == "" {
-		user = "root"
-	}
-	password := os.Getenv("MYSQL_ROOT_PASSWORD")
+	user := strings.TrimSpace(s.cfg.MySQLAdminUser)
+	password := s.cfg.MySQLAdminPassword
 
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&timeout=30s",
 		user, password, host, port, dbName)

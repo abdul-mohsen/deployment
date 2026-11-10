@@ -3,14 +3,14 @@
 # setup-dev-tenant.sh — Provision the single dev tenant
 # =============================================================================
 # Creates exactly one dev tenant whose backend (and optionally frontend) tracks
-# DEV_TAG. App repo CI should build the VERSION tag; webhook deploys are preferred.
+# DEV_TAG. App repo CI should build the branch tag; webhook deploys are preferred.
 #
 # Idempotent: re-running just refreshes the image pins.
 #
 # Usage:
 #   bash scripts/setup-dev-tenant.sh                 # use config.env defaults
 #   bash scripts/setup-dev-tenant.sh --name dev      # override tenant name
-#   bash scripts/setup-dev-tenant.sh --tag v0.0.1    # override dev tag
+#   bash scripts/setup-dev-tenant.sh --tag v1.2.3    # override dev tag
 #   bash scripts/setup-dev-tenant.sh --frontend      # also pin frontend to DEV_TAG
 # =============================================================================
 
@@ -28,9 +28,10 @@ info()  { echo -e "${BLUE}[i]${NC} $*"; }
 
 CONFIG_FILE="${CONFIG_FILE:-$PROJECT_DIR/config.env}"
 [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+BASE_DOMAIN="${BASE_DOMAIN:-app.example.com}"
 
 NAME="${DEV_TENANT:-dev}"
-TAG="${DEV_TAG:-v0.0.1}"
+TAG="${DEV_TAG:-dev}"
 PIN_FRONTEND=false
 
 while [[ $# -gt 0 ]]; do
@@ -52,8 +53,8 @@ if [ -z "$DOCKERHUB_USERNAME" ]; then
     exit 1
 fi
 
-BACKEND_IMG="${BACKEND_IMAGE:-${DOCKERHUB_USERNAME}/api}:${TAG}"
-FRONTEND_IMG="${FRONTEND_IMAGE:-${DOCKERHUB_USERNAME}/web}:${TAG}"
+BACKEND_IMG="${BACKEND_IMAGE:-${DOCKERHUB_USERNAME}/ifritah-api}:${TAG}"
+FRONTEND_IMG="${FRONTEND_IMAGE:-${DOCKERHUB_USERNAME}/ifritah-web}:${TAG}"
 
 log "Dev tenant setup"
 info "  Name:           ${NAME}"
@@ -96,9 +97,7 @@ fi
 
 echo ""
 log "Dev tenant ready."
-DEV_SCHEME="http"
-[ "${ENABLE_SSL:-false}" = "true" ] && DEV_SCHEME="https"
-info "URL:           ${DEV_SCHEME}://${NAME}.${BASE_DOMAIN:-app.example.com}"
+info "URL:           $(public_tenant_url "$NAME")"
 info "Auto-deploy:   pushes to the 'dev' branch → CI builds ${BACKEND_IMG} → auto-pull.sh deploys here every 2 min"
 info "Manual deploy: bash scripts/deploy-all.sh ${BACKEND_IMG} --tenant ${NAME}"
 info "Logs:          bash scripts/tail-logs.sh ${APP_BACKEND}"

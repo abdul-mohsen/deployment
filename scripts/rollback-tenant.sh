@@ -10,12 +10,13 @@
 #   --to <image:tag>           Specific image to rollback to
 #   --list                     Show recent deploy history (available tags)
 #   --config <path>            Path to config.env file (default: ../config.env)
+#   --confirm-schema-compatible  Required for a backend rollback (schema is forward-only)
 #
 # Examples:
 #   ./scripts/rollback-tenant.sh acme --list
-#   ./scripts/rollback-tenant.sh acme --to myuser/api:abc1234
-#   ./scripts/rollback-tenant.sh acme --type frontend --to myuser/web:prev
-#   ./scripts/rollback-tenant.sh --all --to myuser/api:abc1234
+#   ./scripts/rollback-tenant.sh acme --to myuser/ifritah-api:abc1234 --confirm-schema-compatible
+#   ./scripts/rollback-tenant.sh acme --type frontend --to myuser/ifritah-web:prev
+#   ./scripts/rollback-tenant.sh --all --to myuser/ifritah-api:abc1234 --confirm-schema-compatible
 # =============================================================================
 
 set -euo pipefail
@@ -41,6 +42,7 @@ APP_TYPE="backend"
 ROLLBACK_IMAGE=""
 LIST_MODE=false
 ALL_TENANTS=false
+CONFIRM_SCHEMA_COMPATIBLE=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -49,6 +51,7 @@ while [[ $# -gt 0 ]]; do
         --list)    LIST_MODE=true; shift ;;
         --all)     ALL_TENANTS=true; shift ;;
         --config)  CONFIG_FILE="$2"; shift 2 ;;
+        --confirm-schema-compatible) CONFIRM_SCHEMA_COMPATIBLE=true; shift ;;
         -*)        error "Unknown option: $1"; exit 1 ;;
         *)         [ -z "$TENANT_NAME" ] && TENANT_NAME="$1"; shift ;;
     esac
@@ -102,6 +105,12 @@ if [ -z "$ROLLBACK_IMAGE" ]; then
     exit 1
 fi
 
+# ---- Backend rollback needs an explicit schema confirmation (before any Dokku call) ----
+if [ "$APP_TYPE" = "backend" ] && ! $CONFIRM_SCHEMA_COMPATIBLE; then
+    error "backend rollback runs an older image on the current schema: restore from backup first if a schema change needs it, then pass --confirm-schema-compatible"
+    exit 1
+fi
+
 # ---- Rollback single tenant ----
 rollback_app() {
     local app="$1"
@@ -149,6 +158,9 @@ if $ALL_TENANTS; then
 
     FAILED=0
     while IFS= read -r app; do
+        tenant="${app%${APP_SUFFIX}}"
+        log "Synchronizing tenant routing: ${tenant}.${BASE_DOMAIN:-<unset>}"
+        reconcile_tenant_routing "$tenant"
         if ! rollback_app "$app" "$ROLLBACK_IMAGE"; then
             FAILED=$((FAILED + 1))
         fi
@@ -164,6 +176,8 @@ if $ALL_TENANTS; then
 else
     # Rollback single tenant
     APP_NAME="${TENANT_NAME}${APP_SUFFIX}"
+    log "Synchronizing tenant routing: ${TENANT_NAME}.${BASE_DOMAIN:-<unset>}"
+    reconcile_tenant_routing "$TENANT_NAME"
     echo ""
     rollback_app "$APP_NAME" "$ROLLBACK_IMAGE"
     echo ""

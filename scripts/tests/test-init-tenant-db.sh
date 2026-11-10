@@ -40,7 +40,7 @@ else
 fi
 
 echo ""
-echo "=== install.env is sourced (so MYSQL_ROOT_PASSWORD is available) ==="
+echo "=== install.env is sourced (so MYSQL_ADMIN_PASSWORD is available) ==="
 if grep -qE 'INSTALL_ENV_FILE=.*install\.env' scripts/init-tenant-db.sh; then
     pass "install.env is sourced after config.env"
 else
@@ -52,7 +52,7 @@ echo ""
 echo "=== dry-run --seed-only prints correct URL ==="
 # Set up minimum env for the script to run --dry-run without touching anything
 export BASE_DOMAIN=test.example.com
-export MYSQL_ROOT_PASSWORD=stub
+export MYSQL_ADMIN_PASSWORD=stub
 export DOKKU_PORT=8080
 export BASEURL=/api/v2
 # Use a temp config file since --dry-run still requires --config or config.env
@@ -60,7 +60,7 @@ tmpcfg=$(mktemp)
 trap 'rm -f "$tmpcfg"' EXIT
 cat > "$tmpcfg" <<EOF
 BASE_DOMAIN=$BASE_DOMAIN
-MYSQL_ROOT_PASSWORD=$MYSQL_ROOT_PASSWORD
+MYSQL_ADMIN_PASSWORD=$MYSQL_ADMIN_PASSWORD
 DOKKU_PORT=$DOKKU_PORT
 BASEURL=$BASEURL
 EOF
@@ -77,6 +77,16 @@ else
     echo "$output"
     echo "--- end ---"
     fail "dry-run seed did not use /api/v2/register"
+fi
+
+echo ""
+echo "=== existing-tenant schema replay does not require admin credentials ==="
+if grep -qF 'run_migration_mysql' scripts/init-tenant-db.sh &&
+    grep -qF 'MIGRATION_DB_USER and MIGRATION_DB_PASSWORD must be configured together.' scripts/init-tenant-db.sh &&
+    grep -qF 'run_tenant_mysql "$@"' scripts/init-tenant-db.sh; then
+    pass "existing-tenant replay supports dedicated, deployment, and legacy tenant credentials"
+else
+    fail "existing-tenant replay credential precedence is missing"
 fi
 
 if echo "$output" | grep -qF "Would POST /api/register "; then
@@ -98,6 +108,52 @@ if grep -q '\[dev-diag\] register attempt=' scripts/init-tenant-db.sh; then
 else
     fail "register retry loop does not log attempts when DASHBOARD_ENV=dev"
 fi
+
+echo ""
+echo "=== dry-run --schema-only plans goose from the backend image ==="
+output=$(bash scripts/init-tenant-db.sh acme --schema-only --dry-run \
+    --config "$tmpcfg" \
+    --backend-image example/api:v1 2>&1 || true)
+
+if echo "$output" | grep -qF "/app/migrate up from example/api:v1"; then
+    pass "dry-run schema prints the goose command"
+else
+    echo "--- output ---"
+    echo "$output"
+    echo "--- end ---"
+    fail "dry-run schema did not plan goose migrations"
+fi
+
+echo ""
+echo "=== existing-data schema checks remain after goose and before completion ==="
+goose_line="$(grep -n 'goose_run "\$image" up' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+tables_line="$(grep -n '^tenant_missing_required_tables()' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+validate_line="$(grep -n '^    validate_tenant_schema$' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+key_line="$(grep -n '^    ensure_company_tenant_key$' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+[ -n "$goose_line" ] && [ -n "$tables_line" ] && [ -n "$validate_line" ] && [ -n "$key_line" ] \
+    || fail "existing-data migration checks are missing"
+[ "$goose_line" -lt "$validate_line" ] && [ "$validate_line" -lt "$key_line" ] \
+    || fail "required-table/key checks are not ordered after goose"
+for table in company branches store user; do
+    grep -q "SELECT '${table}'" scripts/init-tenant-db.sh \
+        || fail "required existing-data table is not checked: $table"
+done
+grep -q 'tenant_registry_key "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
+    || fail "existing-data path does not read the registry tenant_key"
+grep -q 'UPDATE company SET tenant_key =.*WHERE id = 1' scripts/init-tenant-db.sh \
+    || fail "existing-data path does not update company row 1 with a WHERE guard"
+pass "existing-data required tables and registry tenant_key remain after goose"
+
+echo ""
+echo "=== status mode remains read-only ==="
+status_line="$(grep -n 'if \$STATUS_ONLY; then' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+status_exit_line="$(grep -n '^    exit \$?' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+apply_line="$(grep -n '^if ! \$SEED_ONLY; then' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+[ -n "$status_line" ] && [ -n "$status_exit_line" ] && [ -n "$apply_line" ] \
+    || fail "status-only control flow is missing"
+[ "$status_line" -lt "$status_exit_line" ] && [ "$status_exit_line" -lt "$apply_line" ] \
+    || fail "status mode can fall through into schema or seed work"
+pass "status mode exits before schema or seed work"
 
 echo ""
 echo "=== all tests passed ==="

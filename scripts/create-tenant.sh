@@ -38,6 +38,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/lib.sh"
+source "$SCRIPT_DIR/tenant-provenance.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -177,6 +178,47 @@ image_tag() {
     if [[ "$tail" == *:* ]]; then
         printf '%s' "${tail##*:}"
     fi
+}
+
+set_runtime_build_identity() {
+    local app="$1" image="$2" resolved_ref
+    resolved_ref="${image%@*}@${BUILD_DIGEST}"
+    dokku config:set --no-restart "$app" \
+        APP_VERSION="$BUILD_VERSION" \
+        APP_COMMIT="$BUILD_COMMIT" \
+        APP_COMMIT_SHORT="$BUILD_COMMIT_SHORT" \
+        APP_BUILD_CHANNEL="$BUILD_CHANNEL" \
+        APP_CHANNEL="$BUILD_CHANNEL" \
+        APP_IMAGE_CHANNEL="$BUILD_CHANNEL" \
+        APP_WORKFLOW_RUN_ID="$BUILD_WORKFLOW_RUN_ID" \
+        APP_WORKFLOW_RUN_URL="$BUILD_WORKFLOW_RUN_URL" \
+        APP_BUILD_WORKFLOW_RUN="$BUILD_WORKFLOW_RUN_ID" \
+        APP_WORKFLOW_RUN="$BUILD_WORKFLOW_RUN_ID" \
+        APP_BUILT_AT="$BUILD_BUILT_AT" \
+        APP_BUILD_AT="$BUILD_BUILT_AT" \
+        APP_CREATED="$BUILD_BUILT_AT" \
+        APP_IMAGE_VERSION="$BUILD_VERSION" \
+        APP_IMAGE_COMMIT="$BUILD_COMMIT" \
+        APP_SOURCE="$BUILD_SOURCE" \
+        APP_IMAGE_REF="$BUILD_IMAGE_REF" \
+        APP_IMAGE_DIGEST="$BUILD_DIGEST" \
+        APP_IMAGE_RESOLVED_REF="$resolved_ref" \
+        APP_DEPLOYED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+}
+
+record_verified_image_identity() {
+    local app_type="$1" image="$2" resolved_ref
+    resolved_ref="${image%@*}@${BUILD_DIGEST}"
+    if ! tenant_record_identity "$TENANT_NAME" "$app_type" "$image" "$BUILD_IMAGE_REF" \
+        "$BUILD_DIGEST" "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" \
+        "$BUILD_COMMIT_SHORT" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" \
+        "$BUILD_BUILT_AT"; then
+        return 1
+    fi
+    tenant_record_audit "$TENANT_NAME" "$app_type" "$image" "$resolved_ref" "$BUILD_DIGEST" \
+        "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
+        "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" \
+        "" "" "verified" ""
 }
 
 find_existing_tenant_network() {
@@ -684,6 +726,11 @@ SQLEOF
         log "Database ready: $TENANT_DB_NAME"
 
         if [ -n "$BACKEND_IMAGE" ]; then
+            ensure_tenant_image_available "$BACKEND_IMAGE"
+            if ! resolve_build_identity "$BACKEND_IMAGE"; then
+                error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
+                exit 1
+            fi
             log "Running goose migrations from backend image..."
             bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
                 --schema-only \
@@ -702,6 +749,16 @@ fi
 # network is unavailable.
 openobserve_reconcile_tenant_apps "$TENANT_NAME" "$BACKEND_APP" "$FRONTEND_APP" || true
 
+# Image deployments must have a durable deployment-state schema available so a
+# successful runtime identity check is persisted before provisioning completes.
+if [ "$GIT_ONLY" = false ] &&
+    { [ -n "$BACKEND_IMAGE" ] || [ -n "$FRONTEND_IMAGE" ]; }; then
+    if ! ensure_tenant_provenance_schema; then
+        error "Deployment state schema is unavailable; refusing an untracked image deployment."
+        exit 1
+    fi
+fi
+
 # ---- 8. Health checks ----
 # Modern Dokku (>= 0.30) uses an app-root CHECKS file or app.json for HTTP
 # path checks; the legacy `checks:set <app> web http-path=...` form was
@@ -717,12 +774,34 @@ if ! $GIT_ONLY; then
     if [ -n "$BACKEND_IMAGE" ]; then
         log "Deploying backend from image: $BACKEND_IMAGE"
         ensure_tenant_image_available "$BACKEND_IMAGE"
-        dokku config:set --no-restart "$BACKEND_APP" \
-            APP_IMAGE_VERSION="$(image_tag "$BACKEND_IMAGE")" \
-            APP_IMAGE_REF="$BACKEND_IMAGE"
-        dokku_git_from_image "$BACKEND_APP" "$BACKEND_IMAGE"
+        if ! resolve_build_identity "$BACKEND_IMAGE"; then
+            error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
+            exit 1
+        fi
+        if ! set_runtime_build_identity "$BACKEND_APP" "$BACKEND_IMAGE"; then
+            error "Failed to set verified backend BuildIdentity for ${BACKEND_APP}."
+            exit 1
+        fi
+        if ! dokku_git_from_image "$BACKEND_APP" "$BACKEND_IMAGE"; then
+            error "Backend image deployment failed for ${BACKEND_APP}."
+            exit 1
+        fi
         if ! wait_for_runtime_health "$BACKEND_APP" "/healthz"; then
             error "Backend startup health check failed for ${BACKEND_APP}; refusing to continue provisioning."
+            exit 1
+        fi
+        if ! verify_runtime_identity "$BACKEND_APP" "$BUILD_VERSION" "$BUILD_COMMIT" \
+            "$BUILD_DIGEST" "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" \
+            "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
+            error "Backend /version did not report the expected BuildIdentity for ${BACKEND_APP}; refusing to continue provisioning."
+            tenant_record_failure "$TENANT_NAME" backend \
+                "post-deploy /version identity verification failed" 2>/dev/null || true
+            exit 1
+        fi
+        if ! record_verified_image_identity backend "$BACKEND_IMAGE"; then
+            error "Failed to persist verified backend provenance for ${BACKEND_APP}; refusing to finish provisioning."
+            tenant_record_failure "$TENANT_NAME" backend \
+                "failed to persist verified deployment identity" 2>/dev/null || true
             exit 1
         fi
     else
@@ -732,13 +811,38 @@ if ! $GIT_ONLY; then
     if [ -n "$FRONTEND_IMAGE" ]; then
         log "Deploying frontend from image: $FRONTEND_IMAGE"
         ensure_tenant_image_available "$FRONTEND_IMAGE"
-        dokku config:set --no-restart "$FRONTEND_APP" \
-            APP_IMAGE_VERSION="$(image_tag "$FRONTEND_IMAGE")" \
-            APP_IMAGE_REF="$FRONTEND_IMAGE" \
-            COOKIE_SECURE=false
-        dokku_git_from_image "$FRONTEND_APP" "$FRONTEND_IMAGE"
+        if ! resolve_build_identity "$FRONTEND_IMAGE"; then
+            error "Image is missing or inconsistent OCI BuildIdentity labels: $FRONTEND_IMAGE"
+            exit 1
+        fi
+        if ! set_runtime_build_identity "$FRONTEND_APP" "$FRONTEND_IMAGE"; then
+            error "Failed to set verified frontend BuildIdentity for ${FRONTEND_APP}."
+            exit 1
+        fi
+        if ! dokku config:set --no-restart "$FRONTEND_APP" COOKIE_SECURE=false; then
+            error "Failed to set frontend cookie configuration for ${FRONTEND_APP}."
+            exit 1
+        fi
+        if ! dokku_git_from_image "$FRONTEND_APP" "$FRONTEND_IMAGE"; then
+            error "Frontend image deployment failed for ${FRONTEND_APP}."
+            exit 1
+        fi
         if ! wait_for_runtime_health "$FRONTEND_APP" "/"; then
             error "Frontend startup health check failed for ${FRONTEND_APP}; refusing to continue provisioning."
+            exit 1
+        fi
+        if ! verify_runtime_identity "$FRONTEND_APP" "$BUILD_VERSION" "$BUILD_COMMIT" \
+            "$BUILD_DIGEST" "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" \
+            "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
+            error "Frontend /version did not report the expected BuildIdentity for ${FRONTEND_APP}; refusing to continue provisioning."
+            tenant_record_failure "$TENANT_NAME" frontend \
+                "post-deploy /version identity verification failed" 2>/dev/null || true
+            exit 1
+        fi
+        if ! record_verified_image_identity frontend "$FRONTEND_IMAGE"; then
+            error "Failed to persist verified frontend provenance for ${FRONTEND_APP}; refusing to finish provisioning."
+            tenant_record_failure "$TENANT_NAME" frontend \
+                "failed to persist verified deployment identity" 2>/dev/null || true
             exit 1
         fi
 

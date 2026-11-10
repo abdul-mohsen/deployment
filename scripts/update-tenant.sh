@@ -305,20 +305,21 @@ rollback_component() {
         error "${app}: previous image rollback requires an immutable digest reference"
         return 1
     fi
+
+    # git:from-image restarts the app. Restore the last-known-good runtime
+    # identity first so the old image cannot boot with candidate metadata.
+    if ! restore_runtime_config "$app"; then
+        error "${app}: failed to restore runtime identity before image rollback"
+        return 1
+    fi
+
     log "Rolling back ${app} to ${image}"
     if ! dokku_git_from_image "$app" "$image"; then
         error "${app}: rollback failed"
-        if ! restore_runtime_config "$app"; then
-            error "${app}: failed to restore runtime identity after rollback failure"
-        fi
         return 1
     fi
     if ! verify_runtime_immutable_image "$app" "$image"; then
         error "${app}: running image does not match the immutable rollback reference ${image}"
-        return 1
-    fi
-    if ! restore_runtime_config "$app"; then
-        error "${app}: failed to restore runtime identity after image rollback"
         return 1
     fi
     split_tab_fields "${PREVIOUS_DB_IDENTITY[$component]:-}"

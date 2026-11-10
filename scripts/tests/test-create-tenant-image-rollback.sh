@@ -57,6 +57,11 @@ pass "candidate image and migration rollback state are tracked"
 
 source <(tr -d '\r' < scripts/lib.sh)
 source <(tr -d '\r' < scripts/tenant-provenance.sh)
+RUNTIME_IDENTITY_KEYS=(APP_TEST APP_MISSING)
+declare -A PREVIOUS_CONFIG=()
+PREVIOUS_CONFIG["acme-frontend:APP_TEST"]="old-config"
+PREVIOUS_CONFIG["acme-frontend:APP_MISSING"]=""
+load_function restore_runtime_config "$CREATE"
 load_function rollback_previous_image "$CREATE"
 
 TENANT_NAME=acme
@@ -68,6 +73,13 @@ OLD_BACKEND_DIGEST="sha256:22222222222222222222222222222222222222222222222222222
 ROLLBACK_CALLS=()
 log() { :; }
 error() { ROLLBACK_CALLS+=("error:$*"); }
+dokku() {
+    case "$1" in
+        config:set) ROLLBACK_CALLS+=("config:set") ;;
+        config:unset) ROLLBACK_CALLS+=("config:unset") ;;
+    esac
+    return 0
+}
 dokku_git_from_image() {
     ROLLBACK_CALLS+=("image:$1:$2")
     return 0
@@ -86,13 +98,52 @@ printf '%s\n' "${ROLLBACK_CALLS[@]}" |
 printf '%s\n' "${ROLLBACK_CALLS[@]}" |
     grep -Fqx "verify:acme-frontend:registry/web@${OLD_FRONTEND_DIGEST}" ||
     fail "safe frontend rollback did not verify the running immutable image"
+config_line="$(printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -nF 'config:set' | head -1 | cut -d: -f1)"
+image_line="$(printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -nF 'image:acme-frontend:' | head -1 | cut -d: -f1)"
+[ -n "$config_line" ] && [ -n "$image_line" ] && [ "$config_line" -lt "$image_line" ] ||
+    fail "safe frontend rollback restarted before restoring runtime identity"
 if printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -Fq 'registry/web:old'; then
     fail "safe frontend rollback followed the moved mutable tag"
 fi
 pass "safe rollback restores and verifies the previous immutable frontend image"
 
+echo "=== update and fleet rollback restore runtime identity before restart ==="
+UPDATE=scripts/update-tenant.sh
+DEPLOY_ALL=scripts/deploy-all.sh
+load_function rollback_component "$UPDATE"
+load_function rollback_previous_image "$DEPLOY_ALL"
+load_function restore_previous_identity "$DEPLOY_ALL"
+load_function restore_previous_state "$DEPLOY_ALL"
+
+declare -A PREVIOUS_DB_IDENTITY=()
+PREVIOUS_DB_IDENTITY[frontend]=$'registry/web:stable\t'"${OLD_FRONTEND_DIGEST}"$'\tstable\tv1.0.0\told-commit\told-sh\t42\thttps://ci.example/actions/runs/42\t2026-01-01T00:00:00Z'
+PREVIOUS_IMAGE[frontend]="registry/web@${OLD_FRONTEND_DIGEST}"
+PREVIOUS_CONFIG["acme-frontend:APP_TEST"]="old-config"
+PREVIOUS_CONFIG["acme-frontend:APP_MISSING"]=""
+MIGRATIONS_APPLIED=false
+ROLLBACK_CALLS=()
+tenant_record_identity() { ROLLBACK_CALLS+=("identity:$2"); return 0; }
+tenant_clear_identity() { ROLLBACK_CALLS+=("clear-identity:$2"); return 0; }
+rollback_component frontend || fail "update-tenant rollback failed"
+config_line="$(printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -nF 'config:set' | head -1 | cut -d: -f1)"
+image_line="$(printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -nF 'image:acme-frontend:' | head -1 | cut -d: -f1)"
+[ -n "$config_line" ] && [ -n "$image_line" ] && [ "$config_line" -lt "$image_line" ] ||
+    fail "update-tenant restarted before restoring runtime identity"
+
+PREVIOUS_CONFIG["acme-frontend:APP_TEST"]="old-config"
+PREVIOUS_CONFIG["acme-frontend:APP_MISSING"]=""
+ROLLBACK_CALLS=()
+restore_previous_state acme frontend acme-frontend \
+    "${PREVIOUS_IMAGE[frontend]}" "${PREVIOUS_DB_IDENTITY[frontend]}" ||
+    fail "deploy-all rollback failed"
+config_line="$(printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -nF 'config:set' | head -1 | cut -d: -f1)"
+image_line="$(printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -nF 'image:acme-frontend:' | head -1 | cut -d: -f1)"
+[ -n "$config_line" ] && [ -n "$image_line" ] && [ "$config_line" -lt "$image_line" ] ||
+    fail "deploy-all restarted before restoring runtime identity"
+pass "all rollback paths restore runtime identity before image restart"
+
 echo "=== moved tags never replace the captured immutable prior image ==="
-declare -A PREVIOUS_CONFIG=()
+load_function rollback_previous_image "$CREATE"
 PREVIOUS_CONFIG["acme-frontend:APP_IMAGE_RESOLVED_REF"]="registry/web@${OLD_FRONTEND_DIGEST}"
 captured_previous="$(
     provenance_previous_image_ref \

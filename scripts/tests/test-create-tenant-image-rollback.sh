@@ -56,12 +56,15 @@ contains "$CREATE" 'previous image linkage is preserved in the failed audit' \
 pass "candidate image and migration rollback state are tracked"
 
 source <(tr -d '\r' < scripts/lib.sh)
+source <(tr -d '\r' < scripts/tenant-provenance.sh)
 load_function rollback_previous_image "$CREATE"
 
 TENANT_NAME=acme
 MIGRATIONS_APPLIED=false
 declare -A PREVIOUS_IMAGE=()
 declare -A IMAGE_SWAP_ATTEMPTED=()
+OLD_FRONTEND_DIGEST="sha256:1111111111111111111111111111111111111111111111111111111111111111"
+OLD_BACKEND_DIGEST="sha256:2222222222222222222222222222222222222222222222222222222222222222"
 ROLLBACK_CALLS=()
 log() { :; }
 error() { ROLLBACK_CALLS+=("error:$*"); }
@@ -69,18 +72,41 @@ dokku_git_from_image() {
     ROLLBACK_CALLS+=("image:$1:$2")
     return 0
 }
+verify_runtime_immutable_image() {
+    ROLLBACK_CALLS+=("verify:$1:$2")
+    return 0
+}
 
-PREVIOUS_IMAGE[frontend]="registry/web:old"
+PREVIOUS_IMAGE[frontend]="registry/web@${OLD_FRONTEND_DIGEST}"
 IMAGE_SWAP_ATTEMPTED[frontend]=true
 rollback_previous_image frontend || fail "safe frontend rollback failed"
 printf '%s\n' "${ROLLBACK_CALLS[@]}" |
-    grep -Fqx 'image:acme-frontend:registry/web:old' ||
+    grep -Fqx "image:acme-frontend:registry/web@${OLD_FRONTEND_DIGEST}" ||
     fail "safe frontend rollback did not restore the previous image"
-pass "safe rollback restores the previous frontend image"
+printf '%s\n' "${ROLLBACK_CALLS[@]}" |
+    grep -Fqx "verify:acme-frontend:registry/web@${OLD_FRONTEND_DIGEST}" ||
+    fail "safe frontend rollback did not verify the running immutable image"
+if printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -Fq 'registry/web:old'; then
+    fail "safe frontend rollback followed the moved mutable tag"
+fi
+pass "safe rollback restores and verifies the previous immutable frontend image"
+
+echo "=== moved tags never replace the captured immutable prior image ==="
+declare -A PREVIOUS_CONFIG=()
+PREVIOUS_CONFIG["acme-frontend:APP_IMAGE_RESOLVED_REF"]="registry/web@${OLD_FRONTEND_DIGEST}"
+captured_previous="$(
+    provenance_previous_image_ref \
+        "registry/web:stable" "$OLD_FRONTEND_DIGEST" \
+        "${PREVIOUS_CONFIG["acme-frontend:APP_IMAGE_RESOLVED_REF"]}" \
+        "registry/web:stable"
+)"
+[ "$captured_previous" = "registry/web@${OLD_FRONTEND_DIGEST}" ] ||
+    fail "moved tag replaced the captured immutable prior image"
+pass "moved tag is ignored in favor of the captured immutable prior image"
 
 ROLLBACK_CALLS=()
 MIGRATIONS_APPLIED=true
-PREVIOUS_IMAGE[backend]="registry/api:old"
+PREVIOUS_IMAGE[backend]="registry/api@${OLD_BACKEND_DIGEST}"
 IMAGE_SWAP_ATTEMPTED[backend]=true
 if rollback_previous_image backend; then
     fail "backend rollback after migrations was not refused"
@@ -106,8 +132,8 @@ declare -A PREVIOUS_CONFIG=()
 declare -A PREVIOUS_IDENTITY=()
 PREVIOUS_CONFIG["acme-frontend:APP_TEST"]="old-config"
 PREVIOUS_CONFIG["acme-frontend:APP_MISSING"]=""
-PREVIOUS_IDENTITY[frontend]=$'old-ref\told-digest\tstable\tv1.0.0\told-commit\told-sh\t42\thttps://ci.example/actions/runs/42\t2026-01-01T00:00:00Z'
-PREVIOUS_IMAGE[frontend]="registry/web:old"
+PREVIOUS_IDENTITY[frontend]=$'registry/web:stable\t'"${OLD_FRONTEND_DIGEST}"$'\tstable\tv1.0.0\told-commit\told-sh\t42\thttps://ci.example/actions/runs/42\t2026-01-01T00:00:00Z'
+PREVIOUS_IMAGE[frontend]="registry/web@${OLD_FRONTEND_DIGEST}"
 IMAGE_SWAP_ATTEMPTED[frontend]=true
 MIGRATIONS_APPLIED=false
 BUILD_DIGEST="sha256:candidate"
@@ -146,26 +172,27 @@ tenant_record_audit() {
 
 record_deployment_failure frontend "registry/web:new" "health check failed" ||
     fail "safe deployment failure was reported as restore failure"
-printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -Fqx 'image:acme-frontend:registry/web:old' ||
+printf '%s\n' "${ROLLBACK_CALLS[@]}" |
+    grep -Fqx "image:acme-frontend:registry/web@${OLD_FRONTEND_DIGEST}" ||
     fail "failed deployment did not roll back the image"
 printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -Fqx 'config:set' ||
     fail "failed deployment did not restore populated runtime config"
 printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -Fqx 'config:unset' ||
     fail "failed deployment did not clear previously absent runtime config"
-printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -Fqx 'identity:frontend:old-ref' ||
+printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -Fqx 'identity:frontend:registry/web:stable' ||
     fail "failed deployment did not restore durable identity"
 printf '%s\n' "${ROLLBACK_CALLS[@]}" |
-    grep -Fqx 'audit:registry/web:old:old-digest:health check failed' ||
+    grep -Fqx "audit:registry/web@${OLD_FRONTEND_DIGEST}:${OLD_FRONTEND_DIGEST}:health check failed" ||
     fail "failed deployment did not preserve previous image linkage"
-pass "safe failure restores image, config, durable identity, and audit linkage"
+pass "safe failure restores image, config, durable identity, and immutable audit linkage"
 
 ROLLBACK_CALLS=()
 MIGRATIONS_APPLIED=true
-PREVIOUS_IMAGE[backend]="registry/api:old"
+PREVIOUS_IMAGE[backend]="registry/api@${OLD_BACKEND_DIGEST}"
 IMAGE_SWAP_ATTEMPTED[backend]=true
 PREVIOUS_CONFIG["acme-backend:APP_TEST"]="old-config"
 PREVIOUS_CONFIG["acme-backend:APP_MISSING"]=""
-PREVIOUS_IDENTITY[backend]=$'old-api\told-digest\tstable\tv1.0.0\told-commit\told-sh\t42\t\t2026-01-01T00:00:00Z'
+PREVIOUS_IDENTITY[backend]=$'registry/api:stable\t'"${OLD_BACKEND_DIGEST}"$'\tstable\tv1.0.0\told-commit\told-sh\t42\t\t2026-01-01T00:00:00Z'
 if record_deployment_failure backend "registry/api:new" "version check failed"; then
     fail "unsafe deployment failure was not reported"
 else
@@ -178,10 +205,10 @@ printf '%s\n' "${ROLLBACK_CALLS[@]}" |
 printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -Fqx 'config:set' ||
     fail "unsafe failure did not restore runtime config"
 printf '%s\n' "${ROLLBACK_CALLS[@]}" |
-    grep -Fqx 'identity:backend:old-api' ||
+    grep -Fqx 'identity:backend:registry/api:stable' ||
     fail "unsafe failure did not restore durable identity metadata"
 printf '%s\n' "${ROLLBACK_CALLS[@]}" |
-    grep -Fq 'audit:registry/api:old:old-digest:version check failed; automatic image rollback refused' ||
+    grep -Fq "audit:registry/api@${OLD_BACKEND_DIGEST}:${OLD_BACKEND_DIGEST}:version check failed; automatic image rollback refused" ||
     fail "unsafe failure did not preserve previous image recovery linkage"
 pass "unsafe failure restores metadata while preserving explicit recovery linkage"
 

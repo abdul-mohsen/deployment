@@ -65,6 +65,71 @@ provenance_repo_digest() {
     return 1
 }
 
+runtime_container_ids() {
+    local app="$1" ids=""
+    ids="$(docker ps \
+        --filter "label=com.dokku.app-name=${app}" \
+        --filter "label=com.dokku.process-type=web" \
+        --format '{{.ID}}' 2>/dev/null || true)"
+    if [ -z "$ids" ]; then
+        ids="$(docker ps \
+            --filter "label=com.dokku.app-name=${app}" \
+            --format '{{.ID}}' 2>/dev/null || true)"
+    fi
+    if [ -z "$ids" ]; then
+        ids="$(docker ps \
+            --filter "name=^${app}\.web\." \
+            --format '{{.ID}}' 2>/dev/null || true)"
+    fi
+    printf '%s\n' "$ids" | awk 'NF'
+}
+
+runtime_container_image_identity() {
+    local container_id="$1" image_id actual_digest=""
+    image_id="$(docker inspect --format '{{.Image}}' "$container_id" 2>/dev/null || true)"
+    [ -n "$image_id" ] || return 1
+
+    actual_digest="$(docker image inspect \
+        --format='{{range .RepoDigests}}{{println .}}{{end}}' \
+        "$image_id" 2>/dev/null |
+        awk -F@ '$2 ~ /^sha256:[0-9a-fA-F]{64}$/ { print $2; exit }')"
+    printf '%s\t%s' "$image_id" "$actual_digest"
+}
+
+verify_runtime_image_identity() {
+    local app="$1" expected_digest="$2" expected_ref="$3"
+    local expected_image_id="" ids="" container_id identity actual_image_id actual_digest
+    local matched checked=0
+
+    if [ -n "$expected_ref" ]; then
+        expected_image_id="$(docker image inspect --format '{{.Id}}' "$expected_ref" \
+            2>/dev/null || true)"
+        expected_image_id="${expected_image_id//$'\n'/}"
+    fi
+
+    ids="$(runtime_container_ids "$app")"
+    [ -n "$ids" ] || return 1
+    while IFS= read -r container_id; do
+        [ -n "$container_id" ] || continue
+        checked=1
+        identity="$(runtime_container_image_identity "$container_id" || true)"
+        [ -n "$identity" ] || return 1
+        IFS=$'\t' read -r actual_image_id actual_digest <<< "$identity"
+
+        if [ -n "$expected_digest" ]; then
+            [ "$actual_digest" = "$expected_digest" ] || return 1
+        else
+            matched=1
+            if [ -n "$expected_image_id" ] && [ "$actual_image_id" = "$expected_image_id" ]; then
+                matched=0
+            fi
+            [ "$matched" -eq 0 ] || return 1
+        fi
+    done <<< "$ids"
+
+    [ "$checked" -eq 1 ]
+}
+
 provenance_override_enabled() {
     [ "${TENANT_PROVENANCE_OVERRIDE:-0}" = "1" ] || return 1
     case "${DEPLOY_ENV:-${ZATCA_ENV:-production}}" in
@@ -237,6 +302,8 @@ verify_runtime_identity() {
     local expected_workflow_id="$7" expected_workflow_url="$8" expected_built_at="$9" response
     local actual_version actual_commit actual_digest actual_ref actual_channel
     local actual_workflow_id actual_workflow_url actual_built_at
+
+    verify_runtime_image_identity "$app" "$expected_digest" "$expected_ref" || return 1
 
     if provenance_override_enabled; then
         echo "[!] Non-production provenance override enabled; skipping strict /version identity check." >&2

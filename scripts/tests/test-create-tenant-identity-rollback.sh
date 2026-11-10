@@ -29,7 +29,7 @@ contains 'restore_runtime_config "$app"' \
     "failed create-tenant paths do not restore runtime identity"
 contains 'restore_previous_identity "$app_type"' \
     "failed create-tenant paths do not restore durable identity"
-contains 'tenant_record_failure "$TENANT_NAME" "$app_type" "$message"' \
+contains 'tenant_record_failure "$TENANT_NAME" "$app_type" "$failure_message"' \
     "failed create-tenant paths do not persist failed state"
 contains 'tenant_record_audit "$TENANT_NAME" "$app_type" "$image"' \
     "failed create-tenant paths do not record failed audit state"

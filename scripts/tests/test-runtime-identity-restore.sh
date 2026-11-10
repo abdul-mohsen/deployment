@@ -59,7 +59,7 @@ split_tab_fields $'ref\tsha256:abc\trelease\tv1\tcommit\tshort\t42\t\t2026-11-07
     fail "built-at field shifted after missing workflow URL"
 pass "empty tab-delimited fields are preserved"
 
-echo "=== config:get and restore failures are surfaced ==="
+echo "=== config:get, config:keys, and restore failures are surfaced ==="
 for file in scripts/create-tenant.sh scripts/update-tenant.sh scripts/deploy-all.sh; do
     contains "$file" '! dokku config:set --no-restart "$app"' \
         "$file does not check runtime config restore failures"
@@ -73,6 +73,38 @@ if grep -Fq 'rollback_component "$component" || true' scripts/update-tenant.sh; 
     fail "update-tenant suppresses rollback identity restore failures"
 fi
 
+echo "=== missing runtime identity keys are captured as unset ==="
+RUNTIME_IDENTITY_KEYS=(APP_VERSION APP_WORKFLOW_RUN_URL)
+for file in scripts/create-tenant.sh scripts/update-tenant.sh scripts/deploy-all.sh; do
+    unset PREVIOUS_CONFIG
+    declare -A PREVIOUS_CONFIG=()
+    load_function capture_runtime_config "$file"
+    dokku() {
+        case "$1" in
+            config:keys)
+                printf 'APP_VERSION\n'
+                ;;
+            config:get)
+                [ "$3" = "APP_VERSION" ] || return 17
+                printf 'previous-version\n'
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    }
+    if ! capture_runtime_config test-app; then
+        fail "$file treated a missing config key as a command failure"
+    fi
+    [ "${PREVIOUS_CONFIG["test-app:APP_VERSION"]}" = "previous-version" ] ||
+        fail "$file did not capture the configured runtime identity key"
+    [ "${PREVIOUS_CONFIG["test-app:APP_WORKFLOW_RUN_URL"]+set}" = "set" ] ||
+        fail "$file did not record the missing runtime identity key"
+    [ -z "${PREVIOUS_CONFIG["test-app:APP_WORKFLOW_RUN_URL"]}" ] ||
+        fail "$file recorded a non-empty value for the missing runtime identity key"
+done
+pass "missing runtime identity keys are recorded as unset"
+
 error() { :; }
 RUNTIME_IDENTITY_KEYS=(APP_WORKFLOW_RUN_URL)
 for file in scripts/create-tenant.sh scripts/update-tenant.sh scripts/deploy-all.sh; do
@@ -80,11 +112,30 @@ for file in scripts/create-tenant.sh scripts/update-tenant.sh scripts/deploy-all
     declare -A PREVIOUS_CONFIG=()
     load_function capture_runtime_config "$file"
     dokku() {
-        [ "$1" = "config:get" ] && return 17
-        return 0
+        case "$1" in
+            config:keys)
+                printf 'APP_WORKFLOW_RUN_URL\n'
+                ;;
+            config:get)
+                return 17
+                ;;
+            *)
+                return 0
+                ;;
+        esac
     }
     if capture_runtime_config test-app; then
         fail "$file swallowed config:get failure"
+    fi
+
+    unset PREVIOUS_CONFIG
+    declare -A PREVIOUS_CONFIG=()
+    dokku() {
+        [ "$1" = "config:keys" ] && return 23
+        return 0
+    }
+    if capture_runtime_config test-app; then
+        fail "$file swallowed config:keys failure"
     fi
 
     PREVIOUS_CONFIG["test-app:APP_WORKFLOW_RUN_URL"]="https://example.test/workflow"
@@ -108,7 +159,7 @@ dokku() {
 if current_app_image test-app; then
     fail "update-tenant swallowed APP_IMAGE_REF config:get failure"
 fi
-pass "config:get and runtime identity restore failures propagate"
+pass "config:get, config:keys, and runtime identity restore failures propagate"
 
 echo "=== durable identity reads propagate database failures ==="
 source <(tr -d '\r' < scripts/tenant-provenance.sh)

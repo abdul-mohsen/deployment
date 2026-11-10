@@ -287,6 +287,8 @@ record_deployment_failure() {
     local app_type="$1" image="$2" message="$3"
     local app="${TENANT_NAME}-${app_type}" resolved_ref="${image%@*}@${BUILD_DIGEST}"
     local previous_ref="" previous_digest=""
+    local backup_id="${UPDATE_BACKUP_ID:-}"
+    local backup_artifact="${UPDATE_BACKUP_ARTIFACT:-}"
     local restore_status=0
     split_tab_fields "${PREVIOUS_IDENTITY[$app_type]:-}"
     previous_ref="${TAB_FIELDS[0]-}"
@@ -302,8 +304,34 @@ record_deployment_failure() {
     tenant_record_audit "$TENANT_NAME" "$app_type" "$image" "$resolved_ref" "$BUILD_DIGEST" \
         "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
         "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" \
-        "$previous_ref" "$previous_digest" "failed" "$message" 2>/dev/null || true
+        "$previous_ref" "$previous_digest" "failed" "$message" \
+        "$backup_id" "$backup_artifact" 2>/dev/null || true
     return "$restore_status"
+}
+
+record_migration_failure() {
+    local app_type="$1" image="$2" message="$3"
+    local resolved_ref="${image%@*}@${BUILD_DIGEST:-}"
+    local backup_id="${UPDATE_BACKUP_ID:-}"
+    local backup_artifact="${UPDATE_BACKUP_ARTIFACT:-}"
+    local audit_status=0
+
+    if ! ensure_tenant_provenance_schema; then
+        error "Deployment state schema is unavailable; cannot record ${app_type} migration failure."
+        return 1
+    fi
+
+    tenant_record_failure "$TENANT_NAME" "$app_type" "$message" 2>/dev/null || true
+    if ! tenant_record_audit "$TENANT_NAME" "$app_type" "$image" "$resolved_ref" \
+        "${BUILD_DIGEST:-}" "${BUILD_CHANNEL:-}" "${BUILD_VERSION:-}" \
+        "${BUILD_COMMIT:-}" "${BUILD_COMMIT_SHORT:-}" \
+        "${BUILD_WORKFLOW_RUN_ID:-}" "${BUILD_WORKFLOW_RUN_URL:-}" \
+        "${BUILD_BUILT_AT:-}" "" "" "failed" "$message" \
+        "$backup_id" "$backup_artifact" 2>/dev/null; then
+        error "Failed to record ${app_type} migration failure audit."
+        audit_status=1
+    fi
+    return "$audit_status"
 }
 
 record_verified_image_identity() {
@@ -538,6 +566,8 @@ create_dokku_app() {
 }
 
 require_update_backup() {
+    UPDATE_BACKUP_ID=""
+    UPDATE_BACKUP_ARTIFACT=""
     if [ "$FORCE_UPDATE" != "true" ] ||
         [ -z "$BACKEND_IMAGE" ] ||
         [ "$EXISTING_TENANT_DATABASE" != "true" ]; then
@@ -569,9 +599,16 @@ initialize_tenant_schema() {
         return 0
     fi
 
-    ensure_tenant_image_available "$BACKEND_IMAGE"
+    if ! ensure_tenant_image_available "$BACKEND_IMAGE"; then
+        error "Backend image is unavailable for tenant database schema initialization."
+        record_migration_failure backend "$BACKEND_IMAGE" \
+            "backend image unavailable for schema initialization" || true
+        return 1
+    fi
     if ! resolve_build_identity "$BACKEND_IMAGE"; then
         error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
+        record_migration_failure backend "$BACKEND_IMAGE" \
+            "missing or inconsistent OCI BuildIdentity labels for schema initialization" || true
         return 1
     fi
     log "Running goose migrations from backend image..."
@@ -580,6 +617,8 @@ initialize_tenant_schema() {
         --backend-image "$BACKEND_IMAGE" \
         --config "$CONFIG_FILE"; then
         error "Tenant database schema initialization failed."
+        record_migration_failure backend "$BACKEND_IMAGE" \
+            "tenant database schema initialization failed" || true
         return 1
     fi
     DB_PROVISIONED=true

@@ -169,6 +169,51 @@ fi
 pass "incomplete backup verification blocks update"
 
 echo
+echo "=== Goose failure records verified backup audit without rollback ==="
+AUDIT_ARGS="$order_tmpdir/migration-failure-audit.args"
+tenant_record_failure() { :; }
+ensure_tenant_provenance_schema() { :; }
+tenant_record_audit() { printf '%s\n' "$@" > "$AUDIT_ARGS"; }
+BUILD_IMAGE_REF="example/backend:test"
+BUILD_DIGEST="sha256:abc"
+BUILD_CHANNEL="stable"
+BUILD_VERSION="1.2.3"
+BUILD_COMMIT="abcdef"
+BUILD_COMMIT_SHORT="abcdef"
+BUILD_WORKFLOW_RUN_ID="123"
+BUILD_WORKFLOW_RUN_URL="https://example.test/run/123"
+BUILD_BUILT_AT="2026-11-10T00:00:00Z"
+UPDATE_BACKUP_ID="backup-id"
+UPDATE_BACKUP_ARTIFACT="backup.sql.gz"
+cat > "$order_tmpdir/init-tenant-db.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'goose-failure\n' >> "$EVENT_LOG"
+exit 1
+EOF
+chmod +x "$order_tmpdir/init-tenant-db.sh"
+eval "$(sed -n '/^record_migration_failure() {/,/^}/p' scripts/create-tenant.sh)"
+eval "$(sed -n '/^initialize_tenant_schema() {/,/^}/p' scripts/create-tenant.sh)"
+: > "$EVENT_LOG"
+if initialize_tenant_schema >/dev/null 2>&1; then
+    fail "Goose failure unexpectedly allowed schema initialization"
+fi
+grep -q '^goose-failure$' "$EVENT_LOG" ||
+    fail "Goose failure test did not execute the migration helper"
+grep -qx 'failed' "$AUDIT_ARGS" ||
+    fail "Goose failure audit did not record failed status"
+grep -qx 'backup-id' "$AUDIT_ARGS" ||
+    fail "Goose failure audit did not retain the verified backup ID"
+grep -qx 'backup.sql.gz' "$AUDIT_ARGS" ||
+    fail "Goose failure audit did not retain the verified backup artifact"
+pass "Goose failure records backup-linked audit and remains fail-closed"
+
+cat > "$order_tmpdir/init-tenant-db.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'goose\n' >> "$EVENT_LOG"
+EOF
+chmod +x "$order_tmpdir/init-tenant-db.sh"
+
+echo
 echo "=== verified backup identity is attached to deployment audit ==="
 AUDIT_ARGS="$order_tmpdir/audit.args"
 tenant_record_identity() { :; }
@@ -196,9 +241,13 @@ echo "=== partial provisioning without a tenant database stays recoverable ==="
 : > "$EVENT_LOG"
 BACKUP_RC=1
 EXISTING_TENANT_DATABASE=false
+UPDATE_BACKUP_ID="stale-backup-id"
+UPDATE_BACKUP_ARTIFACT="stale-backup.sql.gz"
 if ! require_update_backup; then
     fail "missing tenant database incorrectly required a backup"
 fi
+[ -z "$UPDATE_BACKUP_ID" ] && [ -z "$UPDATE_BACKUP_ARTIFACT" ] ||
+    fail "missing tenant database retained stale backup identity"
 initialize_tenant_schema || fail "partial provisioning recovery unexpectedly failed"
 if grep -q '^backup$' "$EVENT_LOG"; then
     fail "partial provisioning without a database unexpectedly took a backup"

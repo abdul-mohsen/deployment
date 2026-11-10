@@ -150,8 +150,14 @@ deploy_one() {
 
     previous_image="$(dokku git:report "$app" 2>/dev/null |
         awk -F': ' 'tolower($1) ~ /source-image/ {print $2; exit}' || true)"
-    capture_runtime_config "$app"
-    previous_identity="$(tenant_current_identity "$tenant" "$APP_TYPE" || true)"
+    if ! capture_runtime_config "$app"; then
+        error "${app}: failed to capture current runtime identity"
+        return 1
+    fi
+    if ! previous_identity="$(tenant_current_identity "$tenant" "$APP_TYPE")"; then
+        error "${app}: failed to read current durable identity"
+        return 1
+    fi
     split_tab_fields "$previous_identity"
     local previous_digest="${TAB_FIELDS[1]-}"
     local resolved_ref="${image%@*}@${BUILD_DIGEST}"
@@ -331,9 +337,13 @@ deploy_one() {
 }
 
 capture_runtime_config() {
-    local app="$1" key
+    local app="$1" key value
     for key in "${RUNTIME_IDENTITY_KEYS[@]}"; do
-        PREVIOUS_CONFIG["$app:$key"]="$(dokku config:get "$app" "$key" 2>/dev/null || true)"
+        if ! value="$(dokku config:get "$app" "$key" 2>/dev/null)"; then
+            error "Failed to read current runtime identity for ${app} (${key})."
+            return 1
+        fi
+        PREVIOUS_CONFIG["$app:$key"]="$value"
     done
 }
 

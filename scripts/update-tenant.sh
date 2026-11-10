@@ -185,19 +185,27 @@ assert_image_versions_match() {
 }
 
 current_app_image() {
-    local app="$1" image
-    image="$(dokku git:report "$app" 2>/dev/null |
-        awk -F': ' 'tolower($1) ~ /source-image/ {print $2; exit}' || true)"
+    local app="$1" image report config_value
+    report="$(dokku git:report "$app" 2>/dev/null || true)"
+    image="$(printf '%s\n' "$report" |
+        awk -F': ' 'tolower($1) ~ /source-image/ {print $2; exit}')"
     if [ -z "$image" ]; then
-        image="$(dokku config:get "$app" APP_IMAGE_REF 2>/dev/null | awk 'NF {print; exit}' || true)"
+        if ! config_value="$(dokku config:get "$app" APP_IMAGE_REF 2>/dev/null)"; then
+            return 1
+        fi
+        image="$(printf '%s\n' "$config_value" | awk 'NF {print; exit}')"
     fi
     printf '%s' "$image"
 }
 
 capture_runtime_config() {
-    local app="$1" key
+    local app="$1" key value
     for key in "${RUNTIME_IDENTITY_KEYS[@]}"; do
-        PREVIOUS_CONFIG["$app:$key"]="$(dokku config:get "$app" "$key" 2>/dev/null || true)"
+        if ! value="$(dokku config:get "$app" "$key" 2>/dev/null)"; then
+            error "Failed to read current runtime identity for ${app} (${key})."
+            return 1
+        fi
+        PREVIOUS_CONFIG["$app:$key"]="$value"
     done
 }
 
@@ -523,9 +531,20 @@ for component in backend frontend; do
     image="${!image:-}"
     [ -n "$image" ] || continue
     app="${TENANT_NAME}-${component}"
-    PREVIOUS_IMAGE["$component"]="$(current_app_image "$app")"
-    capture_runtime_config "$app"
-    PREVIOUS_DB_IDENTITY["$component"]="$(tenant_current_identity "$TENANT_NAME" "$component" || true)"
+    if ! previous_image="$(current_app_image "$app")"; then
+        error "${app}: failed to read the current image identity"
+        exit 1
+    fi
+    PREVIOUS_IMAGE["$component"]="$previous_image"
+    if ! capture_runtime_config "$app"; then
+        error "${app}: failed to capture current runtime identity"
+        exit 1
+    fi
+    if ! previous_identity="$(tenant_current_identity "$TENANT_NAME" "$component")"; then
+        error "${app}: failed to read current durable identity"
+        exit 1
+    fi
+    PREVIOUS_DB_IDENTITY["$component"]="$previous_identity"
     if ! ensure_update_image_available "$image"; then
         record_failure "$component" "$image" "image pull/availability check failed"
         exit 1

@@ -384,14 +384,16 @@ tenant_clear_identity() {
 }
 
 tenant_current_identity() {
-    local tenant="$1" app_type="$2" db="${DEPLOY_STATE_DB:-deployment_state}" p
+    local tenant="$1" app_type="$2" db="${DEPLOY_STATE_DB:-deployment_state}" p identity
     case "$app_type" in backend|frontend) p="$app_type" ;; *) return 1 ;; esac
-    run_mysql -N -B "$db" -e "SELECT
-        IFNULL(${p}_image_ref,''), IFNULL(${p}_image_digest,''),
-        IFNULL(${p}_channel,''), IFNULL(${p}_version,''),
-        IFNULL(${p}_commit,''), IFNULL(${p}_commit_short,''),
-        IFNULL(${p}_workflow_run,''), IFNULL(${p}_workflow_run_url,''),
-        IFNULL(${p}_built_at,'')
-      FROM tenant_identity WHERE name='$(provenance_sql_escape "$tenant")' LIMIT 1;" 2>/dev/null |
-        head -n1
+    if ! identity="$(run_mysql -N -B "$db" -e "SELECT
+            IFNULL(${p}_image_ref,''), IFNULL(${p}_image_digest,''),
+            IFNULL(${p}_channel,''), IFNULL(${p}_version,''),
+            IFNULL(${p}_commit,''), IFNULL(${p}_commit_short,''),
+            IFNULL(${p}_workflow_run,''), IFNULL(${p}_workflow_run_url,''),
+            IFNULL(${p}_built_at,'')
+          FROM tenant_identity WHERE name='$(provenance_sql_escape "$tenant")' LIMIT 1;" 2>/dev/null)"; then
+        return 1
+    fi
+    printf '%s\n' "${identity%%$'\n'*}"
 }

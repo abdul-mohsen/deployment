@@ -219,9 +219,13 @@ set_runtime_build_identity() {
 }
 
 capture_runtime_config() {
-    local app="$1" key
+    local app="$1" key value
     for key in "${RUNTIME_IDENTITY_KEYS[@]}"; do
-        PREVIOUS_CONFIG["$app:$key"]="$(dokku config:get "$app" "$key" 2>/dev/null || true)"
+        if ! value="$(dokku config:get "$app" "$key" 2>/dev/null)"; then
+            error "Failed to read current runtime identity for ${app} (${key})."
+            return 1
+        fi
+        PREVIOUS_CONFIG["$app:$key"]="$value"
     done
 }
 
@@ -874,8 +878,15 @@ if ! $GIT_ONLY; then
             error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
             exit 1
         fi
-        capture_runtime_config "$BACKEND_APP"
-        PREVIOUS_IDENTITY["backend"]="$(tenant_current_identity "$TENANT_NAME" backend || true)"
+        if ! capture_runtime_config "$BACKEND_APP"; then
+            error "Failed to capture current runtime identity for ${BACKEND_APP}."
+            exit 1
+        fi
+        if ! previous_identity="$(tenant_current_identity "$TENANT_NAME" backend)"; then
+            error "Failed to read current durable identity for ${TENANT_NAME}-backend."
+            exit 1
+        fi
+        PREVIOUS_IDENTITY["backend"]="$previous_identity"
         if ! set_runtime_build_identity "$BACKEND_APP" "$BACKEND_IMAGE"; then
             error "Failed to set verified backend BuildIdentity for ${BACKEND_APP}."
             record_deployment_failure backend "$BACKEND_IMAGE" \
@@ -919,8 +930,15 @@ if ! $GIT_ONLY; then
             error "Image is missing or inconsistent OCI BuildIdentity labels: $FRONTEND_IMAGE"
             exit 1
         fi
-        capture_runtime_config "$FRONTEND_APP"
-        PREVIOUS_IDENTITY["frontend"]="$(tenant_current_identity "$TENANT_NAME" frontend || true)"
+        if ! capture_runtime_config "$FRONTEND_APP"; then
+            error "Failed to capture current runtime identity for ${FRONTEND_APP}."
+            exit 1
+        fi
+        if ! previous_identity="$(tenant_current_identity "$TENANT_NAME" frontend)"; then
+            error "Failed to read current durable identity for ${TENANT_NAME}-frontend."
+            exit 1
+        fi
+        PREVIOUS_IDENTITY["frontend"]="$previous_identity"
         if ! set_runtime_build_identity "$FRONTEND_APP" "$FRONTEND_IMAGE"; then
             error "Failed to set verified frontend BuildIdentity for ${FRONTEND_APP}."
             record_deployment_failure frontend "$FRONTEND_IMAGE" \

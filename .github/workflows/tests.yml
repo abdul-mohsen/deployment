@@ -45,6 +45,7 @@ jobs:
           bash scripts/tests/test-tenant-provenance.sh
           bash scripts/tests/test-runtime-probes.sh
           bash scripts/tests/test-deployctl.sh
+          bash scripts/tests/test-create-tenant.sh
 
       - name: Check deployment contracts
         shell: bash

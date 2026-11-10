@@ -14,10 +14,43 @@ echo "=== syntax ==="
 bash -n scripts/create-tenant.sh && pass "syntax create-tenant.sh"
 
 echo ""
+echo "=== create-tenant API URL scheme ==="
+url_tmpdir="$REPO_DIR/.test-create-tenant-url.$$"
+mkdir -p "$url_tmpdir/logs"
+trap 'rm -rf "${tmpdir:-}" "${redaction_tmpdir:-}" "${url_tmpdir:-}"' EXIT
+
+assert_api_url() {
+    local name="$1" expected="$2" output config
+    config="$url_tmpdir/${name}.env"
+    printf '%s\n' "$3" > "$config"
+    output="$(
+        LOG_DIR="$url_tmpdir/logs" \
+        bash scripts/create-tenant.sh "$name" \
+            --dry-run \
+            --no-database \
+            --config "$config" \
+            2>&1
+    )"
+    printf '%s\n' "$output" | grep -Fq "API URL:         ${expected}" \
+        || fail "${name} API URL did not resolve to ${expected}"
+    pass "${name} API URL is ${expected}"
+}
+
+assert_api_url explicit-https \
+    "https://explicit-https.example.test/api" \
+    $'BASE_DOMAIN=example.test\nPUBLIC_PROTOCOL=https\nDASHBOARD_ENV=production'
+assert_api_url explicit-http \
+    "http://explicit-http.localtest.me/api" \
+    $'BASE_DOMAIN=localtest.me\nPUBLIC_PROTOCOL=http\nDASHBOARD_ENV=dev'
+assert_api_url production-default \
+    "https://production-default.example.test/api" \
+    $'BASE_DOMAIN=example.test\nDEPLOY_ENV=production'
+
+echo ""
 echo "=== tenant operation logs redact secret env values ==="
 redaction_tmpdir="$REPO_DIR/.test-create-tenant-redaction.$$"
 mkdir -p "$redaction_tmpdir/logs"
-trap 'rm -rf "${tmpdir:-}" "$redaction_tmpdir"' EXIT
+trap 'rm -rf "${tmpdir:-}" "${redaction_tmpdir:-}" "${url_tmpdir:-}"' EXIT
 cat > "$redaction_tmpdir/config.env" <<'EOF'
 BASE_DOMAIN=example.test
 PUBLIC_PROTOCOL=https
@@ -78,7 +111,7 @@ fi
 # Function-level test with stub dokku
 tmpdir="$REPO_DIR/scripts/tests/.test-create-tenant.$$"
 mkdir -p "$tmpdir"
-trap 'rm -rf "$tmpdir"' EXIT
+trap 'rm -rf "${tmpdir:-}" "${redaction_tmpdir:-}" "${url_tmpdir:-}"' EXIT
 
 cat > "$tmpdir/dokku" <<'EOF'
 #!/usr/bin/env bash

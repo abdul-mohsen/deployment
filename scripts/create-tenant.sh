@@ -339,6 +339,7 @@ TENANT_DOMAIN="${TENANT_NAME}.${BASE_DOMAIN}"
 TENANT_NETWORK="${TENANT_APP_NETWORK:-web}"
 public_protocol >/dev/null || exit 1
 PUBLIC_TENANT_URL="$(public_tenant_url "$TENANT_NAME")" || exit 1
+PUBLIC_TENANT_API_URL="${PUBLIC_TENANT_URL}/api"
 # Export so init-tenant-db.sh (invoked as child bash) inherits these — it uses
 # them to reach the backend container directly over the tenant network for
 # seed user registration (bypasses the frontend proxy CSRF).
@@ -526,6 +527,7 @@ info "  Docker network: $TENANT_NETWORK"
 info "  OpenObserve telemetry: ${OPENOBSERVE_TENANT_TELEMETRY_ENABLED:-false}"
 info "  Backend port:   $BACKEND_PORT"
 info "  Frontend port:  $FRONTEND_PORT"
+info "  API URL:         $PUBLIC_TENANT_API_URL"
 info "  Storage:        $STORAGE_ROOT/$TENANT_NAME/{uploads,data}"
 if ! $NO_DATABASE; then
     info "  Database:       MySQL → tenant_${TENANT_NAME} on ${MYSQL_HOST:-127.0.0.1}"
@@ -655,7 +657,7 @@ dokku config:set --no-restart "$FRONTEND_APP" \
     PORT="$FRONTEND_PORT" \
     APP_DOMAIN="$TENANT_DOMAIN" \
     BACKEND_URL="http://${BACKEND_APP}.web:${BACKEND_PORT}" \
-    API_URL="${PUBLIC_TENANT_URL}/api"
+    API_URL="$PUBLIC_TENANT_API_URL"
 
 # Message service (if configured)
 MSG_HOST="${MSG_HOST:-}"
@@ -930,7 +932,7 @@ log "============================================"
 log "  Tenant '$TENANT_NAME' created!"
 log ""
 log "  Frontend: ${PUBLIC_TENANT_URL}"
-log "  API:      ${PUBLIC_TENANT_URL}/api"
+log "  API:      ${PUBLIC_TENANT_API_URL}"
 log "  Storage:  ${STORAGE_ROOT}/${TENANT_NAME}/"
 log ""
 if ! $dns_ok; then

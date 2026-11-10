@@ -96,9 +96,14 @@ NO_DATABASE=false
 GIT_ONLY=false
 DRY_RUN=false
 FORCE_UPDATE=false
+MIGRATIONS_APPLIED=false
+BACKEND_APP_EXISTED=false
+FRONTEND_APP_EXISTED=false
 declare -a ENV_VARS=()
 declare -A PREVIOUS_CONFIG=()
 declare -A PREVIOUS_IDENTITY=()
+declare -A PREVIOUS_IMAGE=()
+declare -A IMAGE_SWAP_ATTEMPTED=()
 
 RUNTIME_IDENTITY_KEYS=(
     APP_VERSION APP_COMMIT APP_COMMIT_SHORT APP_BUILD_CHANNEL APP_CHANNEL
@@ -188,6 +193,20 @@ image_tag() {
     if [[ "$tail" == *:* ]]; then
         printf '%s' "${tail##*:}"
     fi
+}
+
+current_app_image() {
+    local app="$1" image report config_value
+    report="$(dokku git:report "$app" 2>/dev/null || true)"
+    image="$(printf '%s\n' "$report" |
+        awk -F': ' 'tolower($1) ~ /source-image/ {print $2; exit}')"
+    if [ -z "$image" ]; then
+        if ! config_value="$(dokku config:get "$app" APP_IMAGE_REF 2>/dev/null)"; then
+            return 1
+        fi
+        image="$(printf '%s\n' "$config_value" | awk 'NF {print; exit}')"
+    fi
+    printf '%s' "$image"
 }
 
 set_runtime_build_identity() {
@@ -295,32 +314,79 @@ restore_previous_identity() {
     fi
 }
 
+rollback_previous_image() {
+    local app_type="$1" app image
+    app="${TENANT_NAME}-${app_type}"
+
+    if [ "${IMAGE_SWAP_ATTEMPTED[$app_type]:-false}" != "true" ]; then
+        return 0
+    fi
+
+    image="${PREVIOUS_IMAGE[$app_type]:-}"
+    if [ "$app_type" = "backend" ] && [ "$MIGRATIONS_APPLIED" = true ]; then
+        error "${app}: automatic image rollback refused after migrations; restoring the image alone cannot restore database schema/data."
+        error "${app}: restore a verified database backup before retrying; previous image linkage is preserved in the failed audit."
+        return 2
+    fi
+    if [ -z "$image" ]; then
+        error "${app}: no previous image is recorded; cannot safely restore the candidate image."
+        return 1
+    fi
+
+    log "Rolling back ${app} to ${image}"
+    if ! dokku_git_from_image "$app" "$image"; then
+        error "${app}: failed to restore the previous image"
+        return 1
+    fi
+    return 0
+}
+
 record_deployment_failure() {
     local app_type="$1" image="$2" message="$3"
     local app="${TENANT_NAME}-${app_type}" resolved_ref="${image%@*}@${BUILD_DIGEST}"
-    local previous_ref="" previous_digest=""
-    local restore_status=0
+    local previous_ref="" previous_digest="" rollback_status=0 restore_status=0
+    local failure_message="$message"
     split_tab_fields "${PREVIOUS_IDENTITY[$app_type]:-}"
-    previous_ref="${TAB_FIELDS[0]-}"
+    previous_ref="${PREVIOUS_IMAGE[$app_type]:-${TAB_FIELDS[0]-}}"
     previous_digest="${TAB_FIELDS[1]-}"
+    if [ -z "$previous_digest" ] && [[ "$previous_ref" == *@* ]]; then
+        previous_digest="${previous_ref##*@}"
+    fi
 
+    rollback_previous_image "$app_type" || rollback_status=$?
+    case "$rollback_status" in
+        2)
+            failure_message="${message}; automatic image rollback refused after database migrations; restore a verified database backup before retry"
+            ;;
+        1)
+            failure_message="${message}; previous image rollback failed or was unavailable; manual recovery is required"
+            ;;
+    esac
     if ! restore_runtime_config "$app"; then
         restore_status=1
     fi
     if ! restore_previous_identity "$app_type"; then
         restore_status=1
     fi
-    tenant_record_failure "$TENANT_NAME" "$app_type" "$message" 2>/dev/null || true
+    tenant_record_failure "$TENANT_NAME" "$app_type" "$failure_message" 2>/dev/null || true
     tenant_record_audit "$TENANT_NAME" "$app_type" "$image" "$resolved_ref" "$BUILD_DIGEST" \
         "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
         "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" \
-        "$previous_ref" "$previous_digest" "failed" "$message" 2>/dev/null || true
+        "$previous_ref" "$previous_digest" "failed" "$failure_message" 2>/dev/null || true
+    [ "$rollback_status" -eq 0 ] || restore_status="$rollback_status"
     return "$restore_status"
 }
 
 record_verified_image_identity() {
     local app_type="$1" image="$2" resolved_ref
+    local previous_ref="" previous_digest=""
     resolved_ref="${image%@*}@${BUILD_DIGEST}"
+    split_tab_fields "${PREVIOUS_IDENTITY[$app_type]:-}"
+    previous_ref="${PREVIOUS_IMAGE[$app_type]:-${TAB_FIELDS[0]-}}"
+    previous_digest="${TAB_FIELDS[1]-}"
+    if [ -z "$previous_digest" ] && [[ "$previous_ref" == *@* ]]; then
+        previous_digest="${previous_ref##*@}"
+    fi
     if ! tenant_record_identity "$TENANT_NAME" "$app_type" "$image" "$BUILD_IMAGE_REF" \
         "$BUILD_DIGEST" "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" \
         "$BUILD_COMMIT_SHORT" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" \
@@ -330,7 +396,7 @@ record_verified_image_identity() {
     tenant_record_audit "$TENANT_NAME" "$app_type" "$image" "$resolved_ref" "$BUILD_DIGEST" \
         "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
         "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" \
-        "" "" "verified" ""
+        "$previous_ref" "$previous_digest" "verified" ""
 }
 
 find_existing_tenant_network() {
@@ -480,6 +546,7 @@ fi
 
 # Check if apps already exist
 if dokku apps:exists "$BACKEND_APP" 2>/dev/null; then
+    BACKEND_APP_EXISTED=true
     if [ "$FORCE_UPDATE" = "true" ]; then
         warn "App '$BACKEND_APP' already exists â€” continuing with --update (will re-deploy and re-seed)."
     else
@@ -490,6 +557,7 @@ if dokku apps:exists "$BACKEND_APP" 2>/dev/null; then
     fi
 fi
 if dokku apps:exists "$FRONTEND_APP" 2>/dev/null; then
+    FRONTEND_APP_EXISTED=true
     if [ "$FORCE_UPDATE" = "true" ]; then
         warn "App '$FRONTEND_APP' already exists â€” continuing with --update."
     else
@@ -849,6 +917,7 @@ SQLEOF
                 --backend-image "$BACKEND_IMAGE" \
                 --config "$CONFIG_FILE"
             DB_PROVISIONED=true
+            MIGRATIONS_APPLIED=true
         else
             warn "No backend image supplied; skipping schema initialization."
             warn "Run later: bash scripts/init-tenant-db.sh $TENANT_NAME --backend-image <image> --schema-only"
@@ -890,6 +959,15 @@ if ! $GIT_ONLY; then
             error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
             exit 1
         fi
+        if [ "$BACKEND_APP_EXISTED" = true ]; then
+            if ! previous_image="$(current_app_image "$BACKEND_APP")"; then
+                error "Failed to read the current image identity for ${BACKEND_APP}; refusing an untracked --update."
+                exit 1
+            fi
+            PREVIOUS_IMAGE["backend"]="$previous_image"
+        else
+            PREVIOUS_IMAGE["backend"]=""
+        fi
         if ! capture_runtime_config "$BACKEND_APP"; then
             error "Failed to capture current runtime identity for ${BACKEND_APP}."
             exit 1
@@ -905,6 +983,7 @@ if ! $GIT_ONLY; then
                 "failed to set runtime identity"
             exit 1
         fi
+        IMAGE_SWAP_ATTEMPTED["backend"]=true
         if ! dokku_git_from_image "$BACKEND_APP" "$BACKEND_IMAGE"; then
             error "Backend image deployment failed for ${BACKEND_APP}."
             record_deployment_failure backend "$BACKEND_IMAGE" \
@@ -942,6 +1021,15 @@ if ! $GIT_ONLY; then
             error "Image is missing or inconsistent OCI BuildIdentity labels: $FRONTEND_IMAGE"
             exit 1
         fi
+        if [ "$FRONTEND_APP_EXISTED" = true ]; then
+            if ! previous_image="$(current_app_image "$FRONTEND_APP")"; then
+                error "Failed to read the current image identity for ${FRONTEND_APP}; refusing an untracked --update."
+                exit 1
+            fi
+            PREVIOUS_IMAGE["frontend"]="$previous_image"
+        else
+            PREVIOUS_IMAGE["frontend"]=""
+        fi
         if ! capture_runtime_config "$FRONTEND_APP"; then
             error "Failed to capture current runtime identity for ${FRONTEND_APP}."
             exit 1
@@ -963,6 +1051,7 @@ if ! $GIT_ONLY; then
                 "failed to set frontend cookie configuration"
             exit 1
         fi
+        IMAGE_SWAP_ATTEMPTED["frontend"]=true
         if ! dokku_git_from_image "$FRONTEND_APP" "$FRONTEND_IMAGE"; then
             error "Frontend image deployment failed for ${FRONTEND_APP}."
             record_deployment_failure frontend "$FRONTEND_IMAGE" \

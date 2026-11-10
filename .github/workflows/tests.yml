@@ -49,6 +49,7 @@ jobs:
           bash scripts/tests/test-tenant-provenance.sh
           bash scripts/tests/test-runtime-probes.sh
           bash scripts/tests/test-runtime-identity-restore.sh
+          bash scripts/tests/test-create-tenant-image-rollback.sh
           bash scripts/tests/test-deployctl.sh
           bash scripts/tests/test-zatca-runtime.sh
 

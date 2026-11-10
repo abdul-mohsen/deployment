@@ -52,6 +52,18 @@ grep -q 'ON DUPLICATE KEY UPDATE' "$CAPTURE" ||
     fail "existing pins or provenance rows are not preserved"
 pass "legacy pins and provenance use idempotent, preserve-current upserts"
 
+start_line="$(grep -n '^START TRANSACTION;$' "$CAPTURE" | cut -d: -f1)"
+image_line="$(grep -n '^INSERT INTO .*tenant_image' "$CAPTURE" | cut -d: -f1)"
+identity_line="$(grep -n '^INSERT INTO .*tenant_identity' "$CAPTURE" | cut -d: -f1)"
+commit_line="$(grep -n '^COMMIT;$' "$CAPTURE" | cut -d: -f1)"
+[ -n "$start_line" ] && [ -n "$image_line" ] &&
+    [ -n "$identity_line" ] && [ -n "$commit_line" ] &&
+    [ "$start_line" -lt "$image_line" ] &&
+    [ "$image_line" -lt "$identity_line" ] &&
+    [ "$identity_line" -lt "$commit_line" ] ||
+    fail "tenant_image and tenant_identity writes are not ordered in one transaction"
+pass "tenant image and identity writes share one transaction"
+
 echo "=== setup and deploy paths run the upgrade before state reads ==="
 grep -q 'ensure_deployment_state_schema' scripts/setup.sh ||
     fail "setup does not ensure and migrate deployment state"

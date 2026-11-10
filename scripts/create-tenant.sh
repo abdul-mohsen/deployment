@@ -97,6 +97,9 @@ NO_DATABASE=false
 GIT_ONLY=false
 DRY_RUN=false
 FORCE_UPDATE=false
+EXISTING_TENANT_DATABASE=false
+UPDATE_BACKUP_ID=""
+UPDATE_BACKUP_ARTIFACT=""
 declare -a ENV_VARS=()
 
 env_value() {
@@ -209,6 +212,8 @@ set_runtime_build_identity() {
 
 record_verified_image_identity() {
     local app_type="$1" image="$2" resolved_ref
+    local backup_id="${UPDATE_BACKUP_ID:-}"
+    local backup_artifact="${UPDATE_BACKUP_ARTIFACT:-}"
     resolved_ref="${image%@*}@${BUILD_DIGEST}"
     if ! tenant_record_identity "$TENANT_NAME" "$app_type" "$image" "$BUILD_IMAGE_REF" \
         "$BUILD_DIGEST" "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" \
@@ -219,7 +224,7 @@ record_verified_image_identity() {
     tenant_record_audit "$TENANT_NAME" "$app_type" "$image" "$resolved_ref" "$BUILD_DIGEST" \
         "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
         "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" \
-        "" "" "verified" ""
+        "" "" "verified" "" "$backup_id" "$backup_artifact"
 }
 
 find_existing_tenant_network() {
@@ -437,7 +442,9 @@ create_dokku_app() {
 }
 
 require_update_backup() {
-    if [ "$FORCE_UPDATE" != "true" ]; then
+    if [ "$FORCE_UPDATE" != "true" ] ||
+        [ -z "$BACKEND_IMAGE" ] ||
+        [ "$EXISTING_TENANT_DATABASE" != "true" ]; then
         return 0
     fi
 
@@ -520,21 +527,16 @@ if $DRY_RUN; then
     exit 0
 fi
 
-# Updates must have a verified rollback point before any provisioning or
-# migration work can change the existing tenant.
-if ! require_update_backup; then
-    exit 1
-fi
-
 # The registry row below gets its tenant_key from ZATCA's trigger. Refuse before
 # anything is created if zatca_master is not migrated yet.
+existing_database=false
+existing_registry=false
 if ! $NO_DATABASE && [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" != "changeme" ]; then
     require_registry_tenant_key || exit 1
 
-    existing_database=false
-    existing_registry=false
     if tenant_database_exists "$TENANT_DB_NAME"; then
         existing_database=true
+        EXISTING_TENANT_DATABASE=true
     else
         rc=$?
         if [ "$rc" -ne 1 ]; then
@@ -559,6 +561,13 @@ if ! $NO_DATABASE && [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" !
         fi
         warn "Existing tenant state detected; --update is limited to explicit recovery of this tenant."
     fi
+fi
+
+# A verified rollback point is needed only when --update will replay backend
+# migrations against a database that already exists. Recovery of a partially
+# provisioned tenant creates the missing database and must remain retryable.
+if ! require_update_backup; then
+    exit 1
 fi
 
 # =============================================================================

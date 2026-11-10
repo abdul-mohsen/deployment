@@ -127,8 +127,11 @@ SCRIPT_DIR="$order_tmpdir"
 TENANT_NAME="acme"
 CONFIG_FILE="$order_tmpdir/config.env"
 FORCE_UPDATE=true
+EXISTING_TENANT_DATABASE=true
 BACKEND_IMAGE="example/backend:test"
 DB_PROVISIONED=false
+UPDATE_BACKUP_ID=""
+UPDATE_BACKUP_ARTIFACT=""
 
 eval "$(sed -n '/^require_update_backup() {/,/^}/p' scripts/create-tenant.sh)"
 eval "$(sed -n '/^initialize_tenant_schema() {/,/^}/p' scripts/create-tenant.sh)"
@@ -165,14 +168,70 @@ if grep -q '^goose$' "$EVENT_LOG"; then
 fi
 pass "incomplete backup verification blocks update"
 
+echo
+echo "=== verified backup identity is attached to deployment audit ==="
+AUDIT_ARGS="$order_tmpdir/audit.args"
+tenant_record_identity() { :; }
+tenant_record_audit() { printf '%s\n' "$@" > "$AUDIT_ARGS"; }
+BUILD_IMAGE_REF="example/backend:test"
+BUILD_DIGEST="sha256:abc"
+BUILD_CHANNEL="stable"
+BUILD_VERSION="1.2.3"
+BUILD_COMMIT="abcdef"
+BUILD_COMMIT_SHORT="abcdef"
+BUILD_WORKFLOW_RUN_ID="123"
+BUILD_WORKFLOW_RUN_URL="https://example.test/run/123"
+BUILD_BUILT_AT="2026-11-10T00:00:00Z"
+eval "$(sed -n '/^record_verified_image_identity() {/,/^}/p' scripts/create-tenant.sh)"
+record_verified_image_identity backend "$BACKEND_IMAGE" ||
+    fail "verified image identity unexpectedly failed"
+grep -qx 'backup-id' "$AUDIT_ARGS" ||
+    fail "deployment audit did not receive the verified backup ID"
+grep -qx 'backup.sql.gz' "$AUDIT_ARGS" ||
+    fail "deployment audit did not receive the verified backup artifact"
+pass "verified backup identity is attached to deployment audit"
+
+echo
+echo "=== partial provisioning without a tenant database stays recoverable ==="
+: > "$EVENT_LOG"
+BACKUP_RC=1
+EXISTING_TENANT_DATABASE=false
+if ! require_update_backup; then
+    fail "missing tenant database incorrectly required a backup"
+fi
+initialize_tenant_schema || fail "partial provisioning recovery unexpectedly failed"
+if grep -q '^backup$' "$EVENT_LOG"; then
+    fail "partial provisioning without a database unexpectedly took a backup"
+fi
+grep -q '^goose$' "$EVENT_LOG" ||
+    fail "partial provisioning recovery did not initialize the tenant schema"
+pass "partial provisioning without a tenant database skips the backup gate"
+
+echo
+echo "=== update without backend migration skips the backup gate ==="
+: > "$EVENT_LOG"
+EXISTING_TENANT_DATABASE=true
+BACKEND_IMAGE=""
+if ! require_update_backup; then
+    fail "update without a backend migration incorrectly required a backup"
+fi
+if [ -s "$EVENT_LOG" ]; then
+    fail "update without a backend migration unexpectedly took a backup"
+fi
+pass "update without a backend migration skips the backup gate"
+BACKEND_IMAGE="example/backend:test"
+
 backup_gate_line="$(grep -n 'if ! require_update_backup; then' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
+state_check_line="$(grep -n 'tenant_database_exists "\$TENANT_DB_NAME"' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
 first_mutation_line="$(grep -n 'create_dokku_app "\$BACKEND_APP"' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
 schema_call_line="$(grep -n 'if ! initialize_tenant_schema; then' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
-[ -n "$backup_gate_line" ] && [ -n "$first_mutation_line" ] && [ -n "$schema_call_line" ] &&
+[ -n "$backup_gate_line" ] && [ -n "$state_check_line" ] &&
+    [ -n "$first_mutation_line" ] && [ -n "$schema_call_line" ] &&
+    [ "$state_check_line" -lt "$backup_gate_line" ] &&
     [ "$backup_gate_line" -lt "$first_mutation_line" ] &&
     [ "$backup_gate_line" -lt "$schema_call_line" ] ||
-    fail "--update backup gate is not before provisioning and Goose"
-pass "--update backup gate precedes tenant mutation and Goose"
+    fail "--update backup gate does not follow DB detection and precede provisioning"
+pass "--update backup gate follows DB detection and precedes tenant mutation and Goose"
 
 echo
 echo "=== deployment-owned overrides fail before side effects ==="

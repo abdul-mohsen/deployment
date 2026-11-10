@@ -24,6 +24,7 @@
 #   --env KEY=VALUE           Set env var (repeatable)
 #   --git-only                Create apps without deploying (deploy via git push)
 #   --dry-run                 Show plan without executing
+#   --update                  Re-run provisioning for an existing tenant
 #   --config <path>           Path to config.env file (default: ../config.env)
 #
 # Examples:
@@ -435,6 +436,52 @@ create_dokku_app() {
     exit 1
 }
 
+require_update_backup() {
+    if [ "$FORCE_UPDATE" != "true" ]; then
+        return 0
+    fi
+
+    local backup_info backup_id backup_artifact
+    log "Creating verified pre-migration backup for ${TENANT_NAME}..."
+    if ! backup_info="$(create_verified_tenant_db_backup "$TENANT_NAME" "$CONFIG_FILE")"; then
+        error "Verified pre-migration backup failed; refusing to mutate existing tenant."
+        return 1
+    fi
+
+    IFS=$'\t' read -r backup_id backup_artifact _ <<< "$backup_info"
+    if [ -z "$backup_id" ] || [ -z "$backup_artifact" ]; then
+        error "Verified pre-migration backup identity is incomplete; refusing to mutate existing tenant."
+        return 1
+    fi
+
+    UPDATE_BACKUP_ID="$backup_id"
+    UPDATE_BACKUP_ARTIFACT="$backup_artifact"
+    log "Verified pre-migration backup ready: ${UPDATE_BACKUP_ID}"
+}
+
+initialize_tenant_schema() {
+    if [ -z "$BACKEND_IMAGE" ]; then
+        warn "No backend image supplied; skipping schema initialization."
+        warn "Run later: bash scripts/init-tenant-db.sh $TENANT_NAME --backend-image <image> --schema-only"
+        return 0
+    fi
+
+    ensure_tenant_image_available "$BACKEND_IMAGE"
+    if ! resolve_build_identity "$BACKEND_IMAGE"; then
+        error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
+        return 1
+    fi
+    log "Running goose migrations from backend image..."
+    if ! bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
+        --schema-only \
+        --backend-image "$BACKEND_IMAGE" \
+        --config "$CONFIG_FILE"; then
+        error "Tenant database schema initialization failed."
+        return 1
+    fi
+    DB_PROVISIONED=true
+}
+
 # ---- Show plan ----
 echo ""
 info "=== Tenant Provisioning Plan ==="
@@ -471,6 +518,12 @@ echo ""
 if $DRY_RUN; then
     warn "Dry run â€” no changes made."
     exit 0
+fi
+
+# Updates must have a verified rollback point before any provisioning or
+# migration work can change the existing tenant.
+if ! require_update_backup; then
+    exit 1
 fi
 
 # The registry row below gets its tenant_key from ZATCA's trigger. Refuse before
@@ -725,21 +778,8 @@ SQLEOF
 
         log "Database ready: $TENANT_DB_NAME"
 
-        if [ -n "$BACKEND_IMAGE" ]; then
-            ensure_tenant_image_available "$BACKEND_IMAGE"
-            if ! resolve_build_identity "$BACKEND_IMAGE"; then
-                error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
-                exit 1
-            fi
-            log "Running goose migrations from backend image..."
-            bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
-                --schema-only \
-                --backend-image "$BACKEND_IMAGE" \
-                --config "$CONFIG_FILE"
-            DB_PROVISIONED=true
-        else
-            warn "No backend image supplied; skipping schema initialization."
-            warn "Run later: bash scripts/init-tenant-db.sh $TENANT_NAME --backend-image <image> --schema-only"
+        if ! initialize_tenant_schema; then
+            exit 1
         fi
     fi
 fi

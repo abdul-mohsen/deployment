@@ -96,10 +96,89 @@ grep -q 'refusing to finish provisioning' scripts/create-tenant.sh \
 pass "image deployments import helpers, set identity, and fail closed on provenance"
 
 echo
+echo "=== --update verifies backup before Goose and fails closed ==="
+order_tmpdir="$REPO_DIR/.test-create-tenant-order.$$"
+rm -rf "$order_tmpdir"
+mkdir -p "$order_tmpdir"
+trap 'rm -rf "$order_tmpdir"' EXIT
+
+cat > "$order_tmpdir/init-tenant-db.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'goose\n' >> "$EVENT_LOG"
+EOF
+chmod +x "$order_tmpdir/init-tenant-db.sh"
+
+export EVENT_LOG="$order_tmpdir/events.log"
+export BACKUP_RC=0
+BACKUP_OUTPUT=$'backup-id\tbackup.sql.gz\tbackup.meta.json'
+log() { :; }
+warn() { :; }
+error() { :; }
+create_verified_tenant_db_backup() {
+    printf 'backup\n' >> "$EVENT_LOG"
+    if [ "$BACKUP_RC" -ne 0 ]; then
+        return "$BACKUP_RC"
+    fi
+    printf '%s\n' "$BACKUP_OUTPUT"
+}
+ensure_tenant_image_available() { :; }
+resolve_build_identity() { return 0; }
+SCRIPT_DIR="$order_tmpdir"
+TENANT_NAME="acme"
+CONFIG_FILE="$order_tmpdir/config.env"
+FORCE_UPDATE=true
+BACKEND_IMAGE="example/backend:test"
+DB_PROVISIONED=false
+
+eval "$(sed -n '/^require_update_backup() {/,/^}/p' scripts/create-tenant.sh)"
+eval "$(sed -n '/^initialize_tenant_schema() {/,/^}/p' scripts/create-tenant.sh)"
+
+: > "$EVENT_LOG"
+require_update_backup || fail "verified update backup unexpectedly failed"
+initialize_tenant_schema || fail "schema initialization unexpectedly failed"
+[ "$(sed -n '1p' "$EVENT_LOG")" = "backup" ] ||
+    fail "verified backup did not run before Goose migration"
+[ "$(sed -n '2p' "$EVENT_LOG")" = "goose" ] ||
+    fail "Goose migration did not run after verified backup"
+[ "$UPDATE_BACKUP_ID" = "backup-id" ] ||
+    fail "verified backup identity was not retained"
+pass "verified backup runs before Goose migration"
+
+: > "$EVENT_LOG"
+BACKUP_RC=1
+if require_update_backup >/dev/null 2>&1; then
+    fail "backup failure unexpectedly allowed update"
+fi
+if grep -q '^goose$' "$EVENT_LOG"; then
+    fail "Goose migration ran after backup failure"
+fi
+pass "backup failure blocks Goose migration"
+
+: > "$EVENT_LOG"
+BACKUP_RC=0
+BACKUP_OUTPUT=$'\t\t'
+if require_update_backup >/dev/null 2>&1; then
+    fail "incomplete backup identity unexpectedly allowed update"
+fi
+if grep -q '^goose$' "$EVENT_LOG"; then
+    fail "Goose migration ran after incomplete backup identity"
+fi
+pass "incomplete backup verification blocks update"
+
+backup_gate_line="$(grep -n 'if ! require_update_backup; then' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
+first_mutation_line="$(grep -n 'create_dokku_app "\$BACKEND_APP"' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
+schema_call_line="$(grep -n 'if ! initialize_tenant_schema; then' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
+[ -n "$backup_gate_line" ] && [ -n "$first_mutation_line" ] && [ -n "$schema_call_line" ] &&
+    [ "$backup_gate_line" -lt "$first_mutation_line" ] &&
+    [ "$backup_gate_line" -lt "$schema_call_line" ] ||
+    fail "--update backup gate is not before provisioning and Goose"
+pass "--update backup gate precedes tenant mutation and Goose"
+
+echo
 echo "=== deployment-owned overrides fail before side effects ==="
 redaction_tmpdir="$REPO_DIR/.test-create-tenant-override.$$"
 mkdir -p "$redaction_tmpdir"
-trap 'rm -rf "$redaction_tmpdir"' EXIT
+trap 'rm -rf "$order_tmpdir" "$redaction_tmpdir"' EXIT
 cat > "$redaction_tmpdir/config.env" <<'EOF'
 BASE_DOMAIN=example.test
 PUBLIC_PROTOCOL=https

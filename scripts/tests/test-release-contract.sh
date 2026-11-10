@@ -179,10 +179,10 @@ previous_image_guard_line="$(printf '%s\n' "$audit_block" |
     grep -nF 'if [ -n "$previous_image" ]; then' |
     head -1 | cut -d: -f1 || true)"
 rollback_line="$(printf '%s\n' "$audit_block" |
-    grep -nF 'dokku_git_from_image "$app" "$previous_image" || true' |
+    grep -nF 'dokku_git_from_image "$app" "$previous_image"' |
     head -1 | cut -d: -f1 || true)"
 rollback_count="$(printf '%s\n' "$audit_block" |
-    grep -cF 'dokku_git_from_image "$app" "$previous_image" || true' || true)"
+    grep -cF 'dokku_git_from_image "$app" "$previous_image"' || true)"
 [ -n "$guard_line" ] && [ -n "$rollback_branch_line" ] &&
     [ -n "$previous_image_guard_line" ] && [ -n "$rollback_line" ] \
     || fail "deploy-all audit failure lacks a migration rollback guard"

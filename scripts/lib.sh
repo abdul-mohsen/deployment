@@ -11,6 +11,19 @@
 
 : "${DEPLOY_STATE_DB:=deployment_state}"
 
+# Split a tab-delimited value without letting Bash's IFS whitespace rules
+# discard empty fields.
+split_tab_fields() {
+    local input="${1-}" field
+    TAB_FIELDS=()
+    while [[ "$input" == *$'\t'* ]]; do
+        field="${input%%$'\t'*}"
+        TAB_FIELDS+=("$field")
+        input="${input#*$'\t'}"
+    done
+    TAB_FIELDS+=("$input")
+}
+
 # Structured deployment logging is opt-in so tests and helper-only callers can
 # source lib.sh without installing a process-wide ERR trap.
 deployment_init_logging() {

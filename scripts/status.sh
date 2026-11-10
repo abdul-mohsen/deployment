@@ -53,7 +53,9 @@ MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
 DEPLOY_STATE_DB="${DEPLOY_STATE_DB:-deployment_state}"
 validate_database_identifier "$DEPLOY_STATE_DB" || exit 1
 AUTO_PULL_STATUS_LINE="$(auto_pull_cron_status "$SCRIPT_DIR/auto-pull.sh")"
-IFS=$'\t' read -r AUTO_PULL_STATE AUTO_PULL_DIAGNOSTIC <<< "$AUTO_PULL_STATUS_LINE"
+split_tab_fields "$AUTO_PULL_STATUS_LINE"
+AUTO_PULL_STATE="${TAB_FIELDS[0]-}"
+AUTO_PULL_DIAGNOSTIC="${TAB_FIELDS[1]-}"
 
 # ---- Colors (auto-disabled if not a TTY or --json) ---------------------------
 if $JSON || [ ! -t 1 ]; then

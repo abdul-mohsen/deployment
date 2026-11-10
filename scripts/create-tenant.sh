@@ -105,7 +105,7 @@ RUNTIME_IDENTITY_KEYS=(
     APP_IMAGE_CHANNEL APP_BUILD_WORKFLOW_RUN APP_WORKFLOW_RUN
     APP_WORKFLOW_RUN_ID APP_WORKFLOW_RUN_URL APP_BUILT_AT APP_BUILD_AT APP_CREATED
     APP_IMAGE_REF APP_IMAGE_DIGEST APP_IMAGE_RESOLVED_REF APP_IMAGE_VERSION
-    APP_IMAGE_COMMIT APP_SOURCE APP_DEPLOYED_AT
+    APP_IMAGE_TAG APP_IMAGE_COMMIT APP_IMAGE_COMMIT_SHORT APP_SOURCE APP_DEPLOYED_AT
 )
 
 env_value() {
@@ -208,7 +208,9 @@ set_runtime_build_identity() {
         APP_BUILD_AT="$BUILD_BUILT_AT" \
         APP_CREATED="$BUILD_BUILT_AT" \
         APP_IMAGE_VERSION="$BUILD_VERSION" \
+        APP_IMAGE_TAG="$(image_tag "$image")" \
         APP_IMAGE_COMMIT="$BUILD_COMMIT" \
+        APP_IMAGE_COMMIT_SHORT="$BUILD_COMMIT_SHORT" \
         APP_SOURCE="$BUILD_SOURCE" \
         APP_IMAGE_REF="$BUILD_IMAGE_REF" \
         APP_IMAGE_DIGEST="$BUILD_DIGEST" \
@@ -234,8 +236,16 @@ restore_runtime_config() {
             unset_args+=("$key")
         fi
     done
-    [ "${#set_args[@]}" -eq 0 ] || dokku config:set --no-restart "$app" "${set_args[@]}" || true
-    [ "${#unset_args[@]}" -eq 0 ] || dokku config:unset --no-restart "$app" "${unset_args[@]}" || true
+    if [ "${#set_args[@]}" -gt 0 ] &&
+        ! dokku config:set --no-restart "$app" "${set_args[@]}"; then
+        error "Failed to restore runtime identity for ${app}."
+        return 1
+    fi
+    if [ "${#unset_args[@]}" -gt 0 ] &&
+        ! dokku config:unset --no-restart "$app" "${unset_args[@]}"; then
+        error "Failed to clear runtime identity for ${app}."
+        return 1
+    fi
 }
 
 restore_previous_identity() {
@@ -243,15 +253,29 @@ restore_previous_identity() {
     local previous="${PREVIOUS_IDENTITY[$app_type]:-}"
     local old_ref old_digest old_channel old_version old_commit old_short
     local old_workflow old_workflow_url old_built
-    IFS=$'\t' read -r old_ref old_digest old_channel old_version old_commit \
-        old_short old_workflow old_workflow_url old_built <<< "$previous"
+    split_tab_fields "$previous"
+    old_ref="${TAB_FIELDS[0]-}"
+    old_digest="${TAB_FIELDS[1]-}"
+    old_channel="${TAB_FIELDS[2]-}"
+    old_version="${TAB_FIELDS[3]-}"
+    old_commit="${TAB_FIELDS[4]-}"
+    old_short="${TAB_FIELDS[5]-}"
+    old_workflow="${TAB_FIELDS[6]-}"
+    old_workflow_url="${TAB_FIELDS[7]-}"
+    old_built="${TAB_FIELDS[8]-}"
     if [ -n "$old_ref" ] || [ -n "$old_digest" ]; then
-        tenant_record_identity "$TENANT_NAME" "$app_type" "$old_ref" "$old_ref" \
+        if ! tenant_record_identity "$TENANT_NAME" "$app_type" "$old_ref" "$old_ref" \
             "$old_digest" "$old_channel" "$old_version" "$old_commit" "$old_short" \
-            "$old_workflow" "$old_workflow_url" "$old_built" 2>/dev/null || true
+            "$old_workflow" "$old_workflow_url" "$old_built"; then
+            error "Failed to restore durable identity for ${TENANT_NAME}-${app_type}."
+            return 1
+        fi
     else
-        tenant_clear_identity "$TENANT_NAME" "$app_type" \
-            "deployment failed; no prior verified identity" 2>/dev/null || true
+        if ! tenant_clear_identity "$TENANT_NAME" "$app_type" \
+            "deployment failed; no prior verified identity"; then
+            error "Failed to clear durable identity for ${TENANT_NAME}-${app_type}."
+            return 1
+        fi
     fi
 }
 
@@ -259,15 +283,23 @@ record_deployment_failure() {
     local app_type="$1" image="$2" message="$3"
     local app="${TENANT_NAME}-${app_type}" resolved_ref="${image%@*}@${BUILD_DIGEST}"
     local previous_ref="" previous_digest=""
-    IFS=$'\t' read -r previous_ref previous_digest _ <<< "${PREVIOUS_IDENTITY[$app_type]:-}"
+    local restore_status=0
+    split_tab_fields "${PREVIOUS_IDENTITY[$app_type]:-}"
+    previous_ref="${TAB_FIELDS[0]-}"
+    previous_digest="${TAB_FIELDS[1]-}"
 
-    restore_runtime_config "$app"
-    restore_previous_identity "$app_type"
+    if ! restore_runtime_config "$app"; then
+        restore_status=1
+    fi
+    if ! restore_previous_identity "$app_type"; then
+        restore_status=1
+    fi
     tenant_record_failure "$TENANT_NAME" "$app_type" "$message" 2>/dev/null || true
     tenant_record_audit "$TENANT_NAME" "$app_type" "$image" "$resolved_ref" "$BUILD_DIGEST" \
         "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
         "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" \
         "$previous_ref" "$previous_digest" "failed" "$message" 2>/dev/null || true
+    return "$restore_status"
 }
 
 record_verified_image_identity() {

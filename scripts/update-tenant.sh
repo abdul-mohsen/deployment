@@ -87,6 +87,14 @@ declare -A PREVIOUS_CONFIG=()
 declare -A PREVIOUS_DB_IDENTITY=()
 declare -A DEPLOYED_COMPONENT=()
 
+RUNTIME_IDENTITY_KEYS=(
+    APP_VERSION APP_COMMIT APP_COMMIT_SHORT APP_BUILD_CHANNEL APP_CHANNEL
+    APP_IMAGE_CHANNEL APP_BUILD_WORKFLOW_RUN APP_WORKFLOW_RUN
+    APP_WORKFLOW_RUN_ID APP_WORKFLOW_RUN_URL APP_BUILT_AT APP_BUILD_AT APP_CREATED
+    APP_IMAGE_REF APP_IMAGE_DIGEST APP_IMAGE_RESOLVED_REF APP_IMAGE_VERSION
+    APP_IMAGE_TAG APP_IMAGE_COMMIT APP_IMAGE_COMMIT_SHORT APP_SOURCE APP_DEPLOYED_AT
+)
+
 ensure_update_image_available() {
     local image="$1"
     case "$IMAGE_PULL_POLICY" in
@@ -188,11 +196,7 @@ current_app_image() {
 
 capture_runtime_config() {
     local app="$1" key
-    for key in APP_VERSION APP_COMMIT APP_COMMIT_SHORT APP_BUILD_CHANNEL APP_CHANNEL \
-        APP_IMAGE_CHANNEL APP_BUILD_WORKFLOW_RUN APP_WORKFLOW_RUN \
-        APP_WORKFLOW_RUN_ID APP_WORKFLOW_RUN_URL APP_BUILT_AT APP_BUILD_AT APP_CREATED \
-        APP_IMAGE_REF APP_IMAGE_DIGEST APP_IMAGE_RESOLVED_REF APP_IMAGE_VERSION \
-        APP_IMAGE_COMMIT APP_SOURCE APP_DEPLOYED_AT; do
+    for key in "${RUNTIME_IDENTITY_KEYS[@]}"; do
         PREVIOUS_CONFIG["$app:$key"]="$(dokku config:get "$app" "$key" 2>/dev/null || true)"
     done
 }
@@ -200,11 +204,7 @@ capture_runtime_config() {
 restore_runtime_config() {
     local app="$1" key value
     local -a set_args=() unset_args=()
-    for key in APP_VERSION APP_COMMIT APP_COMMIT_SHORT APP_BUILD_CHANNEL APP_CHANNEL \
-        APP_IMAGE_CHANNEL APP_BUILD_WORKFLOW_RUN APP_WORKFLOW_RUN \
-        APP_WORKFLOW_RUN_ID APP_WORKFLOW_RUN_URL APP_BUILT_AT APP_BUILD_AT APP_CREATED \
-        APP_IMAGE_REF APP_IMAGE_DIGEST APP_IMAGE_RESOLVED_REF APP_IMAGE_VERSION \
-        APP_IMAGE_COMMIT APP_SOURCE APP_DEPLOYED_AT; do
+    for key in "${RUNTIME_IDENTITY_KEYS[@]}"; do
         value="${PREVIOUS_CONFIG["$app:$key"]:-}"
         if [ -n "$value" ]; then
             set_args+=("$key=$value")
@@ -212,8 +212,16 @@ restore_runtime_config() {
             unset_args+=("$key")
         fi
     done
-    [ "${#set_args[@]}" -eq 0 ] || dokku config:set --no-restart "$app" "${set_args[@]}" || true
-    [ "${#unset_args[@]}" -eq 0 ] || dokku config:unset --no-restart "$app" "${unset_args[@]}" || true
+    if [ "${#set_args[@]}" -gt 0 ] &&
+        ! dokku config:set --no-restart "$app" "${set_args[@]}"; then
+        error "Failed to restore runtime identity for ${app}."
+        return 1
+    fi
+    if [ "${#unset_args[@]}" -gt 0 ] &&
+        ! dokku config:unset --no-restart "$app" "${unset_args[@]}"; then
+        error "Failed to clear runtime identity for ${app}."
+        return 1
+    fi
 }
 
 record_failure() {
@@ -222,11 +230,21 @@ record_failure() {
     local channel="" version="" commit_sha="" commit_short="" workflow="" workflow_url=""
     local image_ref="" digest="" built_at="" previous_ref="" previous_digest=""
     if [ -n "$values" ]; then
-        IFS=$'\t' read -r channel version commit_sha commit_short workflow workflow_url \
-            image_ref digest built_at <<< "$values"
+        split_tab_fields "$values"
+        channel="${TAB_FIELDS[0]-}"
+        version="${TAB_FIELDS[1]-}"
+        commit_sha="${TAB_FIELDS[2]-}"
+        commit_short="${TAB_FIELDS[3]-}"
+        workflow="${TAB_FIELDS[4]-}"
+        workflow_url="${TAB_FIELDS[5]-}"
+        image_ref="${TAB_FIELDS[6]-}"
+        digest="${TAB_FIELDS[7]-}"
+        built_at="${TAB_FIELDS[8]-}"
     fi
     local resolved_ref="${requested%@*}@${digest}"
-    IFS=$'\t' read -r previous_ref previous_digest _ <<< "${PREVIOUS_DB_IDENTITY[$component]:-}"
+    split_tab_fields "${PREVIOUS_DB_IDENTITY[$component]:-}"
+    previous_ref="${TAB_FIELDS[0]-}"
+    previous_digest="${TAB_FIELDS[1]-}"
     tenant_record_failure "$TENANT_NAME" "$component" "$message" 2>/dev/null || true
     tenant_record_audit "$TENANT_NAME" "$component" "$requested" "$resolved_ref" "$digest" \
         "$channel" "$version" "$commit_sha" "$commit_short" "$workflow" "$workflow_url" "$built_at" \
@@ -236,6 +254,8 @@ record_failure() {
 
 rollback_component() {
     local component="$1" app image
+    local old_ref old_digest old_channel old_version old_commit old_short
+    local old_workflow old_workflow_url old_built
     app="${TENANT_NAME}-${component}"
     image="${PREVIOUS_IMAGE[$component]:-}"
     if [ "$component" = "backend" ] && $MIGRATIONS_APPLIED; then
@@ -247,26 +267,47 @@ rollback_component() {
     fi
     if [ -z "$image" ]; then
         warn "${app}: no previous image is recorded; cannot perform image rollback"
-        restore_runtime_config "$app"
+        if ! restore_runtime_config "$app"; then
+            error "${app}: failed to restore runtime identity"
+        fi
         return 1
     fi
     log "Rolling back ${app} to ${image}"
     if ! dokku_git_from_image "$app" "$image"; then
         error "${app}: rollback failed"
-        restore_runtime_config "$app"
+        if ! restore_runtime_config "$app"; then
+            error "${app}: failed to restore runtime identity after rollback failure"
+        fi
         return 1
     fi
-    restore_runtime_config "$app"
-    IFS=$'\t' read -r old_ref old_digest _ <<< "${PREVIOUS_DB_IDENTITY[$component]:-}"
+    if ! restore_runtime_config "$app"; then
+        error "${app}: failed to restore runtime identity after image rollback"
+        return 1
+    fi
+    split_tab_fields "${PREVIOUS_DB_IDENTITY[$component]:-}"
+    old_ref="${TAB_FIELDS[0]-}"
+    old_digest="${TAB_FIELDS[1]-}"
     if [ -n "$old_ref" ] || [ -n "$old_digest" ]; then
         # Keep the durable current identity equal to the last-known-good image.
-        IFS=$'\t' read -r old_ref old_digest old_channel old_version old_commit \
-            old_short old_workflow old_workflow_url old_built <<< "${PREVIOUS_DB_IDENTITY[$component]}"
-        tenant_record_identity "$TENANT_NAME" "$component" "$old_ref" "$old_ref" \
+        old_channel="${TAB_FIELDS[2]-}"
+        old_version="${TAB_FIELDS[3]-}"
+        old_commit="${TAB_FIELDS[4]-}"
+        old_short="${TAB_FIELDS[5]-}"
+        old_workflow="${TAB_FIELDS[6]-}"
+        old_workflow_url="${TAB_FIELDS[7]-}"
+        old_built="${TAB_FIELDS[8]-}"
+        if ! tenant_record_identity "$TENANT_NAME" "$component" "$old_ref" "$old_ref" \
             "$old_digest" "$old_channel" "$old_version" "$old_commit" "$old_short" \
-            "$old_workflow" "$old_workflow_url" "$old_built" 2>/dev/null || true
+            "$old_workflow" "$old_workflow_url" "$old_built"; then
+            error "${app}: failed to restore durable identity"
+            return 1
+        fi
     else
-        tenant_clear_identity "$TENANT_NAME" "$component" "deployment rolled back; no prior verified identity" 2>/dev/null || true
+        if ! tenant_clear_identity "$TENANT_NAME" "$component" \
+            "deployment rolled back; no prior verified identity"; then
+            error "${app}: failed to clear durable identity"
+            return 1
+        fi
     fi
     return 0
 }
@@ -274,8 +315,16 @@ rollback_component() {
 verify_component() {
     local component="$1" app="$2" values="$3"
     local channel version commit_sha commit_short workflow workflow_url image_ref digest built_at
-    IFS=$'\t' read -r channel version commit_sha commit_short workflow workflow_url \
-        image_ref digest built_at <<< "$values"
+    split_tab_fields "$values"
+    channel="${TAB_FIELDS[0]-}"
+    version="${TAB_FIELDS[1]-}"
+    commit_sha="${TAB_FIELDS[2]-}"
+    commit_short="${TAB_FIELDS[3]-}"
+    workflow="${TAB_FIELDS[4]-}"
+    workflow_url="${TAB_FIELDS[5]-}"
+    image_ref="${TAB_FIELDS[6]-}"
+    digest="${TAB_FIELDS[7]-}"
+    built_at="${TAB_FIELDS[8]-}"
     local attempt
     for ((attempt=1; attempt<=VERIFY_RETRIES; attempt++)); do
         if verify_runtime_identity "$app" "$version" "$commit_sha" "$digest" \
@@ -296,14 +345,25 @@ deploy_component() {
     local component="$1" image="$2" app="${TENANT_NAME}-${1}"
     local values="${COMPONENT_IDENTITY[$component]}"
     local channel version commit_sha commit_short workflow workflow_url image_ref digest built_at
-    IFS=$'\t' read -r channel version commit_sha commit_short workflow workflow_url \
-        image_ref digest built_at <<< "$values"
+    local previous_digest
+    split_tab_fields "$values"
+    channel="${TAB_FIELDS[0]-}"
+    version="${TAB_FIELDS[1]-}"
+    commit_sha="${TAB_FIELDS[2]-}"
+    commit_short="${TAB_FIELDS[3]-}"
+    workflow="${TAB_FIELDS[4]-}"
+    workflow_url="${TAB_FIELDS[5]-}"
+    image_ref="${TAB_FIELDS[6]-}"
+    digest="${TAB_FIELDS[7]-}"
+    built_at="${TAB_FIELDS[8]-}"
+    split_tab_fields "${PREVIOUS_DB_IDENTITY[$component]:-}"
+    previous_digest="${TAB_FIELDS[1]-}"
     local resolved_ref="${image%@*}@${digest}"
 
     if ! tenant_record_audit "$TENANT_NAME" "$component" "$image" "$resolved_ref" "$digest" \
         "$channel" "$version" "$commit_sha" "$commit_short" "$workflow" "$workflow_url" "$built_at" \
         "${PREVIOUS_IMAGE[$component]:-}" \
-        "$(printf '%s' "${PREVIOUS_DB_IDENTITY[$component]:-}" | cut -f2)" \
+        "$previous_digest" \
         "started" "" "$DB_BACKUP_ID" "$DB_BACKUP_ARTIFACT" 2>/dev/null; then
         error "${app}: deployment audit is unavailable; refusing an untracked swap"
         record_failure "$component" "$image" "deployment audit start failed"
@@ -326,39 +386,51 @@ deploy_component() {
         APP_BUILD_AT="$built_at" \
         APP_CREATED="$built_at" \
         APP_IMAGE_VERSION="$version" \
+        APP_IMAGE_TAG="$(image_tag "$image")" \
         APP_IMAGE_COMMIT="$commit_sha" \
+        APP_IMAGE_COMMIT_SHORT="$commit_short" \
         APP_IMAGE_REF="$image_ref" \
         APP_IMAGE_DIGEST="$digest" \
         APP_IMAGE_RESOLVED_REF="$resolved_ref" \
         APP_DEPLOYED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; then
         record_failure "$component" "$image" "failed to set runtime identity"
-        restore_runtime_config "$app"
+        if ! restore_runtime_config "$app"; then
+            error "${app}: failed to restore runtime identity after config failure"
+        fi
         return 1
     fi
     if ! dokku_git_from_image "$app" "$image"; then
         record_failure "$component" "$image" "Dokku image swap failed"
-        rollback_component "$component" || true
+        if ! rollback_component "$component"; then
+            error "${app}: failed to restore prior identity after image swap failure"
+        fi
         return 1
     fi
     if ! verify_component "$component" "$app" "$values"; then
         record_failure "$component" "$image" "post-deploy /version identity verification failed"
-        rollback_component "$component" || true
+        if ! rollback_component "$component"; then
+            error "${app}: failed to restore prior identity after verification failure"
+        fi
         return 1
     fi
     if ! tenant_record_identity "$TENANT_NAME" "$component" "$image" "$image_ref" \
         "$digest" "$channel" "$version" "$commit_sha" "$commit_short" \
         "$workflow" "$workflow_url" "$built_at"; then
         record_failure "$component" "$image" "failed to persist verified deployment identity"
-        rollback_component "$component" || true
+        if ! rollback_component "$component"; then
+            error "${app}: failed to restore prior identity after persistence failure"
+        fi
         return 1
     fi
     if ! tenant_record_audit "$TENANT_NAME" "$component" "$image" "$resolved_ref" "$digest" \
         "$channel" "$version" "$commit_sha" "$commit_short" "$workflow" "$workflow_url" "$built_at" \
         "${PREVIOUS_IMAGE[$component]:-}" \
-        "$(printf '%s' "${PREVIOUS_DB_IDENTITY[$component]:-}" | cut -f2)" \
+        "$previous_digest" \
         "verified" "" "$DB_BACKUP_ID" "$DB_BACKUP_ARTIFACT" 2>/dev/null; then
         error "${app}: failed to record successful deployment audit"
-        rollback_component "$component" || true
+        if ! rollback_component "$component"; then
+            error "${app}: failed to restore prior identity after audit failure"
+        fi
         record_failure "$component" "$image" "deployment audit completion failed"
         return 1
     fi
@@ -474,7 +546,9 @@ if [ -n "$BACKEND_IMAGE" ]; then
         record_failure backend "$BACKEND_IMAGE" "verified pre-migration database backup unavailable"
         exit 1
     fi
-    IFS=$'\t' read -r DB_BACKUP_ID DB_BACKUP_ARTIFACT _ <<< "$DB_BACKUP_INFO"
+    split_tab_fields "$DB_BACKUP_INFO"
+    DB_BACKUP_ID="${TAB_FIELDS[0]-}"
+    DB_BACKUP_ARTIFACT="${TAB_FIELDS[1]-}"
     if [ -z "$DB_BACKUP_ID" ] || [ -z "$DB_BACKUP_ARTIFACT" ]; then
         error "Pre-migration backup identity is incomplete; refusing migrations and image swap."
         record_failure backend "$BACKEND_IMAGE" "pre-migration backup identity incomplete"
@@ -508,7 +582,9 @@ if [ -n "$FRONTEND_IMAGE" ]; then
                     "frontend swap failed; backend retained because DB rollback is not automatic" 2>/dev/null || true
             else
                 warn "Frontend failed after backend swap; restoring backend last-known-good image."
-                rollback_component backend || true
+                if ! rollback_component backend; then
+                    error "Backend runtime or durable identity restore failed after frontend failure."
+                fi
             fi
         fi
         exit 1

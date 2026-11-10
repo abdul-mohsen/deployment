@@ -19,50 +19,99 @@ if grep -Fq 'REAL MYSQL PR215 REHEARSAL PASSED' <<<"$missing_dsn_output"; then
 fi
 pass "missing MYSQL_REHEARSAL_DSN is not reported as a passing rehearsal"
 
-echo "=== cleanup drops only databases created by this run ==="
+echo "=== pre-existing candidates are skipped and never mutated or dropped ==="
 source scripts/lib.sh
 source scripts/tests/test-deployment-state-migration-mysql.sh
 
-MYSQL_MASTER_DB=owned_master
-DEPLOY_STATE_DB=preexisting_state
+REHEARSAL_NAME_NONCE=collision
+MYSQL_REHEARSAL_MAX_NAME_ATTEMPTS=4
+MYSQL_MASTER_DB=
+DEPLOY_STATE_DB=
 REHEARSAL_MASTER_DB_CREATED=false
 REHEARSAL_STATE_DB_CREATED=false
+REHEARSAL_RESERVED_DATABASES=()
+REHEARSAL_OWNED_DATABASES=()
+CREATED_DATABASES=()
 DROPPED_DATABASES=()
 
 run_mysql() {
     local args="$*"
     if [[ "$args" == *"information_schema.schemata"* ]]; then
-        if [[ "$args" == *"schema_name='preexisting_state'"* ]]; then
+        if [[ "$args" == *"schema_name='pr215_legacy_collision_0'"* ]]; then
             printf '1\n'
         else
             printf '0\n'
         fi
         return 0
     fi
+    if [[ "$args" == *"CREATE DATABASE"* ]]; then
+        if [[ "$args" == *"\`pr215_legacy_collision_0\`"* ]]; then
+            fail "pre-existing database candidate was mutated"
+        fi
+        if [[ "$args" == *"\`pr215_legacy_collision_1\`"* ]]; then
+            CREATED_DATABASES+=("pr215_legacy_collision_1")
+        elif [[ "$args" == *"\`pr215_state_collision_0\`"* ]]; then
+            CREATED_DATABASES+=("pr215_state_collision_0")
+        else
+            fail "unexpected database candidate was created: $args"
+        fi
+        return 0
+    fi
     if [[ "$args" == *"DROP DATABASE"* ]]; then
-        if [[ "$args" == *"\`owned_master\`"* ]]; then
-            DROPPED_DATABASES+=("owned_master")
-        elif [[ "$args" == *"\`preexisting_state\`"* ]]; then
-            DROPPED_DATABASES+=("preexisting_state")
+        if [[ "$args" == *"\`pr215_legacy_collision_1\`"* ]]; then
+            DROPPED_DATABASES+=("pr215_legacy_collision_1")
+        elif [[ "$args" == *"\`pr215_state_collision_0\`"* ]]; then
+            DROPPED_DATABASES+=("pr215_state_collision_0")
+        elif [[ "$args" == *"\`pr215_legacy_collision_0\`"* ]]; then
+            fail "cleanup dropped a pre-existing database"
         fi
     fi
 }
 
 create_rehearsal_database \
-    "$DEPLOY_STATE_DB" "deployment state" REHEARSAL_STATE_DB_CREATED
+    legacy "legacy registry" MYSQL_MASTER_DB REHEARSAL_MASTER_DB_CREATED
 create_rehearsal_database \
-    "$MYSQL_MASTER_DB" "legacy registry" REHEARSAL_MASTER_DB_CREATED
+    state "deployment state" DEPLOY_STATE_DB REHEARSAL_STATE_DB_CREATED
 cleanup_owned_databases
 
-[ "$REHEARSAL_STATE_DB_CREATED" = false ] ||
-    fail "pre-existing deployment-state database was marked as owned"
+[ "$MYSQL_MASTER_DB" = pr215_legacy_collision_1 ] ||
+    fail "pre-existing legacy candidate was reused instead of replaced"
+[ "$DEPLOY_STATE_DB" = pr215_state_collision_0 ] ||
+    fail "state database did not receive a unique candidate"
 [ "$REHEARSAL_MASTER_DB_CREATED" = true ] ||
     fail "new legacy registry database was not marked as owned"
-[ "${#DROPPED_DATABASES[@]}" -eq 1 ] ||
-    fail "cleanup did not drop exactly one owned database"
-[ "${DROPPED_DATABASES[0]}" = owned_master ] ||
-    fail "cleanup dropped a pre-existing database"
-pass "pre-existing databases survive cleanup while owned databases are removed"
+[ "$REHEARSAL_STATE_DB_CREATED" = true ] ||
+    fail "new deployment-state database was not marked as owned"
+[ "${#CREATED_DATABASES[@]}" -eq 2 ] ||
+    fail "rehearsal did not create exactly two new databases"
+[ "${#DROPPED_DATABASES[@]}" -eq 2 ] ||
+    fail "cleanup did not drop exactly two owned databases"
+pass "pre-existing candidates survive while only newly created databases are removed"
+
+echo "=== existence-check failures fail closed before CREATE DATABASE ==="
+REHEARSAL_NAME_NONCE=unavailable
+REHEARSAL_RESERVED_DATABASES=()
+REHEARSAL_OWNED_DATABASES=()
+MYSQL_MASTER_DB=
+REHEARSAL_MASTER_DB_CREATED=false
+CREATE_ATTEMPTED=false
+run_mysql() {
+    local args="$*"
+    if [[ "$args" == *"information_schema.schemata"* ]]; then
+        return 1
+    fi
+    if [[ "$args" == *"CREATE DATABASE"* ]]; then
+        CREATE_ATTEMPTED=true
+    fi
+    return 0
+}
+if create_rehearsal_database \
+    legacy "legacy registry" MYSQL_MASTER_DB REHEARSAL_MASTER_DB_CREATED; then
+    fail "rehearsal continued after the existence check failed"
+fi
+[ "$CREATE_ATTEMPTED" = false ] ||
+    fail "rehearsal attempted CREATE DATABASE without an existence result"
+pass "existence-check failures prevent unsafe database creation"
 
 echo "=== workflow skips the rehearsal when its secret is unavailable ==="
 workflow=.github/workflows/tests.yml

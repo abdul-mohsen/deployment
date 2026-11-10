@@ -116,14 +116,15 @@ verify_runtime_image_identity() {
         [ -n "$identity" ] || return 1
         IFS=$'\t' read -r actual_image_id actual_digest <<< "$identity"
 
-        matched=1
-        if [ -n "$expected_image_id" ] && [ "$actual_image_id" = "$expected_image_id" ]; then
-            matched=0
+        if [ -n "$expected_digest" ]; then
+            [ "$actual_digest" = "$expected_digest" ] || return 1
+        else
+            matched=1
+            if [ -n "$expected_image_id" ] && [ "$actual_image_id" = "$expected_image_id" ]; then
+                matched=0
+            fi
+            [ "$matched" -eq 0 ] || return 1
         fi
-        if [ -n "$expected_digest" ] && [ "$actual_digest" = "$expected_digest" ]; then
-            matched=0
-        fi
-        [ "$matched" -eq 0 ] || return 1
     done <<< "$ids"
 
     [ "$checked" -eq 1 ]

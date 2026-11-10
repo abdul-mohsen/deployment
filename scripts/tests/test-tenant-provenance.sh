@@ -93,6 +93,7 @@ echo "=== successful identity and /version verification ==="
 EXPECTED_IMAGE_ID="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 STALE_IMAGE_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 RUNTIME_IMAGE_ID="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+RUNTIME_IMAGE_DIGEST="$IMAGE_DIGEST"
 docker() {
     if [ "$1" = "ps" ]; then
         printf 'tenant-api-container\n'
@@ -122,11 +123,7 @@ docker() {
                 return 0
             fi
             if [[ "$format" == *"RepoDigests"* ]]; then
-                if [ "$RUNTIME_IMAGE_ID" = "$EXPECTED_IMAGE_ID" ]; then
-                    echo "example/api@${IMAGE_DIGEST}"
-                else
-                    echo "example/api@${STALE_IMAGE_DIGEST}"
-                fi
+                echo "example/api@${RUNTIME_IMAGE_DIGEST}"
                 return 0
             fi
             ;;
@@ -153,8 +150,18 @@ verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST"
     "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" \
     || fail "matching /version identity was rejected"
 pass "matching /version identity is accepted"
+echo "=== moved tag cannot hide a digest mismatch ==="
+RUNTIME_IMAGE_ID="$EXPECTED_IMAGE_ID"
+RUNTIME_IMAGE_DIGEST="$STALE_IMAGE_DIGEST"
+if verify_runtime_image_identity api-app "$IMAGE_DIGEST" "$BUILD_IMAGE_REF"; then
+    fail "moved tag was accepted when the running image digest mismatched"
+else
+    pass "moved tag is rejected when the running image digest mismatches"
+fi
+RUNTIME_IMAGE_DIGEST="$IMAGE_DIGEST"
 echo "=== stale environment identity cannot hide the running image ==="
 RUNTIME_IMAGE_ID="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+RUNTIME_IMAGE_DIGEST="$STALE_IMAGE_DIGEST"
 if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
     "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
     fail "stale running image was accepted when /version matched injected values"
@@ -162,6 +169,7 @@ else
     pass "stale running image is rejected independently of /version values"
 fi
 RUNTIME_IMAGE_ID="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+RUNTIME_IMAGE_DIGEST="$IMAGE_DIGEST"
 app_version_response() {
     printf '%s' '{"version":"v1.2.3","commit":"ffffffffffffffffffffffffffffffffffffffff","digest":"'"$IMAGE_DIGEST"'","image_ref":"example/api:v1.2.3","channel":"release","workflow_run_id":"42","built_at":"2026-09-07T10:00:00Z"}'
 }

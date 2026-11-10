@@ -43,6 +43,7 @@ jobs:
           bash scripts/tests/test-tenant-env-allowlist.sh
           bash scripts/tests/test-create-tenant.sh
           bash scripts/tests/test-deployment-state-migration.sh
+          bash scripts/tests/test-deployment-state-migration-mysql-contract.sh
           bash scripts/tests/test-deployment-state-provenance.sh
           bash scripts/tests/test-reconcile-runtime.sh
           bash scripts/tests/test-tenant-provenance.sh
@@ -50,7 +51,22 @@ jobs:
           bash scripts/tests/test-deployctl.sh
           bash scripts/tests/test-zatca-runtime.sh
 
+      - name: Check PR215 MySQL rehearsal availability
+        id: mysql-rehearsal
+        shell: bash
+        env:
+          MYSQL_REHEARSAL_DSN: ${{ secrets.MYSQL_REHEARSAL_DSN }}
+        run: |
+          if [ -n "$MYSQL_REHEARSAL_DSN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "MYSQL_REHEARSAL_DSN is available; real MySQL rehearsal will run."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=MySQL rehearsal skipped::MYSQL_REHEARSAL_DSN is unavailable; this workflow does not provide real MySQL rehearsal evidence."
+          fi
+
       - name: Rehearse PR215 legacy-state migration against MySQL
+        if: steps.mysql-rehearsal.outputs.available == 'true'
         shell: bash
         env:
           MYSQL_REHEARSAL_DSN: ${{ secrets.MYSQL_REHEARSAL_DSN }}

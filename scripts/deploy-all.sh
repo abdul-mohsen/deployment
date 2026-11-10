@@ -447,15 +447,14 @@ restore_previous_state() {
     local tenant="$1" app_type="$2" app="$3" previous_image="$4" previous_identity="$5"
     local restore_status=0
 
-    if ! rollback_previous_image "$app" "$previous_image"; then
-        restore_status=1
-    fi
     if ! restore_runtime_config "$app"; then
-        error "${app}: failed to restore runtime identity after image rollback"
+        error "${app}: failed to restore runtime identity before image rollback"
+        restore_status=1
+    elif ! rollback_previous_image "$app" "$previous_image"; then
         restore_status=1
     fi
     if ! restore_previous_identity "$tenant" "$app_type" "$previous_identity" "$previous_image"; then
-        error "${app}: failed to restore durable identity after image rollback"
+        error "${app}: failed to restore durable identity during rollback"
         restore_status=1
     fi
     return "$restore_status"

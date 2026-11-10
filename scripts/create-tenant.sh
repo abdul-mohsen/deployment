@@ -344,6 +344,13 @@ rollback_previous_image() {
         return 1
     fi
 
+    # git:from-image restarts the app. Restore the last-known-good runtime
+    # identity first so the old image cannot boot with candidate metadata.
+    if ! restore_runtime_config "$app"; then
+        error "${app}: failed to restore runtime identity before image rollback"
+        return 1
+    fi
+
     log "Rolling back ${app} to ${image}"
     if ! dokku_git_from_image "$app" "$image"; then
         error "${app}: failed to restore the previous image"

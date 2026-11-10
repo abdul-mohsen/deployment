@@ -1739,6 +1739,115 @@ require_registry_tenant_key() {
     fi
 }
 
+# legacy_tenant_column_expr <columns> <column> [fallback]
+#   Return a safe SQL expression for a column from the legacy registry. Older
+#   installations do not have every provenance column, so the upgrade must not
+#   fail merely because an optional legacy column is absent.
+legacy_tenant_column_expr() {
+    local columns="$1" column="$2" fallback="${3:-''}"
+    if printf '%s\n' "$columns" | grep -Fxq "$column"; then
+        printf 'IFNULL(t.`%s`, %s)' "$column" "$fallback"
+    else
+        printf '%s' "$fallback"
+    fi
+}
+
+# migrate_legacy_deployment_state
+#   Copy pins and verified identity from the pre-deployment_state registry
+#   columns. Existing deployment-owned rows win, including an explicit empty
+#   pin (which means the operator intentionally unpinned that component).
+#   This makes setup and upgrade reruns safe.
+migrate_legacy_deployment_state() {
+    local master="${MYSQL_MASTER_DB:-zatca_master}"
+    local state="${DEPLOY_STATE_DB:-deployment_state}"
+    local table_count source_columns
+    local name_expr
+    local backend_image frontend_image
+    local backend_image_ref backend_image_digest backend_channel backend_version
+    local backend_commit backend_commit_short backend_workflow_run backend_workflow_run_url
+    local backend_built_at backend_deployed_at backend_deployment_status backend_deployment_error
+    local frontend_image_ref frontend_image_digest frontend_channel frontend_version
+    local frontend_commit frontend_commit_short frontend_workflow_run frontend_workflow_run_url
+    local frontend_built_at frontend_deployed_at frontend_deployment_status frontend_deployment_error
+
+    validate_database_identifier "$master" || return 1
+    validate_database_identifier "$state" || return 1
+
+    table_count="$(run_mysql -N -B -e \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${master}' AND table_name='tenant';")" ||
+        return 1
+    table_count="$(printf '%s\n' "$table_count" | awk 'NF { print $1; exit }')"
+    [ "$table_count" = "1" ] || return 0
+
+    source_columns="$(run_mysql -N -B -e \
+        "SELECT column_name FROM information_schema.columns WHERE table_schema='${master}' AND table_name='tenant';")" ||
+        return 1
+    printf '%s\n' "$source_columns" | grep -Fxq name || return 0
+
+    name_expr="$(legacy_tenant_column_expr "$source_columns" name "''")"
+    backend_image="$(legacy_tenant_column_expr "$source_columns" backend_image "''")"
+    frontend_image="$(legacy_tenant_column_expr "$source_columns" frontend_image "''")"
+    backend_image_ref="$(legacy_tenant_column_expr "$source_columns" backend_image_ref "''")"
+    backend_image_digest="$(legacy_tenant_column_expr "$source_columns" backend_image_digest "''")"
+    backend_channel="$(legacy_tenant_column_expr "$source_columns" backend_channel "''")"
+    backend_version="$(legacy_tenant_column_expr "$source_columns" backend_version "''")"
+    backend_commit="$(legacy_tenant_column_expr "$source_columns" backend_commit "''")"
+    backend_commit_short="$(legacy_tenant_column_expr "$source_columns" backend_commit_short "''")"
+    backend_workflow_run="$(legacy_tenant_column_expr "$source_columns" backend_workflow_run "''")"
+    backend_workflow_run_url="$(legacy_tenant_column_expr "$source_columns" backend_workflow_run_url "''")"
+    backend_built_at="$(legacy_tenant_column_expr "$source_columns" backend_built_at "''")"
+    backend_deployed_at="$(legacy_tenant_column_expr "$source_columns" backend_deployed_at "NULL")"
+    backend_deployment_status="$(legacy_tenant_column_expr "$source_columns" backend_deployment_status "'unknown'")"
+    backend_deployment_error="$(legacy_tenant_column_expr "$source_columns" backend_deployment_error "''")"
+    frontend_image_ref="$(legacy_tenant_column_expr "$source_columns" frontend_image_ref "''")"
+    frontend_image_digest="$(legacy_tenant_column_expr "$source_columns" frontend_image_digest "''")"
+    frontend_channel="$(legacy_tenant_column_expr "$source_columns" frontend_channel "''")"
+    frontend_version="$(legacy_tenant_column_expr "$source_columns" frontend_version "''")"
+    frontend_commit="$(legacy_tenant_column_expr "$source_columns" frontend_commit "''")"
+    frontend_commit_short="$(legacy_tenant_column_expr "$source_columns" frontend_commit_short "''")"
+    frontend_workflow_run="$(legacy_tenant_column_expr "$source_columns" frontend_workflow_run "''")"
+    frontend_workflow_run_url="$(legacy_tenant_column_expr "$source_columns" frontend_workflow_run_url "''")"
+    frontend_built_at="$(legacy_tenant_column_expr "$source_columns" frontend_built_at "''")"
+    frontend_deployed_at="$(legacy_tenant_column_expr "$source_columns" frontend_deployed_at "NULL")"
+    frontend_deployment_status="$(legacy_tenant_column_expr "$source_columns" frontend_deployment_status "'unknown'")"
+    frontend_deployment_error="$(legacy_tenant_column_expr "$source_columns" frontend_deployment_error "''")"
+
+    run_mysql "$state" <<SQL
+INSERT INTO \`${state}\`.tenant_image (name, backend_image, frontend_image)
+SELECT ${name_expr}, ${backend_image}, ${frontend_image}
+FROM \`${master}\`.tenant AS t
+WHERE ${name_expr} <> ''
+ON DUPLICATE KEY UPDATE
+    name=VALUES(name);
+
+INSERT INTO \`${state}\`.tenant_identity (
+    name,
+    backend_image_ref, backend_image_digest, backend_channel, backend_version,
+    backend_commit, backend_commit_short, backend_workflow_run,
+    backend_workflow_run_url, backend_built_at, backend_deployment_status,
+    backend_deployed_at, backend_deployment_error,
+    frontend_image_ref, frontend_image_digest, frontend_channel, frontend_version,
+    frontend_commit, frontend_commit_short, frontend_workflow_run,
+    frontend_workflow_run_url, frontend_built_at, frontend_deployment_status,
+    frontend_deployed_at, frontend_deployment_error
+)
+SELECT
+    ${name_expr},
+    ${backend_image_ref}, ${backend_image_digest}, ${backend_channel}, ${backend_version},
+    ${backend_commit}, ${backend_commit_short}, ${backend_workflow_run},
+    ${backend_workflow_run_url}, ${backend_built_at}, ${backend_deployment_status},
+    ${backend_deployed_at}, ${backend_deployment_error},
+    ${frontend_image_ref}, ${frontend_image_digest}, ${frontend_channel}, ${frontend_version},
+    ${frontend_commit}, ${frontend_commit_short}, ${frontend_workflow_run},
+    ${frontend_workflow_run_url}, ${frontend_built_at}, ${frontend_deployment_status},
+    ${frontend_deployed_at}, ${frontend_deployment_error}
+FROM \`${master}\`.tenant AS t
+WHERE ${name_expr} <> ''
+ON DUPLICATE KEY UPDATE
+    name=VALUES(name);
+SQL
+}
+
 # ensure_deployment_state_schema
 #   Creates the deployment-owned database and its tables if they are missing. These
 #   are the only tables this repo creates; zatca_master and tenant DBs are never
@@ -1808,6 +1917,7 @@ CREATE TABLE IF NOT EXISTS \`${DEPLOY_STATE_DB}\`.tenant_deployment_audit (
     INDEX idx_tenant_deployment_audit_status (status, started_at)
 ) ENGINE=InnoDB;
 SQL
+    migrate_legacy_deployment_state
 }
 
 # verified_tenant_db_backup <tenant> [backup-dir]

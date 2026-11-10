@@ -65,6 +65,71 @@ provenance_repo_digest() {
     return 1
 }
 
+runtime_container_ids() {
+    local app="$1" ids=""
+    ids="$(docker ps \
+        --filter "label=com.dokku.app-name=${app}" \
+        --filter "label=com.dokku.process-type=web" \
+        --format '{{.ID}}' 2>/dev/null || true)"
+    if [ -z "$ids" ]; then
+        ids="$(docker ps \
+            --filter "label=com.dokku.app-name=${app}" \
+            --format '{{.ID}}' 2>/dev/null || true)"
+    fi
+    if [ -z "$ids" ]; then
+        ids="$(docker ps \
+            --filter "name=^${app}\.web\." \
+            --format '{{.ID}}' 2>/dev/null || true)"
+    fi
+    printf '%s\n' "$ids" | awk 'NF'
+}
+
+runtime_container_image_identity() {
+    local container_id="$1" image_id actual_digest=""
+    image_id="$(docker inspect --format '{{.Image}}' "$container_id" 2>/dev/null || true)"
+    [ -n "$image_id" ] || return 1
+
+    actual_digest="$(docker image inspect \
+        --format='{{range .RepoDigests}}{{println .}}{{end}}' \
+        "$image_id" 2>/dev/null |
+        awk -F@ '$2 ~ /^sha256:[0-9a-fA-F]{64}$/ { print $2; exit }')"
+    printf '%s\t%s' "$image_id" "$actual_digest"
+}
+
+verify_runtime_image_identity() {
+    local app="$1" expected_digest="$2" expected_ref="$3"
+    local expected_image_id="" ids="" container_id identity actual_image_id actual_digest
+    local matched checked=0
+
+    if [ -n "$expected_ref" ]; then
+        expected_image_id="$(docker image inspect --format '{{.Id}}' "$expected_ref" \
+            2>/dev/null || true)"
+        expected_image_id="${expected_image_id//$'\n'/}"
+    fi
+
+    ids="$(runtime_container_ids "$app")"
+    [ -n "$ids" ] || return 1
+    while IFS= read -r container_id; do
+        [ -n "$container_id" ] || continue
+        checked=1
+        identity="$(runtime_container_image_identity "$container_id" || true)"
+        [ -n "$identity" ] || return 1
+        IFS=$'\t' read -r actual_image_id actual_digest <<< "$identity"
+
+        if [ -n "$expected_digest" ]; then
+            [ "$actual_digest" = "$expected_digest" ] || return 1
+        else
+            matched=1
+            if [ -n "$expected_image_id" ] && [ "$actual_image_id" = "$expected_image_id" ]; then
+                matched=0
+            fi
+            [ "$matched" -eq 0 ] || return 1
+        fi
+    done <<< "$ids"
+
+    [ "$checked" -eq 1 ]
+}
+
 provenance_override_enabled() {
     [ "${TENANT_PROVENANCE_OVERRIDE:-0}" = "1" ] || return 1
     case "${DEPLOY_ENV:-${ZATCA_ENV:-production}}" in
@@ -207,12 +272,38 @@ app_version_response() {
     printf '%s' "$response"
 }
 
+runtime_health_check() {
+    local app="$1" path="${2:-/healthz}" container="${DOKKU_CONTAINER:-dokku}" port
+    port="$(dokku_app_port "$app")"
+    docker exec -i "$container" sh -lc \
+        "curl -fsS --max-time 10 http://${app}.web:${port}${path} >/dev/null" \
+        2>/dev/null && return 0
+    docker exec -i "$container" sh -lc \
+        "wget -qO- -T 10 http://${app}.web:${port}${path} >/dev/null" \
+        2>/dev/null
+}
+
+wait_for_runtime_health() {
+    local app="$1" path="${2:-/healthz}"
+    local retries="${3:-${TENANT_VERIFY_RETRIES:-15}}"
+    local delay="${4:-${TENANT_VERIFY_DELAY:-2}}" attempt
+    for ((attempt=1; attempt<=retries; attempt++)); do
+        if runtime_health_check "$app" "$path"; then
+            return 0
+        fi
+        [ "$attempt" -lt "$retries" ] && sleep "$delay"
+    done
+    return 1
+}
+
 verify_runtime_identity() {
     local app="$1" expected_version="$2" expected_commit="$3"
     local expected_digest="$4" expected_ref="$5" expected_channel="$6"
     local expected_workflow_id="$7" expected_workflow_url="$8" expected_built_at="$9" response
     local actual_version actual_commit actual_digest actual_ref actual_channel
     local actual_workflow_id actual_workflow_url actual_built_at
+
+    verify_runtime_image_identity "$app" "$expected_digest" "$expected_ref" || return 1
 
     if provenance_override_enabled; then
         echo "[!] Non-production provenance override enabled; skipping strict /version identity check." >&2
@@ -253,36 +344,7 @@ provenance_sql_escape() {
 }
 
 ensure_tenant_provenance_schema() {
-    local db="${MYSQL_MASTER_DB:-zatca_master}"
-    ensure_tenant_provenance_columns "$db" || return
-    run_mysql "$db" <<'SQL'
-CREATE TABLE IF NOT EXISTS tenant_deployment_audit (
-    id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    tenant_name VARCHAR(100) NOT NULL,
-    app_type VARCHAR(16) NOT NULL,
-    requested_image_ref VARCHAR(512) NOT NULL DEFAULT '',
-    resolved_image_ref VARCHAR(512) NOT NULL DEFAULT '',
-    image_digest VARCHAR(255) NOT NULL DEFAULT '',
-    channel VARCHAR(64) NOT NULL DEFAULT '',
-    semantic_version VARCHAR(128) NOT NULL DEFAULT '',
-    commit_sha VARCHAR(128) NOT NULL DEFAULT '',
-    commit_short VARCHAR(32) NOT NULL DEFAULT '',
-    workflow_run VARCHAR(128) NOT NULL DEFAULT '',
-    workflow_run_url VARCHAR(512) NOT NULL DEFAULT '',
-    built_at VARCHAR(64) NOT NULL DEFAULT '',
-    previous_image_ref VARCHAR(512) NOT NULL DEFAULT '',
-    previous_image_digest VARCHAR(255) NOT NULL DEFAULT '',
-    backup_id VARCHAR(255) NOT NULL DEFAULT '',
-    backup_db_artifact VARCHAR(512) NOT NULL DEFAULT '',
-    status VARCHAR(32) NOT NULL,
-    error_message TEXT NULL,
-    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    completed_at TIMESTAMP NULL DEFAULT NULL,
-    INDEX idx_tenant_deployment_audit_tenant (tenant_name, started_at),
-    INDEX idx_tenant_deployment_audit_status (status, started_at)
-) ENGINE=InnoDB;
-SQL
-    ensure_tenant_audit_columns "$db"
+    ensure_deployment_state_schema
 }
 
 tenant_record_audit() {
@@ -291,7 +353,7 @@ tenant_record_audit() {
     local workflow="${10}" workflow_url="${11}" built_at="${12}" previous_ref="${13}"
     local previous_digest="${14}" status="${15}" error_message="${16:-}"
     local backup_id="${17:-}" backup_db_artifact="${18:-}"
-    local db="${MYSQL_MASTER_DB:-zatca_master}"
+    local db="${DEPLOY_STATE_DB:-deployment_state}"
     run_mysql "$db" -e "INSERT INTO tenant_deployment_audit
         (tenant_name, app_type, requested_image_ref, resolved_image_ref,
          image_digest, channel, semantic_version, commit_sha, commit_short,
@@ -322,57 +384,83 @@ tenant_record_audit() {
 tenant_record_identity() {
     local tenant="$1" app_type="$2" requested="$3"
     local resolved="$4" digest="$5" channel="$6" version="$7"
-    local     commit_sha="$8" commit_short="$9" workflow="${10}" workflow_url="${11}" built_at="${12}"
-    local db="${MYSQL_MASTER_DB:-zatca_master}" p
+    local commit_sha="$8" commit_short="$9" workflow="${10}" workflow_url="${11}" built_at="${12}"
+    local db="${DEPLOY_STATE_DB:-deployment_state}" p
     case "$app_type" in backend|frontend) p="$app_type" ;; *) return 1 ;; esac
-    run_mysql "$db" -e "UPDATE tenant SET
-        ${p}_image_ref='$(provenance_sql_escape "$requested")',
-        ${p}_image_digest='$(provenance_sql_escape "$digest")',
-        ${p}_channel='$(provenance_sql_escape "$channel")',
-        ${p}_version='$(provenance_sql_escape "$version")',
-        ${p}_commit='$(provenance_sql_escape "$commit_sha")',
-        ${p}_commit_short='$(provenance_sql_escape "$commit_short")',
-        ${p}_workflow_run='$(provenance_sql_escape "$workflow")',
-        ${p}_workflow_run_url='$(provenance_sql_escape "$workflow_url")',
-        ${p}_built_at='$(provenance_sql_escape "$built_at")',
-        ${p}_deployed_at=NOW(),
+    run_mysql "$db" -e "INSERT INTO tenant_identity
+        (name, ${p}_image_ref, ${p}_image_digest, ${p}_channel,
+         ${p}_version, ${p}_commit, ${p}_commit_short, ${p}_workflow_run,
+         ${p}_workflow_run_url, ${p}_built_at, ${p}_deployment_status,
+         ${p}_deployed_at, ${p}_deployment_error)
+      VALUES
+        ('$(provenance_sql_escape "$tenant")',
+         '$(provenance_sql_escape "$requested")',
+         '$(provenance_sql_escape "$digest")',
+         '$(provenance_sql_escape "$channel")',
+         '$(provenance_sql_escape "$version")',
+         '$(provenance_sql_escape "$commit_sha")',
+         '$(provenance_sql_escape "$commit_short")',
+         '$(provenance_sql_escape "$workflow")',
+         '$(provenance_sql_escape "$workflow_url")',
+         '$(provenance_sql_escape "$built_at")',
+         'verified', NOW(), '')
+      ON DUPLICATE KEY UPDATE
+        ${p}_image_ref=VALUES(${p}_image_ref),
+        ${p}_image_digest=VALUES(${p}_image_digest),
+        ${p}_channel=VALUES(${p}_channel),
+        ${p}_version=VALUES(${p}_version),
+        ${p}_commit=VALUES(${p}_commit),
+        ${p}_commit_short=VALUES(${p}_commit_short),
+        ${p}_workflow_run=VALUES(${p}_workflow_run),
+        ${p}_workflow_run_url=VALUES(${p}_workflow_run_url),
+        ${p}_built_at=VALUES(${p}_built_at),
         ${p}_deployment_status='verified',
-        ${p}_deployment_error=''
-      WHERE name='$(provenance_sql_escape "$tenant")' LIMIT 1;"
+        ${p}_deployed_at=NOW(),
+        ${p}_deployment_error='';"
 }
 
 tenant_record_failure() {
     local tenant="$1" app_type="$2" message="$3"
-    local db="${MYSQL_MASTER_DB:-zatca_master}" p
+    local db="${DEPLOY_STATE_DB:-deployment_state}" p
     case "$app_type" in backend|frontend) p="$app_type" ;; *) return 1 ;; esac
-    run_mysql "$db" -e "UPDATE tenant SET
+    run_mysql "$db" -e "INSERT INTO tenant_identity
+        (name, ${p}_deployment_status, ${p}_deployment_error)
+      VALUES ('$(provenance_sql_escape "$tenant")', 'failed',
+              '$(provenance_sql_escape "$message")')
+      ON DUPLICATE KEY UPDATE
         ${p}_deployment_status='failed',
-        ${p}_deployment_error='$(provenance_sql_escape "$message")'
-      WHERE name='$(provenance_sql_escape "$tenant")' LIMIT 1;" || return 1
+        ${p}_deployment_error='$(provenance_sql_escape "$message")';" || return 1
 }
 
 tenant_clear_identity() {
     local tenant="$1" app_type="$2" message="${3:-rollback left no known-good identity}"
-    local db="${MYSQL_MASTER_DB:-zatca_master}" p
+    local db="${DEPLOY_STATE_DB:-deployment_state}" p
     case "$app_type" in backend|frontend) p="$app_type" ;; *) return 1 ;; esac
-    run_mysql "$db" -e "UPDATE tenant SET
+    run_mysql "$db" -e "INSERT INTO tenant_identity
+        (name, ${p}_image_ref, ${p}_image_digest, ${p}_channel, ${p}_version,
+         ${p}_commit, ${p}_commit_short, ${p}_workflow_run, ${p}_workflow_run_url,
+         ${p}_built_at, ${p}_deployed_at, ${p}_deployment_status, ${p}_deployment_error)
+      VALUES ('$(provenance_sql_escape "$tenant")', '', '', '', '', '', '', '', '',
+              '', NULL, 'failed', '$(provenance_sql_escape "$message")')
+      ON DUPLICATE KEY UPDATE
         ${p}_image_ref='', ${p}_image_digest='', ${p}_channel='',
         ${p}_version='', ${p}_commit='', ${p}_commit_short='',
-        ${p}_workflow_run='', ${p}_workflow_run_url='', ${p}_built_at='', ${p}_deployed_at=NULL,
-        ${p}_deployment_status='failed',
-        ${p}_deployment_error='$(provenance_sql_escape "$message")'
-      WHERE name='$(provenance_sql_escape "$tenant")' LIMIT 1;"
+        ${p}_workflow_run='', ${p}_workflow_run_url='', ${p}_built_at='',
+        ${p}_deployed_at=NULL, ${p}_deployment_status='failed',
+        ${p}_deployment_error='$(provenance_sql_escape "$message")';"
 }
 
 tenant_current_identity() {
-    local tenant="$1" app_type="$2" db="${MYSQL_MASTER_DB:-zatca_master}" p
+    local tenant="$1" app_type="$2" db="${DEPLOY_STATE_DB:-deployment_state}" p identity
     case "$app_type" in backend|frontend) p="$app_type" ;; *) return 1 ;; esac
-    run_mysql -N -B "$db" -e "SELECT
-        IFNULL(${p}_image_ref,''), IFNULL(${p}_image_digest,''),
-        IFNULL(${p}_channel,''), IFNULL(${p}_version,''),
-        IFNULL(${p}_commit,''), IFNULL(${p}_commit_short,''),
-        IFNULL(${p}_workflow_run,''), IFNULL(${p}_workflow_run_url,''),
-        IFNULL(${p}_built_at,'')
-      FROM tenant WHERE name='$(provenance_sql_escape "$tenant")' LIMIT 1;" 2>/dev/null |
-        head -n1
+    if ! identity="$(run_mysql -N -B "$db" -e "SELECT
+            IFNULL(${p}_image_ref,''), IFNULL(${p}_image_digest,''),
+            IFNULL(${p}_channel,''), IFNULL(${p}_version,''),
+            IFNULL(${p}_commit,''), IFNULL(${p}_commit_short,''),
+            IFNULL(${p}_workflow_run,''), IFNULL(${p}_workflow_run_url,''),
+            IFNULL(${p}_built_at,'')
+          FROM tenant_identity WHERE name='$(provenance_sql_escape "$tenant")' LIMIT 1;" 2>/dev/null)"; then
+        return 1
+    fi
+    printf '%s\n' "${identity%%$'\n'*}"
 }

@@ -29,6 +29,10 @@ echo "=== runtime identity snapshots include image tag and short commit ==="
 for file in scripts/create-tenant.sh scripts/update-tenant.sh scripts/deploy-all.sh; do
     contains "$file" "APP_IMAGE_TAG" "$file omits APP_IMAGE_TAG"
     contains "$file" "APP_IMAGE_COMMIT_SHORT" "$file omits APP_IMAGE_COMMIT_SHORT"
+    contains "$file" "provenance_previous_image_ref" \
+        "$file does not capture an immutable prior image reference"
+    contains "$file" "verify_runtime_immutable_image" \
+        "$file does not independently verify the running rollback image"
     if grep -Fq "IFS=\$'\\t' read" "$file"; then
         fail "$file parses tab-delimited identity with collapsing IFS/read"
     fi

@@ -186,6 +186,11 @@ assert_image_versions_match() {
 
 current_app_image() {
     local app="$1" image report config_value
+    config_value="$(dokku config:get "$app" APP_IMAGE_RESOLVED_REF 2>/dev/null || true)"
+    if [[ "$config_value" == *@sha256:* ]]; then
+        printf '%s' "$(printf '%s\n' "$config_value" | awk 'NF {print; exit}')"
+        return 0
+    fi
     report="$(dokku git:report "$app" 2>/dev/null || true)"
     image="$(printf '%s\n' "$report" |
         awk -F': ' 'tolower($1) ~ /source-image/ {print $2; exit}')"
@@ -251,8 +256,12 @@ record_failure() {
     fi
     local resolved_ref="${requested%@*}@${digest}"
     split_tab_fields "${PREVIOUS_DB_IDENTITY[$component]:-}"
-    previous_ref="${TAB_FIELDS[0]-}"
+    previous_ref="$(provenance_previous_image_ref "${TAB_FIELDS[0]-}" "${TAB_FIELDS[1]-}" \
+        "${PREVIOUS_IMAGE[$component]:-}" || true)"
     previous_digest="${TAB_FIELDS[1]-}"
+    if [ -z "$previous_digest" ] && [[ "$previous_ref" == *@* ]]; then
+        previous_digest="${previous_ref##*@}"
+    fi
     tenant_record_failure "$TENANT_NAME" "$component" "$message" 2>/dev/null || true
     tenant_record_audit "$TENANT_NAME" "$component" "$requested" "$resolved_ref" "$digest" \
         "$channel" "$version" "$commit_sha" "$commit_short" "$workflow" "$workflow_url" "$built_at" \
@@ -263,7 +272,7 @@ record_failure() {
 rollback_component() {
     local component="$1" app image
     local old_ref old_digest old_channel old_version old_commit old_short
-    local old_workflow old_workflow_url old_built
+    local old_workflow old_workflow_url old_built old_resolved
     app="${TENANT_NAME}-${component}"
     image="${PREVIOUS_IMAGE[$component]:-}"
     if [ "$component" = "backend" ] && $MIGRATIONS_APPLIED; then
@@ -280,12 +289,20 @@ rollback_component() {
         fi
         return 1
     fi
+    if ! image="$(provenance_immutable_image_ref "$image")"; then
+        error "${app}: previous image rollback requires an immutable digest reference"
+        return 1
+    fi
     log "Rolling back ${app} to ${image}"
     if ! dokku_git_from_image "$app" "$image"; then
         error "${app}: rollback failed"
         if ! restore_runtime_config "$app"; then
             error "${app}: failed to restore runtime identity after rollback failure"
         fi
+        return 1
+    fi
+    if ! verify_runtime_immutable_image "$app" "$image"; then
+        error "${app}: running image does not match the immutable rollback reference ${image}"
         return 1
     fi
     if ! restore_runtime_config "$app"; then
@@ -304,7 +321,9 @@ rollback_component() {
         old_workflow="${TAB_FIELDS[6]-}"
         old_workflow_url="${TAB_FIELDS[7]-}"
         old_built="${TAB_FIELDS[8]-}"
-        if ! tenant_record_identity "$TENANT_NAME" "$component" "$old_ref" "$old_ref" \
+        old_resolved="$(provenance_immutable_image_ref "$old_ref" "$old_digest" \
+            "${PREVIOUS_IMAGE[$component]:-}" || true)"
+        if ! tenant_record_identity "$TENANT_NAME" "$component" "$old_ref" "${old_resolved:-$old_ref}" \
             "$old_digest" "$old_channel" "$old_version" "$old_commit" "$old_short" \
             "$old_workflow" "$old_workflow_url" "$old_built"; then
             error "${app}: failed to restore durable identity"
@@ -318,6 +337,33 @@ rollback_component() {
         fi
     fi
     return 0
+}
+
+restore_previous_identity() {
+    local component="$1"
+    local old_ref old_digest old_channel old_version old_commit old_short
+    local old_workflow old_workflow_url old_built old_resolved
+
+    split_tab_fields "${PREVIOUS_DB_IDENTITY[$component]:-}"
+    old_ref="${TAB_FIELDS[0]-}"
+    old_digest="${TAB_FIELDS[1]-}"
+    if [ -n "$old_ref" ] || [ -n "$old_digest" ]; then
+        old_channel="${TAB_FIELDS[2]-}"
+        old_version="${TAB_FIELDS[3]-}"
+        old_commit="${TAB_FIELDS[4]-}"
+        old_short="${TAB_FIELDS[5]-}"
+        old_workflow="${TAB_FIELDS[6]-}"
+        old_workflow_url="${TAB_FIELDS[7]-}"
+        old_built="${TAB_FIELDS[8]-}"
+        old_resolved="$(provenance_immutable_image_ref "$old_ref" "$old_digest" \
+            "${PREVIOUS_IMAGE[$component]:-}" || true)"
+        tenant_record_identity "$TENANT_NAME" "$component" "$old_ref" "${old_resolved:-$old_ref}" \
+            "$old_digest" "$old_channel" "$old_version" "$old_commit" "$old_short" \
+            "$old_workflow" "$old_workflow_url" "$old_built"
+    else
+        tenant_clear_identity "$TENANT_NAME" "$component" \
+            "deployment rolled back; no prior verified identity"
+    fi
 }
 
 verify_component() {
@@ -404,6 +450,9 @@ deploy_component() {
         record_failure "$component" "$image" "failed to set runtime identity"
         if ! restore_runtime_config "$app"; then
             error "${app}: failed to restore runtime identity after config failure"
+        fi
+        if ! restore_previous_identity "$component"; then
+            error "${app}: failed to restore durable identity after config failure"
         fi
         return 1
     fi
@@ -531,11 +580,6 @@ for component in backend frontend; do
     image="${!image:-}"
     [ -n "$image" ] || continue
     app="${TENANT_NAME}-${component}"
-    if ! previous_image="$(current_app_image "$app")"; then
-        error "${app}: failed to read the current image identity"
-        exit 1
-    fi
-    PREVIOUS_IMAGE["$component"]="$previous_image"
     if ! capture_runtime_config "$app"; then
         error "${app}: failed to capture current runtime identity"
         exit 1
@@ -545,6 +589,16 @@ for component in backend frontend; do
         exit 1
     fi
     PREVIOUS_DB_IDENTITY["$component"]="$previous_identity"
+    split_tab_fields "$previous_identity"
+    previous_observed_image="$(current_app_image "$app" || true)"
+    if ! previous_image="$(provenance_previous_image_ref \
+        "${TAB_FIELDS[0]-}" "${TAB_FIELDS[1]-}" \
+        "${PREVIOUS_CONFIG["$app:APP_IMAGE_RESOLVED_REF"]:-}" \
+        "$previous_observed_image")"; then
+        error "${app}: failed to capture an immutable current image identity"
+        exit 1
+    fi
+    PREVIOUS_IMAGE["$component"]="$previous_image"
     if ! ensure_update_image_available "$image"; then
         record_failure "$component" "$image" "image pull/availability check failed"
         exit 1

@@ -197,6 +197,11 @@ image_tag() {
 
 current_app_image() {
     local app="$1" image report config_value
+    config_value="$(dokku config:get "$app" APP_IMAGE_RESOLVED_REF 2>/dev/null || true)"
+    if [[ "$config_value" == *@sha256:* ]]; then
+        printf '%s' "$(printf '%s\n' "$config_value" | awk 'NF {print; exit}')"
+        return 0
+    fi
     report="$(dokku git:report "$app" 2>/dev/null || true)"
     image="$(printf '%s\n' "$report" |
         awk -F': ' 'tolower($1) ~ /source-image/ {print $2; exit}')"
@@ -275,7 +280,7 @@ restore_previous_identity() {
     local app_type="$1"
     local previous="${PREVIOUS_IDENTITY[$app_type]:-}"
     local old_ref old_digest old_channel old_version old_commit old_short
-    local old_workflow old_workflow_url old_built
+    local old_workflow old_workflow_url old_built old_resolved
     split_tab_fields "$previous"
     old_ref="${TAB_FIELDS[0]-}"
     old_digest="${TAB_FIELDS[1]-}"
@@ -286,8 +291,10 @@ restore_previous_identity() {
     old_workflow="${TAB_FIELDS[6]-}"
     old_workflow_url="${TAB_FIELDS[7]-}"
     old_built="${TAB_FIELDS[8]-}"
+    old_resolved="$(provenance_immutable_image_ref "$old_ref" "$old_digest" \
+        "${PREVIOUS_IMAGE[$app_type]:-}" || true)"
     if [ -n "$old_ref" ] || [ -n "$old_digest" ]; then
-        if ! tenant_record_identity "$TENANT_NAME" "$app_type" "$old_ref" "$old_ref" \
+        if ! tenant_record_identity "$TENANT_NAME" "$app_type" "$old_ref" "${old_resolved:-$old_ref}" \
             "$old_digest" "$old_channel" "$old_version" "$old_commit" "$old_short" \
             "$old_workflow" "$old_workflow_url" "$old_built"; then
             error "Failed to restore durable identity for ${TENANT_NAME}-${app_type}."
@@ -320,10 +327,18 @@ rollback_previous_image() {
         error "${app}: no previous image is recorded; cannot safely restore the candidate image."
         return 1
     fi
+    if ! image="$(provenance_immutable_image_ref "$image")"; then
+        error "${app}: previous image rollback requires an immutable digest reference."
+        return 1
+    fi
 
     log "Rolling back ${app} to ${image}"
     if ! dokku_git_from_image "$app" "$image"; then
         error "${app}: failed to restore the previous image"
+        return 1
+    fi
+    if ! verify_runtime_immutable_image "$app" "$image"; then
+        error "${app}: running image does not match the immutable rollback reference ${image}"
         return 1
     fi
     return 0
@@ -332,14 +347,13 @@ rollback_previous_image() {
 record_deployment_failure() {
     local app_type="$1" image="$2" message="$3"
     local app="${TENANT_NAME}-${app_type}" resolved_ref="${image%@*}@${BUILD_DIGEST}"
-    local previous_ref="" previous_digest="" rollback_status=0 restore_status=0
+    local previous_ref="" previous_digest="" previous_requested="" rollback_status=0 restore_status=0
     local failure_message="$message"
     split_tab_fields "${PREVIOUS_IDENTITY[$app_type]:-}"
-    previous_ref="${PREVIOUS_IMAGE[$app_type]:-${TAB_FIELDS[0]-}}"
+    previous_requested="${TAB_FIELDS[0]-}"
     previous_digest="${TAB_FIELDS[1]-}"
-    if [ -z "$previous_digest" ] && [[ "$previous_ref" == *@* ]]; then
-        previous_digest="${previous_ref##*@}"
-    fi
+    previous_ref="$(provenance_previous_image_ref "$previous_requested" "$previous_digest" \
+        "${PREVIOUS_IMAGE[$app_type]:-}" || true)"
 
     rollback_previous_image "$app_type" || rollback_status=$?
     case "$rollback_status" in
@@ -947,15 +961,6 @@ if ! $GIT_ONLY; then
             error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
             exit 1
         fi
-        if [ "$BACKEND_APP_EXISTED" = true ]; then
-            if ! previous_image="$(current_app_image "$BACKEND_APP")"; then
-                error "Failed to read the current image identity for ${BACKEND_APP}; refusing an untracked --update."
-                exit 1
-            fi
-            PREVIOUS_IMAGE["backend"]="$previous_image"
-        else
-            PREVIOUS_IMAGE["backend"]=""
-        fi
         if ! capture_runtime_config "$BACKEND_APP"; then
             error "Failed to capture current runtime identity for ${BACKEND_APP}."
             exit 1
@@ -965,6 +970,20 @@ if ! $GIT_ONLY; then
             exit 1
         fi
         PREVIOUS_IDENTITY["backend"]="$previous_identity"
+        if [ "$BACKEND_APP_EXISTED" = true ]; then
+            split_tab_fields "$previous_identity"
+            previous_observed_image="$(current_app_image "$BACKEND_APP" || true)"
+            if ! previous_image="$(provenance_previous_image_ref \
+                "${TAB_FIELDS[0]-}" "${TAB_FIELDS[1]-}" \
+                "${PREVIOUS_CONFIG["$BACKEND_APP:APP_IMAGE_RESOLVED_REF"]:-}" \
+                "$previous_observed_image")"; then
+                error "Failed to capture an immutable current image identity for ${BACKEND_APP}; refusing an untracked --update."
+                exit 1
+            fi
+            PREVIOUS_IMAGE["backend"]="$previous_image"
+        else
+            PREVIOUS_IMAGE["backend"]=""
+        fi
         if ! set_runtime_build_identity "$BACKEND_APP" "$BACKEND_IMAGE"; then
             error "Failed to set verified backend BuildIdentity for ${BACKEND_APP}."
             record_deployment_failure backend "$BACKEND_IMAGE" \
@@ -1009,15 +1028,6 @@ if ! $GIT_ONLY; then
             error "Image is missing or inconsistent OCI BuildIdentity labels: $FRONTEND_IMAGE"
             exit 1
         fi
-        if [ "$FRONTEND_APP_EXISTED" = true ]; then
-            if ! previous_image="$(current_app_image "$FRONTEND_APP")"; then
-                error "Failed to read the current image identity for ${FRONTEND_APP}; refusing an untracked --update."
-                exit 1
-            fi
-            PREVIOUS_IMAGE["frontend"]="$previous_image"
-        else
-            PREVIOUS_IMAGE["frontend"]=""
-        fi
         if ! capture_runtime_config "$FRONTEND_APP"; then
             error "Failed to capture current runtime identity for ${FRONTEND_APP}."
             exit 1
@@ -1027,6 +1037,20 @@ if ! $GIT_ONLY; then
             exit 1
         fi
         PREVIOUS_IDENTITY["frontend"]="$previous_identity"
+        if [ "$FRONTEND_APP_EXISTED" = true ]; then
+            split_tab_fields "$previous_identity"
+            previous_observed_image="$(current_app_image "$FRONTEND_APP" || true)"
+            if ! previous_image="$(provenance_previous_image_ref \
+                "${TAB_FIELDS[0]-}" "${TAB_FIELDS[1]-}" \
+                "${PREVIOUS_CONFIG["$FRONTEND_APP:APP_IMAGE_RESOLVED_REF"]:-}" \
+                "$previous_observed_image")"; then
+                error "Failed to capture an immutable current image identity for ${FRONTEND_APP}; refusing an untracked --update."
+                exit 1
+            fi
+            PREVIOUS_IMAGE["frontend"]="$previous_image"
+        else
+            PREVIOUS_IMAGE["frontend"]=""
+        fi
         if ! set_runtime_build_identity "$FRONTEND_APP" "$FRONTEND_IMAGE"; then
             error "Failed to set verified frontend BuildIdentity for ${FRONTEND_APP}."
             record_deployment_failure frontend "$FRONTEND_IMAGE" \

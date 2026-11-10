@@ -97,6 +97,16 @@ GIT_ONLY=false
 DRY_RUN=false
 FORCE_UPDATE=false
 declare -a ENV_VARS=()
+declare -A PREVIOUS_CONFIG=()
+declare -A PREVIOUS_IDENTITY=()
+
+RUNTIME_IDENTITY_KEYS=(
+    APP_VERSION APP_COMMIT APP_COMMIT_SHORT APP_BUILD_CHANNEL APP_CHANNEL
+    APP_IMAGE_CHANNEL APP_BUILD_WORKFLOW_RUN APP_WORKFLOW_RUN
+    APP_WORKFLOW_RUN_ID APP_WORKFLOW_RUN_URL APP_BUILT_AT APP_BUILD_AT APP_CREATED
+    APP_IMAGE_REF APP_IMAGE_DIGEST APP_IMAGE_RESOLVED_REF APP_IMAGE_VERSION
+    APP_IMAGE_COMMIT APP_SOURCE APP_DEPLOYED_AT
+)
 
 env_value() {
     local key="$1"
@@ -204,6 +214,60 @@ set_runtime_build_identity() {
         APP_IMAGE_DIGEST="$BUILD_DIGEST" \
         APP_IMAGE_RESOLVED_REF="$resolved_ref" \
         APP_DEPLOYED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+}
+
+capture_runtime_config() {
+    local app="$1" key
+    for key in "${RUNTIME_IDENTITY_KEYS[@]}"; do
+        PREVIOUS_CONFIG["$app:$key"]="$(dokku config:get "$app" "$key" 2>/dev/null || true)"
+    done
+}
+
+restore_runtime_config() {
+    local app="$1" key value
+    local -a set_args=() unset_args=()
+    for key in "${RUNTIME_IDENTITY_KEYS[@]}"; do
+        value="${PREVIOUS_CONFIG["$app:$key"]:-}"
+        if [ -n "$value" ]; then
+            set_args+=("$key=$value")
+        else
+            unset_args+=("$key")
+        fi
+    done
+    [ "${#set_args[@]}" -eq 0 ] || dokku config:set --no-restart "$app" "${set_args[@]}" || true
+    [ "${#unset_args[@]}" -eq 0 ] || dokku config:unset --no-restart "$app" "${unset_args[@]}" || true
+}
+
+restore_previous_identity() {
+    local app_type="$1"
+    local previous="${PREVIOUS_IDENTITY[$app_type]:-}"
+    local old_ref old_digest old_channel old_version old_commit old_short
+    local old_workflow old_workflow_url old_built
+    IFS=$'\t' read -r old_ref old_digest old_channel old_version old_commit \
+        old_short old_workflow old_workflow_url old_built <<< "$previous"
+    if [ -n "$old_ref" ] || [ -n "$old_digest" ]; then
+        tenant_record_identity "$TENANT_NAME" "$app_type" "$old_ref" "$old_ref" \
+            "$old_digest" "$old_channel" "$old_version" "$old_commit" "$old_short" \
+            "$old_workflow" "$old_workflow_url" "$old_built" 2>/dev/null || true
+    else
+        tenant_clear_identity "$TENANT_NAME" "$app_type" \
+            "deployment failed; no prior verified identity" 2>/dev/null || true
+    fi
+}
+
+record_deployment_failure() {
+    local app_type="$1" image="$2" message="$3"
+    local app="${TENANT_NAME}-${app_type}" resolved_ref="${image%@*}@${BUILD_DIGEST}"
+    local previous_ref="" previous_digest=""
+    IFS=$'\t' read -r previous_ref previous_digest _ <<< "${PREVIOUS_IDENTITY[$app_type]:-}"
+
+    restore_runtime_config "$app"
+    restore_previous_identity "$app_type"
+    tenant_record_failure "$TENANT_NAME" "$app_type" "$message" 2>/dev/null || true
+    tenant_record_audit "$TENANT_NAME" "$app_type" "$image" "$resolved_ref" "$BUILD_DIGEST" \
+        "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
+        "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" \
+        "$previous_ref" "$previous_digest" "failed" "$message" 2>/dev/null || true
 }
 
 record_verified_image_identity() {
@@ -778,30 +842,38 @@ if ! $GIT_ONLY; then
             error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
             exit 1
         fi
+        capture_runtime_config "$BACKEND_APP"
+        PREVIOUS_IDENTITY["backend"]="$(tenant_current_identity "$TENANT_NAME" backend || true)"
         if ! set_runtime_build_identity "$BACKEND_APP" "$BACKEND_IMAGE"; then
             error "Failed to set verified backend BuildIdentity for ${BACKEND_APP}."
+            record_deployment_failure backend "$BACKEND_IMAGE" \
+                "failed to set runtime identity"
             exit 1
         fi
         if ! dokku_git_from_image "$BACKEND_APP" "$BACKEND_IMAGE"; then
             error "Backend image deployment failed for ${BACKEND_APP}."
+            record_deployment_failure backend "$BACKEND_IMAGE" \
+                "image swap failed"
             exit 1
         fi
         if ! wait_for_runtime_health "$BACKEND_APP" "/healthz"; then
             error "Backend startup health check failed for ${BACKEND_APP}; refusing to continue provisioning."
+            record_deployment_failure backend "$BACKEND_IMAGE" \
+                "startup health check failed"
             exit 1
         fi
         if ! verify_runtime_identity "$BACKEND_APP" "$BUILD_VERSION" "$BUILD_COMMIT" \
             "$BUILD_DIGEST" "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" \
             "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
             error "Backend /version did not report the expected BuildIdentity for ${BACKEND_APP}; refusing to continue provisioning."
-            tenant_record_failure "$TENANT_NAME" backend \
-                "post-deploy /version identity verification failed" 2>/dev/null || true
+            record_deployment_failure backend "$BACKEND_IMAGE" \
+                "post-deploy /version identity verification failed"
             exit 1
         fi
         if ! record_verified_image_identity backend "$BACKEND_IMAGE"; then
             error "Failed to persist verified backend provenance for ${BACKEND_APP}; refusing to finish provisioning."
-            tenant_record_failure "$TENANT_NAME" backend \
-                "failed to persist verified deployment identity" 2>/dev/null || true
+            record_deployment_failure backend "$BACKEND_IMAGE" \
+                "failed to persist verified deployment identity"
             exit 1
         fi
     else
@@ -815,34 +887,44 @@ if ! $GIT_ONLY; then
             error "Image is missing or inconsistent OCI BuildIdentity labels: $FRONTEND_IMAGE"
             exit 1
         fi
+        capture_runtime_config "$FRONTEND_APP"
+        PREVIOUS_IDENTITY["frontend"]="$(tenant_current_identity "$TENANT_NAME" frontend || true)"
         if ! set_runtime_build_identity "$FRONTEND_APP" "$FRONTEND_IMAGE"; then
             error "Failed to set verified frontend BuildIdentity for ${FRONTEND_APP}."
+            record_deployment_failure frontend "$FRONTEND_IMAGE" \
+                "failed to set runtime identity"
             exit 1
         fi
         if ! dokku config:set --no-restart "$FRONTEND_APP" COOKIE_SECURE=false; then
             error "Failed to set frontend cookie configuration for ${FRONTEND_APP}."
+            record_deployment_failure frontend "$FRONTEND_IMAGE" \
+                "failed to set frontend cookie configuration"
             exit 1
         fi
         if ! dokku_git_from_image "$FRONTEND_APP" "$FRONTEND_IMAGE"; then
             error "Frontend image deployment failed for ${FRONTEND_APP}."
+            record_deployment_failure frontend "$FRONTEND_IMAGE" \
+                "image swap failed"
             exit 1
         fi
         if ! wait_for_runtime_health "$FRONTEND_APP" "/"; then
             error "Frontend startup health check failed for ${FRONTEND_APP}; refusing to continue provisioning."
+            record_deployment_failure frontend "$FRONTEND_IMAGE" \
+                "startup health check failed"
             exit 1
         fi
         if ! verify_runtime_identity "$FRONTEND_APP" "$BUILD_VERSION" "$BUILD_COMMIT" \
             "$BUILD_DIGEST" "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" \
             "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
             error "Frontend /version did not report the expected BuildIdentity for ${FRONTEND_APP}; refusing to continue provisioning."
-            tenant_record_failure "$TENANT_NAME" frontend \
-                "post-deploy /version identity verification failed" 2>/dev/null || true
+            record_deployment_failure frontend "$FRONTEND_IMAGE" \
+                "post-deploy /version identity verification failed"
             exit 1
         fi
         if ! record_verified_image_identity frontend "$FRONTEND_IMAGE"; then
             error "Failed to persist verified frontend provenance for ${FRONTEND_APP}; refusing to finish provisioning."
-            tenant_record_failure "$TENANT_NAME" frontend \
-                "failed to persist verified deployment identity" 2>/dev/null || true
+            record_deployment_failure frontend "$FRONTEND_IMAGE" \
+                "failed to persist verified deployment identity"
             exit 1
         fi
 

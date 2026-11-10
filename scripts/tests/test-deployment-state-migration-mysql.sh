@@ -5,6 +5,8 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REHEARSAL_RESERVED_DATABASES=()
+REHEARSAL_OWNED_DATABASES=()
 
 pass() {
     echo "PASS: $*"
@@ -17,6 +19,49 @@ fail() {
 
 skip() {
     echo "SKIP: $*"
+}
+
+rehearsal_database_name_nonce() {
+    local nonce="${MYSQL_REHEARSAL_NONCE:-}"
+    if [ -z "$nonce" ]; then
+        nonce="${GITHUB_RUN_ID:-local}_${GITHUB_RUN_ATTEMPT:-1}_$$_$(date -u +%s%N)_${RANDOM:-0}"
+    fi
+    nonce="$(printf '%s' "$nonce" | tr -cd '[:alnum:]_')"
+    [ -n "$nonce" ] || nonce="local"
+    printf '%s' "${nonce:0:32}"
+}
+
+generate_rehearsal_database_name() {
+    local kind="$1" attempt="$2" nonce
+    nonce="${REHEARSAL_NAME_NONCE:-}"
+    [ -n "$nonce" ] || nonce="$(rehearsal_database_name_nonce)"
+    nonce="$(printf '%s' "$nonce" | tr -cd '[:alnum:]_')"
+    [ -n "$nonce" ] || nonce="local"
+    nonce="${nonce:0:32}"
+    printf '%s_%s_%s_%s' "pr215" "$kind" "$nonce" "$attempt"
+}
+
+rehearsal_database_reserved() {
+    local database="$1" reserved
+    for reserved in "${REHEARSAL_RESERVED_DATABASES[@]-}"; do
+        [ "$reserved" = "$database" ] && return 0
+    done
+    return 1
+}
+
+rehearsal_database_owned() {
+    local database="$1" owned
+    for owned in "${REHEARSAL_OWNED_DATABASES[@]-}"; do
+        [ "$owned" = "$database" ] && return 0
+    done
+    return 1
+}
+
+record_rehearsal_database() {
+    local database="$1" ownership_variable="$2"
+    REHEARSAL_RESERVED_DATABASES+=("$database")
+    REHEARSAL_OWNED_DATABASES+=("$database")
+    printf -v "$ownership_variable" '%s' true
 }
 
 parse_dsn() {
@@ -65,36 +110,104 @@ parse_dsn() {
 database_exists() {
     local database="$1" count
     validate_database_identifier "$database" || return 1
-    count="$(run_mysql -N -B -e \
-        "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name='${database}';")" ||
-        return 1
+    if ! count="$(run_mysql -N -B -e \
+        "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name='${database}';")"; then
+        return 2
+    fi
     count="$(printf '%s\n' "$count" | awk 'NF { print $1; exit }')"
-    [ "$count" = "1" ]
+    case "$count" in
+        0) return 1 ;;
+        1) return 0 ;;
+        *)
+            printf 'Could not determine whether rehearsal database %q exists.\n' \
+                "$database" >&2
+            return 2
+            ;;
+    esac
 }
 
 create_rehearsal_database() {
-    local database="$1" description="$2" ownership_variable="$3"
-    validate_database_identifier "$database" || return 1
+    local kind="$1" description="$2" database_variable="$3"
+    local ownership_variable="$4" max_attempts attempt database exists_rc create_rc
 
-    if database_exists "$database"; then
-        echo "Using pre-existing ${description} database '${database}'; cleanup will preserve it."
-        return 0
-    fi
+    max_attempts="${MYSQL_REHEARSAL_MAX_NAME_ATTEMPTS:-32}"
+    [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] || {
+        printf 'MYSQL_REHEARSAL_MAX_NAME_ATTEMPTS must be a positive integer.\n' >&2
+        return 1
+    }
 
-    run_mysql -e \
-        "CREATE DATABASE \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-    printf -v "$ownership_variable" '%s' true
-    echo "Created ${description} database '${database}'; cleanup owns it."
+    attempt=0
+    while [ "$attempt" -lt "$max_attempts" ]; do
+        database="$(generate_rehearsal_database_name "$kind" "$attempt")" || return 1
+        validate_database_identifier "$database" || return 1
+
+        if rehearsal_database_reserved "$database"; then
+            attempt=$((attempt + 1))
+            continue
+        fi
+
+        if database_exists "$database"; then
+            echo "Skipping pre-existing ${description} candidate '${database}'; generating another name."
+            attempt=$((attempt + 1))
+            continue
+        else
+            exists_rc=$?
+            if [ "$exists_rc" -ne 1 ]; then
+                printf 'Unable to verify that rehearsal database %q is absent.\n' \
+                    "$database" >&2
+                return 1
+            fi
+        fi
+
+        if run_mysql -e \
+            "CREATE DATABASE \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"; then
+            printf -v "$database_variable" '%s' "$database"
+            record_rehearsal_database "$database" "$ownership_variable"
+            echo "Created ${description} database '${database}'; cleanup owns it."
+            return 0
+        else
+            create_rc=$?
+        fi
+
+        if database_exists "$database"; then
+            echo "Rehearsal database candidate '${database}' appeared before creation; generating another name."
+            attempt=$((attempt + 1))
+            continue
+        else
+            exists_rc=$?
+        fi
+        if [ "$exists_rc" -eq 1 ]; then
+            return "$create_rc"
+        fi
+        printf 'Unable to verify the failed rehearsal database creation for %q.\n' \
+            "$database" >&2
+        return "$create_rc"
+    done
+
+    printf 'Unable to allocate a unique %s rehearsal database after %s attempts.\n' \
+        "$description" "$max_attempts" >&2
+    return 1
 }
 
 cleanup_owned_databases() {
     if ! declare -F run_mysql >/dev/null 2>&1; then
         return 0
     fi
-    if [ "${REHEARSAL_STATE_DB_CREATED:-false}" = true ]; then
+
+    local database
+    for database in "${REHEARSAL_OWNED_DATABASES[@]-}"; do
+        [ -n "$database" ] || continue
+        run_mysql -e "DROP DATABASE IF EXISTS \`${database}\`;" >/dev/null 2>&1
+    done
+
+    # Keep the flags as a compatibility fallback for callers that initialize
+    # ownership explicitly rather than through create_rehearsal_database.
+    if [ "${REHEARSAL_STATE_DB_CREATED:-false}" = true ] &&
+        ! rehearsal_database_owned "${DEPLOY_STATE_DB:-}"; then
         run_mysql -e "DROP DATABASE IF EXISTS \`${DEPLOY_STATE_DB}\`;" >/dev/null 2>&1
     fi
-    if [ "${REHEARSAL_MASTER_DB_CREATED:-false}" = true ]; then
+    if [ "${REHEARSAL_MASTER_DB_CREATED:-false}" = true ] &&
+        ! rehearsal_database_owned "${MYSQL_MASTER_DB:-}"; then
         run_mysql -e "DROP DATABASE IF EXISTS \`${MYSQL_MASTER_DB}\`;" >/dev/null 2>&1
     fi
 }
@@ -109,7 +222,7 @@ cleanup() {
 main() {
     cd "$REPO_DIR"
 
-    local dsn suffix
+    local dsn
     dsn="${MYSQL_REHEARSAL_DSN:-}"
     if [ -z "$dsn" ]; then
         skip \
@@ -122,17 +235,17 @@ main() {
 
     parse_dsn "$dsn"
 
-    suffix="$(printf '%s' "${GITHUB_RUN_ID:-$$-$(date +%s)}" | tr -cd '[:alnum:]_')"
-    [ -n "$suffix" ] || suffix="local"
-    MYSQL_MASTER_DB="pr215_legacy_${suffix}"
-    DEPLOY_STATE_DB="pr215_state_${suffix}"
     MYSQL_CLIENT_MODE=host
     REHEARSAL_MASTER_DB_CREATED=false
     REHEARSAL_STATE_DB_CREATED=false
+    REHEARSAL_RESERVED_DATABASES=()
+    REHEARSAL_OWNED_DATABASES=()
+    REHEARSAL_NAME_NONCE="$(rehearsal_database_name_nonce)"
+    MYSQL_MASTER_DB=""
+    DEPLOY_STATE_DB=""
+    source scripts/lib.sh
     export MYSQL_ADMIN_USER MYSQL_ADMIN_PASSWORD MYSQL_HOST MYSQL_PORT
     export MYSQL_MASTER_DB DEPLOY_STATE_DB MYSQL_CLIENT_MODE
-
-    source scripts/lib.sh
 
     trap cleanup EXIT
 
@@ -140,9 +253,9 @@ main() {
         fail "MYSQL_REHEARSAL_DSN is configured, but the MySQL server is unreachable."
 
     create_rehearsal_database \
-        "$MYSQL_MASTER_DB" "legacy registry" REHEARSAL_MASTER_DB_CREATED
+        legacy "legacy registry" MYSQL_MASTER_DB REHEARSAL_MASTER_DB_CREATED
     create_rehearsal_database \
-        "$DEPLOY_STATE_DB" "deployment state" REHEARSAL_STATE_DB_CREATED
+        state "deployment state" DEPLOY_STATE_DB REHEARSAL_STATE_DB_CREATED
 
     run_mysql <<SQL
 CREATE TABLE \`${MYSQL_MASTER_DB}\`.tenant (

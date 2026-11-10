@@ -337,8 +337,20 @@ deploy_one() {
 }
 
 capture_runtime_config() {
-    local app="$1" key value
+    local app="$1" key value configured_key configured_keys_output
+    declare -A configured_keys=()
+    if ! configured_keys_output="$(dokku config:keys "$app" 2>/dev/null)"; then
+        error "Failed to read current runtime identity keys for ${app}."
+        return 1
+    fi
+    while IFS= read -r configured_key; do
+        [ -n "$configured_key" ] && configured_keys["$configured_key"]=1
+    done <<< "$configured_keys_output"
     for key in "${RUNTIME_IDENTITY_KEYS[@]}"; do
+        if [ -z "${configured_keys[$key]+x}" ]; then
+            PREVIOUS_CONFIG["$app:$key"]=""
+            continue
+        fi
         if ! value="$(dokku config:get "$app" "$key" 2>/dev/null)"; then
             error "Failed to read current runtime identity for ${app} (${key})."
             return 1

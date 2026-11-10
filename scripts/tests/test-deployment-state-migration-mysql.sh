@@ -5,7 +5,6 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$REPO_DIR"
 
 pass() {
     echo "PASS: $*"
@@ -18,15 +17,7 @@ fail() {
 
 skip() {
     echo "SKIP: $*"
-    exit 0
 }
-
-DSN="${MYSQL_REHEARSAL_DSN:-}"
-[ -n "$DSN" ] || skip \
-    "MYSQL_REHEARSAL_DSN is unavailable; set mysql://user:password@host[:port]/database to run the real rehearsal."
-
-command -v mysql >/dev/null 2>&1 ||
-    fail "MYSQL_REHEARSAL_DSN is set, but the mysql client is unavailable."
 
 parse_dsn() {
     local raw="$1" authority credentials hostport
@@ -71,36 +62,89 @@ parse_dsn() {
         fail "MYSQL_REHEARSAL_DSN has an invalid port."
 }
 
-parse_dsn "$DSN"
+database_exists() {
+    local database="$1" count
+    validate_database_identifier "$database" || return 1
+    count="$(run_mysql -N -B -e \
+        "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name='${database}';")" ||
+        return 1
+    count="$(printf '%s\n' "$count" | awk 'NF { print $1; exit }')"
+    [ "$count" = "1" ]
+}
 
-suffix="$(printf '%s' "${GITHUB_RUN_ID:-$$-$(date +%s)}" | tr -cd '[:alnum:]_')"
-[ -n "$suffix" ] || suffix="local"
-MYSQL_MASTER_DB="pr215_legacy_${suffix}"
-DEPLOY_STATE_DB="pr215_state_${suffix}"
-MYSQL_CLIENT_MODE=host
-export MYSQL_ADMIN_USER MYSQL_ADMIN_PASSWORD MYSQL_HOST MYSQL_PORT
-export MYSQL_MASTER_DB DEPLOY_STATE_DB MYSQL_CLIENT_MODE
+create_rehearsal_database() {
+    local database="$1" description="$2" ownership_variable="$3"
+    validate_database_identifier "$database" || return 1
 
-source scripts/lib.sh
+    if database_exists "$database"; then
+        echo "Using pre-existing ${description} database '${database}'; cleanup will preserve it."
+        return 0
+    fi
+
+    run_mysql -e \
+        "CREATE DATABASE \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+    printf -v "$ownership_variable" '%s' true
+    echo "Created ${description} database '${database}'; cleanup owns it."
+}
+
+cleanup_owned_databases() {
+    if ! declare -F run_mysql >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ "${REHEARSAL_STATE_DB_CREATED:-false}" = true ]; then
+        run_mysql -e "DROP DATABASE IF EXISTS \`${DEPLOY_STATE_DB}\`;" >/dev/null 2>&1
+    fi
+    if [ "${REHEARSAL_MASTER_DB_CREATED:-false}" = true ]; then
+        run_mysql -e "DROP DATABASE IF EXISTS \`${MYSQL_MASTER_DB}\`;" >/dev/null 2>&1
+    fi
+}
 
 cleanup() {
     local rc=$?
     set +e
-    if declare -F run_mysql >/dev/null 2>&1; then
-        run_mysql -e \
-            "DROP DATABASE IF EXISTS \`${DEPLOY_STATE_DB}\`;
-             DROP DATABASE IF EXISTS \`${MYSQL_MASTER_DB}\`;" \
-            >/dev/null 2>&1
-    fi
+    cleanup_owned_databases
     exit "$rc"
 }
-trap cleanup EXIT
 
-run_mysql -N -B -e "SELECT 1;" >/dev/null 2>&1 ||
-    fail "MYSQL_REHEARSAL_DSN is configured, but the MySQL server is unreachable."
+main() {
+    cd "$REPO_DIR"
 
-run_mysql <<SQL
-CREATE DATABASE \`${MYSQL_MASTER_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    local dsn suffix
+    dsn="${MYSQL_REHEARSAL_DSN:-}"
+    if [ -z "$dsn" ]; then
+        skip \
+            "MYSQL_REHEARSAL_DSN is unavailable; this check is skipped and provides no real MySQL rehearsal evidence."
+        return 0
+    fi
+
+    command -v mysql >/dev/null 2>&1 ||
+        fail "MYSQL_REHEARSAL_DSN is set, but the mysql client is unavailable."
+
+    parse_dsn "$dsn"
+
+    suffix="$(printf '%s' "${GITHUB_RUN_ID:-$$-$(date +%s)}" | tr -cd '[:alnum:]_')"
+    [ -n "$suffix" ] || suffix="local"
+    MYSQL_MASTER_DB="pr215_legacy_${suffix}"
+    DEPLOY_STATE_DB="pr215_state_${suffix}"
+    MYSQL_CLIENT_MODE=host
+    REHEARSAL_MASTER_DB_CREATED=false
+    REHEARSAL_STATE_DB_CREATED=false
+    export MYSQL_ADMIN_USER MYSQL_ADMIN_PASSWORD MYSQL_HOST MYSQL_PORT
+    export MYSQL_MASTER_DB DEPLOY_STATE_DB MYSQL_CLIENT_MODE
+
+    source scripts/lib.sh
+
+    trap cleanup EXIT
+
+    run_mysql -N -B -e "SELECT 1;" >/dev/null 2>&1 ||
+        fail "MYSQL_REHEARSAL_DSN is configured, but the MySQL server is unreachable."
+
+    create_rehearsal_database \
+        "$MYSQL_MASTER_DB" "legacy registry" REHEARSAL_MASTER_DB_CREATED
+    create_rehearsal_database \
+        "$DEPLOY_STATE_DB" "deployment state" REHEARSAL_STATE_DB_CREATED
+
+    run_mysql <<SQL
 CREATE TABLE \`${MYSQL_MASTER_DB}\`.tenant (
     name                       VARCHAR(100) NOT NULL PRIMARY KEY,
     db_name                    VARCHAR(128) NOT NULL DEFAULT '',
@@ -262,3 +306,8 @@ assert_scalar 4 \
 pass "failed migration leaves no partial state and preserves rollback inputs"
 
 echo "REAL MYSQL PR215 REHEARSAL PASSED"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

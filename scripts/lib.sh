@@ -379,12 +379,21 @@ tenant_from_app_name() {
     esac
 }
 
-# Resolve and validate the single scheme used by generated public URLs.
-# Dashboard production runners set DASHBOARD_ENV=prod; direct installs can
-# opt into the same behavior with ENABLE_SSL=true or PUBLIC_PROTOCOL=https.
-public_protocol() {
-    local protocol="${PUBLIC_PROTOCOL:-}" env="${DASHBOARD_ENV:-}" ssl="${ENABLE_SSL:-false}"
+# Resolve the deployment environment used by generated public URLs.
+# DEPLOY_ENV is used by direct script runners; the dashboard supplies
+# DASHBOARD_ENV.
+public_environment() {
+    local env="${DEPLOY_ENV:-${DASHBOARD_ENV:-}}"
     env="${env,,}"
+    printf '%s' "$env"
+}
+
+# Resolve and validate the single scheme used by generated public URLs.
+# Production runners default to HTTPS; local development may opt into HTTP
+# with PUBLIC_PROTOCOL=http.
+public_protocol() {
+    local protocol="${PUBLIC_PROTOCOL:-}" env ssl="${ENABLE_SSL:-false}"
+    env="$(public_environment)"
     ssl="${ssl,,}"
     if [ -z "$protocol" ]; then
         case "$env" in
@@ -431,8 +440,7 @@ public_url() {
     local host="$1"
     local protocol env
     protocol="$(public_protocol)" || return 1
-    env="${DASHBOARD_ENV:-}"
-    env="${env,,}"
+    env="$(public_environment)"
     if [ -z "$host" ] || [[ "$host" == *"://"* || "$host" == */* || "$host" == *[[:space:]]* ]]; then
         echo "Invalid public host '$host'." >&2
         return 1
@@ -448,8 +456,7 @@ public_url() {
 public_tenant_url() {
     local tenant base_domain env
     base_domain="${BASE_DOMAIN:?BASE_DOMAIN not set}"
-    env="${DASHBOARD_ENV:-}"
-    env="${env,,}"
+    env="$(public_environment)"
     if [[ "$env" = "prod" || "$env" = "production" ]] &&
         is_local_public_host "$base_domain"; then
         echo "Production public URLs must not use a localhost, localtest.me, or loopback BASE_DOMAIN." >&2

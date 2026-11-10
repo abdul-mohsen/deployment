@@ -367,16 +367,13 @@ SQLEOF
         warn "Create tenants only after ZATCA's zatca_master migrations are applied (see above)."
     fi
 
-    # Deployment-owned state (per-tenant image pins). Not zatca_master, not a tenant DB.
-    run_mysql <<SQLEOF
-CREATE DATABASE IF NOT EXISTS \`${DEPLOY_STATE_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE TABLE IF NOT EXISTS \`${DEPLOY_STATE_DB}\`.tenant_image (
-    name            VARCHAR(100)  NOT NULL PRIMARY KEY COMMENT 'Tenant name, as in zatca_master.tenant.name',
-    backend_image   VARCHAR(255)  NOT NULL DEFAULT '' COMMENT 'Per-tenant override (empty = use global latest)',
-    frontend_image  VARCHAR(255)  NOT NULL DEFAULT '' COMMENT 'Per-tenant override (empty = use global latest)',
-    updated_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB;
-SQLEOF
+    # Deployment-owned state is created and upgraded before any deploy-all
+    # invocation can read tenant_image. The migration only inserts missing
+    # state rows, so rerunning setup never replaces an operator's current pins.
+    if ! ensure_deployment_state_schema; then
+        error "Deployment state setup/migration failed; refusing to continue."
+        exit 1
+    fi
 
     log "Master database ready: ${MYSQL_MASTER_DB}; deployment state: ${DEPLOY_STATE_DB}.tenant_image"
 else

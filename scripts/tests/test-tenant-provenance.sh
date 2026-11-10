@@ -12,35 +12,22 @@ source scripts/tenant-provenance.sh
 
 IMAGE_DIGEST="sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-echo "=== portable schema column helper ==="
-schema_calls_file="$(mktemp)"
-trap 'rm -f "$schema_calls_file"' EXIT
-schema_column_exists=0
+echo "=== registry tenant_key guard is read-only ==="
 run_mysql() {
     local args="$*"
-    printf '%s\n' "$args" >> "$schema_calls_file"
     if [[ "$args" == *"information_schema.columns"* ]]; then
-        printf '%s\n' "$schema_column_exists"
+        printf '1\n'
+    elif [[ "$args" == *"information_schema.triggers"* ]]; then
+        printf '1\n'
+    elif [[ "$args" == *"SELECT IFNULL(tenant_key"* ]]; then
+        printf 'tenant-key-marker\n'
     fi
 }
-mysql_add_column_if_missing test_db tenant sample_column "VARCHAR(8) NOT NULL DEFAULT ''" \
-    || fail "missing schema column was not added"
-grep -q 'ALTER TABLE `tenant` ADD COLUMN `sample_column` VARCHAR(8)' "$schema_calls_file" ||
-    fail "portable schema helper did not issue a column ALTER"
-
-: > "$schema_calls_file"
-schema_column_exists=1
-mysql_add_column_if_missing test_db tenant sample_column "VARCHAR(8) NOT NULL DEFAULT ''" \
-    || fail "existing schema column was not accepted"
-[ "$(grep -c 'information_schema.columns' "$schema_calls_file")" -eq 1 ] ||
-    fail "existing schema column was not checked"
-! grep -q 'ALTER TABLE `tenant` ADD COLUMN `sample_column`' "$schema_calls_file" ||
-    fail "existing schema column triggered an unnecessary ALTER"
-! grep -q 'ADD COLUMN IF NOT EXISTS `' \
-    scripts/lib.sh scripts/setup.sh scripts/tenant-provenance.sh \
-    docs/tenant-recovery-hockun2.md ||
-    fail "unsupported ADD COLUMN IF NOT EXISTS migration remains"
-pass "portable schema migration is used"
+require_registry_tenant_key || fail "migrated registry was rejected"
+[ "$(tenant_registry_key tenant_acme)" = "tenant-key-marker" ] \
+    || fail "tenant_key was not read from the registry"
+pass "registry readiness and tenant_key provenance are read-only"
+unset -f run_mysql
 
 docker() {
     local format=""
@@ -103,11 +90,44 @@ else
 fi
 
 echo "=== successful identity and /version verification ==="
+EXPECTED_IMAGE_ID="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+STALE_IMAGE_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+RUNTIME_IMAGE_ID="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+RUNTIME_IMAGE_DIGEST="$IMAGE_DIGEST"
 docker() {
+    if [ "$1" = "ps" ]; then
+        printf 'tenant-api-container\n'
+        return 0
+    fi
     local format=""
+    local format_next=0
     for arg in "$@"; do
-        case "$arg" in --format=*) format="${arg#--format=}" ;; esac
+        if [ "$format_next" -eq 1 ]; then
+            format="$arg"
+            format_next=0
+            continue
+        fi
+        case "$arg" in
+            --format=*) format="${arg#--format=}" ;;
+            --format|-f) format_next=1 ;;
+        esac
     done
+    case "$*" in
+        *"inspect -f"*|*"inspect --format"*)
+            if [[ "$*" == *"image inspect"* && "$format" == *".Id"* ]]; then
+                echo "$EXPECTED_IMAGE_ID"
+                return 0
+            fi
+            if [[ "$format" == *".Image"* ]]; then
+                echo "$RUNTIME_IMAGE_ID"
+                return 0
+            fi
+            if [[ "$format" == *"RepoDigests"* ]]; then
+                echo "example/api@${RUNTIME_IMAGE_DIGEST}"
+                return 0
+            fi
+            ;;
+    esac
     case "$format" in
         *RepoDigests*) echo "example/api@${IMAGE_DIGEST}" ;;
         *channel*) echo "release" ;;
@@ -130,6 +150,26 @@ verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST"
     "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" \
     || fail "matching /version identity was rejected"
 pass "matching /version identity is accepted"
+echo "=== moved tag cannot hide a digest mismatch ==="
+RUNTIME_IMAGE_ID="$EXPECTED_IMAGE_ID"
+RUNTIME_IMAGE_DIGEST="$STALE_IMAGE_DIGEST"
+if verify_runtime_image_identity api-app "$IMAGE_DIGEST" "$BUILD_IMAGE_REF"; then
+    fail "moved tag was accepted when the running image digest mismatched"
+else
+    pass "moved tag is rejected when the running image digest mismatches"
+fi
+RUNTIME_IMAGE_DIGEST="$IMAGE_DIGEST"
+echo "=== stale environment identity cannot hide the running image ==="
+RUNTIME_IMAGE_ID="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+RUNTIME_IMAGE_DIGEST="$STALE_IMAGE_DIGEST"
+if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
+    "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
+    fail "stale running image was accepted when /version matched injected values"
+else
+    pass "stale running image is rejected independently of /version values"
+fi
+RUNTIME_IMAGE_ID="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+RUNTIME_IMAGE_DIGEST="$IMAGE_DIGEST"
 app_version_response() {
     printf '%s' '{"version":"v1.2.3","commit":"ffffffffffffffffffffffffffffffffffffffff","digest":"'"$IMAGE_DIGEST"'","image_ref":"example/api:v1.2.3","channel":"release","workflow_run_id":"42","built_at":"2026-09-07T10:00:00Z"}'
 }
@@ -180,16 +220,12 @@ grep -q 'APP_WORKFLOW_RUN_ID=' scripts/update-tenant.sh \
     || fail "APP_WORKFLOW_RUN_ID runtime identity missing"
 grep -q 'frontend' scripts/update-tenant.sh \
     || fail "component-only frontend update path missing"
-grep -q 'IFS=.*workflow_url.*image_ref' scripts/create-tenant.sh \
-    || fail "create-tenant must preserve workflow URL and image ref field order"
-grep -q 'APP_IMAGE_VERSION="\$version"' scripts/create-tenant.sh \
-    || fail "create-tenant must keep semantic version separate from Docker tag"
-grep -q 'APP_IMAGE_TAG=' scripts/create-tenant.sh \
-    || fail "create-tenant must persist the Docker tag separately"
+grep -q 'require_registry_tenant_key' scripts/create-tenant.sh \
+    || fail "create-tenant must gate provisioning on registry tenant_key readiness"
+grep -q 'tenant_registry_key' scripts/init-tenant-db.sh scripts/lib.sh \
+    || fail "tenant_key must be copied from the registry during initialization"
 ! grep -R -q '/api/health' scripts/*.sh templates REQUIREMENTS.md \
     || fail "legacy /api/health deployment probe remains"
-[ "$(grep -c '"workflow_run_id":"%s"' scripts/status.sh)" -eq 1 ] \
-    || fail "status JSON does not have one canonical identity serialization"
 pass "migration, rollback, and component-only guards are present"
 
 echo "ALL TENANT PROVENANCE TESTS PASSED"

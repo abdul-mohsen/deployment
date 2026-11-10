@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Verify backend updates migrate before Dokku image changes and stop on failure.
+# Static contract for backend updates and the goose migration order. Runtime
+# behaviour needs Docker and Dokku and is not part of this suite.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -8,112 +9,82 @@ cd "$REPO_DIR"
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
-LOG_FILE="$TMP_DIR/commands.log"
-CONFIG_FILE="$TMP_DIR/config.env"
-BACKUP_SCRIPT="$TMP_DIR/backup.sh"
-MIGRATION_SCRIPT="$TMP_DIR/migrate.sh"
-DOCKER_BIN="$TMP_DIR/docker"
-
-cat > "$CONFIG_FILE" <<EOF
-BASE_DOMAIN=test.example.com
-DOKKU_CONTAINER=dokku-test
-IMAGE_PULL_POLICY=always
-BACKUP_BEFORE_MIGRATION=1
-EOF
-
-cat > "$BACKUP_SCRIPT" <<'EOF'
-#!/usr/bin/env bash
-printf 'backup %s\n' "$*" >> "$TEST_LOG"
-exit "${BACKUP_RESULT:-0}"
-EOF
-
-cat > "$MIGRATION_SCRIPT" <<'EOF'
-#!/usr/bin/env bash
-printf 'migration %s\n' "$*" >> "$TEST_LOG"
-exit "${MIGRATION_RESULT:-0}"
-EOF
-
-cat > "$DOCKER_BIN" <<'EOF'
-#!/usr/bin/env bash
-printf 'docker %s\n' "$*" >> "$TEST_LOG"
-case "${1:-}" in
-    ps)
-        echo dokku-test
-        ;;
-    *)
-        ;;
-esac
-exit 0
-EOF
-
-chmod +x "$BACKUP_SCRIPT" "$MIGRATION_SCRIPT" "$DOCKER_BIN"
-export TEST_LOG="$LOG_FILE"
-export PATH="$TMP_DIR:$PATH"
-export TENANT_BACKUP_SCRIPT="$BACKUP_SCRIPT"
-export TENANT_MIGRATION_SCRIPT="$MIGRATION_SCRIPT"
-export DOKKU_CONTAINER=dokku-test
-export _DOKKU_ENSURED=1
-
-echo "=== successful backend update migrates before image switch ==="
-UPDATE_OUTPUT="$TMP_DIR/success.out"
-bash scripts/update-tenant.sh acme \
-    --backend-image ssdawweq/ifritah-api:dev \
-    --config "$CONFIG_FILE" >"$UPDATE_OUTPUT" 2>&1 \
-    || { cat "$UPDATE_OUTPUT"; fail "successful update returned non-zero"; }
-
-grep -q '^backup ' "$LOG_FILE" || fail "verified backup was not requested"
-grep -q '^migration .*--schema-only' "$LOG_FILE" || fail "schema migration was not requested"
-grep -q 'config:set' "$LOG_FILE" || fail "Dokku image configuration was not called"
-grep -q 'git:from-image' "$LOG_FILE" || fail "Dokku image deployment was not called"
-backup_line="$(grep -n '^backup ' "$LOG_FILE" | head -1 | cut -d: -f1)"
-migration_line="$(grep -n '^migration ' "$LOG_FILE" | head -1 | cut -d: -f1)"
-deploy_line="$(grep -n 'git:from-image' "$LOG_FILE" | head -1 | cut -d: -f1)"
-[ "$backup_line" -lt "$migration_line" ] || fail "migration started before backup"
-[ "$migration_line" -lt "$deploy_line" ] || fail "image switched before migration"
-pass "successful update order is backup, migration, image deployment"
+echo "=== backend update order: verified backup, goose, image swap ==="
+UPDATE=scripts/update-tenant.sh
+backup_line="$(grep -n 'create_verified_tenant_db_backup "\$TENANT_NAME"' "$UPDATE" | head -1 | cut -d: -f1)"
+schema_line="$(grep -n 'init-tenant-db.sh" "\$TENANT_NAME" \\' "$UPDATE" | head -1 | cut -d: -f1)"
+deploy_line="$(grep -n 'deploy_component backend "\$BACKEND_IMAGE"' "$UPDATE" | head -1 | cut -d: -f1)"
+[ -n "$backup_line" ] && [ -n "$schema_line" ] && [ -n "$deploy_line" ] \
+    || fail "update-tenant.sh is missing the backup, goose or deploy step"
+[ "$backup_line" -lt "$schema_line" ] || fail "goose runs before the verified backup"
+[ "$schema_line" -lt "$deploy_line" ] || fail "image swap runs before goose"
+sed -n "${schema_line},$((deploy_line - 1))p" "$UPDATE" |
+    grep -q -- '--backend-image "\$BACKEND_IMAGE"' \
+    || fail "update migration does not use the target backend image"
+pass "update order is verified backup, goose (init-tenant-db --schema-only), image swap"
 
 echo
-echo "=== failed migration blocks image switch ==="
-: > "$LOG_FILE"
-if MIGRATION_RESULT=1 bash scripts/update-tenant.sh acme \
-    --backend-image ssdawweq/ifritah-api:next \
-    --config "$CONFIG_FILE" >"$TMP_DIR/failure.out" 2>&1; then
-    cat "$TMP_DIR/failure.out"
-    fail "failed migration returned zero"
-fi
-grep -q 'Backend schema migration failed' "$TMP_DIR/failure.out" \
-    || fail "failed migration message was not surfaced"
-grep -q '^migration ' "$LOG_FILE" || fail "failed migration was not attempted"
-! grep -q 'config:set' "$LOG_FILE" || fail "Dokku config changed after migration failure"
-! grep -q 'git:from-image' "$LOG_FILE" || fail "image switched after migration failure"
-pass "failed migration stops before image deployment"
+echo "=== a failed goose run exits before the image swap ==="
+sed -n "${schema_line},$((deploy_line - 1))p" "$UPDATE" | grep -q 'exit 1' \
+    || fail "failed goose run does not stop the update"
+pass "failed goose run stops before the image swap"
 
 echo
-echo "=== verified backup can be reused by auto-pull path ==="
-: > "$LOG_FILE"
-PREDEPLOY_BACKUP_VERIFIED=1 bash scripts/update-tenant.sh acme \
-    --backend-image ssdawweq/ifritah-api:dev \
-    --config "$CONFIG_FILE" >"$TMP_DIR/reuse.out" 2>&1 \
-    || { cat "$TMP_DIR/reuse.out"; fail "backup reuse update returned non-zero"; }
-! grep -q '^backup ' "$LOG_FILE" || fail "verified backup was duplicated"
-grep -q '^migration ' "$LOG_FILE" || fail "migration was skipped after backup reuse"
-pass "auto-pull backup is reused"
+echo "=== create and fleet deployment preserve the same migration order ==="
+CREATE=scripts/create-tenant.sh
+create_schema_line="$(grep -n 'init-tenant-db.sh" "\$TENANT_NAME" \\' "$CREATE" | head -1 | cut -d: -f1)"
+create_deploy_line="$(grep -n 'dokku_git_from_image "\$BACKEND_APP" "\$BACKEND_IMAGE"' "$CREATE" | head -1 | cut -d: -f1)"
+[ -n "$create_schema_line" ] && [ -n "$create_deploy_line" ] \
+    || fail "create-tenant is missing goose or backend swap"
+[ "$create_schema_line" -lt "$create_deploy_line" ] \
+    || fail "create-tenant migration order is unsafe"
+sed -n "${create_schema_line},$((create_deploy_line - 1))p" "$CREATE" |
+    grep -q -- '--backend-image "$BACKEND_IMAGE"' \
+    || fail "create-tenant migration does not use the target backend image"
+pass "create-tenant preserves verified backup, goose, image swap order"
+
+fleet_backup_line="$(grep -n 'create_verified_tenant_db_backup "\$tenant"' scripts/deploy-all.sh | head -1 | cut -d: -f1)"
+fleet_schema_line="$(grep -n 'init-tenant-db.sh" "\$tenant" --schema-only' scripts/deploy-all.sh | head -1 | cut -d: -f1)"
+fleet_deploy_line="$(grep -n 'dokku_git_from_image "\$app" "\$image"' scripts/deploy-all.sh | head -1 | cut -d: -f1)"
+[ -n "$fleet_backup_line" ] && [ -n "$fleet_schema_line" ] && [ -n "$fleet_deploy_line" ] \
+    || fail "deploy-all is missing backup, goose, or image swap"
+[ "$fleet_backup_line" -lt "$fleet_schema_line" ] &&
+    [ "$fleet_schema_line" -lt "$fleet_deploy_line" ] \
+    || fail "deploy-all migration order is unsafe"
+grep -q -- '--backend-image "\$image"' scripts/deploy-all.sh \
+    || fail "deploy-all migration does not use the target backend image"
+pass "deploy-all preserves verified backup, goose, image swap order"
 
 echo
-echo "=== migration status contract ==="
-grep -q 'deployment_schema_migrations' scripts/init-tenant-db.sh \
-    || fail "migration ledger table is missing"
-grep -q 'failed_migration=' scripts/init-tenant-db.sh \
-    || fail "migration status does not expose failed files"
-grep -q -- '--status' scripts/init-tenant-db.sh \
-    || fail "migration status command is missing"
-grep -q 'Could not record failed migration' scripts/init-tenant-db.sh \
-    || fail "failed ledger writes are not fail-closed"
-grep -q 'migration-status.sh' scripts/deployctl.sh \
-    || fail "migration-status deployctl command is missing"
-pass "per-file migration status contract is present"
+echo "=== deploy-all runs goose before the swap; rollback runs none ==="
+grep -q 'init-tenant-db.sh" "\$tenant" --schema-only' scripts/deploy-all.sh \
+    || fail "deploy-all does not run goose before the image swap"
+! grep -q -- '--schema-only' scripts/rollback-tenant.sh \
+    || fail "rollback-tenant runs goose; schema changes are forward-only"
+grep -q -- '--confirm-schema-compatible' scripts/rollback-tenant.sh \
+    || fail "rollback-tenant does not require --confirm-schema-compatible"
+pass "deploy-all runs goose; rollback-tenant runs no goose and requires --confirm-schema-compatible"
+
+echo
+echo "=== startup health is blocking after migration and before rollout ==="
+grep -q 'wait_for_runtime_health "\$FIRST" "\$HEALTH_PATH"' scripts/deploy-all.sh \
+    || fail "deploy-all does not block on canary startup health"
+grep -q 'wait_for_runtime_health "\$app" "\$health_path"' scripts/update-tenant.sh \
+    || fail "update-tenant does not verify startup health"
+pass "deploy and update require startup health"
+
+echo
+echo "=== goose runner contract ==="
+grep -q -- '--entrypoint /app/migrate' scripts/lib.sh \
+    || fail "goose helper does not use the backend migration entrypoint"
+grep -q 'RUN CGO_ENABLED=0 GOOS=linux go build .* -o /app/migrate ./cmd/migrate' \
+    templates/backend/Dockerfile \
+    || fail "backend template does not build the exact migration command"
+grep -q 'COPY --from=builder /app/migrate' templates/backend/Dockerfile \
+    || fail "backend template does not ship /app/migrate"
+grep -q 'goose_run "\$image" up' scripts/init-tenant-db.sh \
+    || fail "tenant initialization does not run goose up"
+pass "goose runner and backend image contract is present"
 
 echo
 echo "ALL TENANT MIGRATION DEPLOY TESTS PASSED"

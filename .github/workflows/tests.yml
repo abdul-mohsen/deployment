@@ -50,6 +50,12 @@ jobs:
           bash scripts/tests/test-deployctl.sh
           bash scripts/tests/test-zatca-runtime.sh
 
+      - name: Rehearse PR215 legacy-state migration against MySQL
+        shell: bash
+        env:
+          MYSQL_REHEARSAL_DSN: ${{ secrets.MYSQL_REHEARSAL_DSN }}
+        run: bash scripts/tests/test-deployment-state-migration-mysql.sh
+
       - name: Check deployment contracts
         shell: bash
         run: bash scripts/tests/test-release-contract.sh

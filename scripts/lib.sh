@@ -1825,7 +1825,12 @@ migrate_legacy_deployment_state() {
     frontend_deployment_status="$(legacy_tenant_column_expr "$source_columns" frontend_deployment_status "'unknown'")"
     frontend_deployment_error="$(legacy_tenant_column_expr "$source_columns" frontend_deployment_error "''")"
 
+    # Keep the copy atomic. The first insert can add a new pin before the
+    # provenance insert is parsed, so a failed migration must not leave a
+    # partially migrated deployment-state database behind.
     run_mysql "$state" <<SQL
+START TRANSACTION;
+
 INSERT INTO \`${state}\`.tenant_image (name, backend_image, frontend_image)
 SELECT ${name_expr}, ${backend_image}, ${frontend_image}
 FROM \`${master}\`.tenant AS t
@@ -1858,6 +1863,8 @@ FROM \`${master}\`.tenant AS t
 WHERE ${name_expr} <> ''
 ON DUPLICATE KEY UPDATE
     name=VALUES(name);
+
+COMMIT;
 SQL
 }
 

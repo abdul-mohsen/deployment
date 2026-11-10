@@ -65,6 +65,48 @@ provenance_repo_digest() {
     return 1
 }
 
+provenance_immutable_image_ref() {
+    local requested="$1" digest="${2:-}" candidate="${3:-}" candidate_digest
+
+    if [[ "$candidate" == *@sha256:* ]]; then
+        candidate_digest="${candidate##*@}"
+        if [[ "$candidate_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] &&
+            { [ -z "$digest" ] || [ "$candidate_digest" = "$digest" ]; }; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    fi
+
+    if [[ "$requested" == *@sha256:* ]]; then
+        candidate_digest="${requested##*@}"
+        if [[ "$candidate_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] &&
+            { [ -z "$digest" ] || [ "$candidate_digest" = "$digest" ]; }; then
+            printf '%s' "$requested"
+            return 0
+        fi
+    fi
+
+    if [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] && [ -n "$requested" ]; then
+        printf '%s@%s' "${requested%@*}" "$digest"
+        return 0
+    fi
+
+    return 1
+}
+
+provenance_previous_image_ref() {
+    local requested="$1" digest="$2" configured="${3:-}" observed="${4:-}" candidate
+
+    for candidate in "$configured" "$requested" "$observed"; do
+        [ -n "$candidate" ] || continue
+        if candidate="$(provenance_immutable_image_ref "$candidate" "$digest")"; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 runtime_container_ids() {
     local app="$1" ids=""
     ids="$(docker ps \
@@ -128,6 +170,21 @@ verify_runtime_image_identity() {
     done <<< "$ids"
 
     [ "$checked" -eq 1 ]
+}
+
+verify_runtime_immutable_image() {
+    local app="$1" image="$2" digest
+    local retries="${TENANT_VERIFY_RETRIES:-15}" delay="${TENANT_VERIFY_DELAY:-2}" attempt
+    digest="${image##*@}"
+    [[ "$image" == *@sha256:* ]] || return 1
+    [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || return 1
+    for ((attempt=1; attempt<=retries; attempt++)); do
+        if verify_runtime_image_identity "$app" "$digest" "$image"; then
+            return 0
+        fi
+        [ "$attempt" -lt "$retries" ] && sleep "$delay"
+    done
+    return 1
 }
 
 provenance_override_enabled() {

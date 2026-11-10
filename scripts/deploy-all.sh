@@ -134,7 +134,7 @@ deploy_one() {
     local tenant="${app%${SUFFIX}}"
     deployment_set_tenant "$tenant"
     local image="$IMAGE"
-    local previous_image previous_identity backup_info="" backup_id="" backup_artifact=""
+    local previous_image previous_observed_image previous_identity backup_info="" backup_id="" backup_artifact=""
     local migrations_attempted=false
 
     # Per-tenant override (only for backend; frontend rarely needs pinning)
@@ -148,7 +148,7 @@ deploy_one() {
         return 0
     fi
 
-    previous_image="$(dokku git:report "$app" 2>/dev/null |
+    previous_observed_image="$(dokku git:report "$app" 2>/dev/null |
         awk -F': ' 'tolower($1) ~ /source-image/ {print $2; exit}' || true)"
     if ! capture_runtime_config "$app"; then
         error "${app}: failed to capture current runtime identity"
@@ -161,6 +161,13 @@ deploy_one() {
     split_tab_fields "$previous_identity"
     local previous_digest="${TAB_FIELDS[1]-}"
     local resolved_ref="${image%@*}@${BUILD_DIGEST}"
+    if ! previous_image="$(provenance_previous_image_ref \
+        "${TAB_FIELDS[0]-}" "${TAB_FIELDS[1]-}" \
+        "${PREVIOUS_CONFIG["$app:APP_IMAGE_RESOLVED_REF"]:-}" \
+        "$previous_observed_image")"; then
+        error "${app}: failed to capture an immutable current image identity"
+        return 1
+    fi
 
     if [ "$APP_TYPE" = "backend" ]; then
         if ! backup_info="$(create_verified_tenant_db_backup "$tenant" "$CONFIG_FILE")"; then
@@ -235,6 +242,9 @@ deploy_one() {
         if ! restore_runtime_config "$app"; then
             error "${app}: failed to restore runtime identity after config failure"
         fi
+        if ! restore_previous_identity "$tenant" "$APP_TYPE" "$previous_identity" "$previous_image"; then
+            error "${app}: failed to restore durable identity after config failure"
+        fi
         tenant_record_failure "$tenant" "$APP_TYPE" "failed to set runtime identity" 2>/dev/null || true
         tenant_record_audit "$tenant" "$APP_TYPE" "$image" "$resolved_ref" "$BUILD_DIGEST" \
             "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
@@ -245,8 +255,15 @@ deploy_one() {
     fi
 
     if ! dokku_git_from_image "$app" "$image"; then
-        if ! restore_runtime_config "$app"; then
-            error "${app}: failed to restore runtime identity after image swap failure"
+        if [ "$migrations_attempted" = true ]; then
+            if ! restore_runtime_config "$app"; then
+                error "${app}: failed to restore runtime identity after image swap failure"
+            fi
+            if ! restore_previous_identity "$tenant" "$APP_TYPE" "$previous_identity" "$previous_image"; then
+                error "${app}: failed to restore durable identity after image swap failure"
+            fi
+        elif ! restore_previous_state "$tenant" "$APP_TYPE" "$app" "$previous_image" "$previous_identity"; then
+            error "${app}: failed to restore prior image and identity after image swap failure"
         fi
         tenant_record_failure "$tenant" "$APP_TYPE" "image swap failed" 2>/dev/null || true
         tenant_record_audit "$tenant" "$APP_TYPE" "$image" "$resolved_ref" "$BUILD_DIGEST" \
@@ -269,14 +286,14 @@ deploy_one() {
             if [ "$migrations_attempted" = true ]; then
                 error "${app}: automatic rollback refused; image rollback cannot restore migrated DB schema/data."
                 error "Restore backup ${backup_id} (${backup_artifact}) explicitly before retry."
-            elif [ -n "$previous_image" ]; then
-                if ! dokku_git_from_image "$app" "$previous_image"; then
-                    error "${app}: failed to restore the previous image"
+                if ! restore_runtime_config "$app"; then
+                    error "${app}: failed to restore runtime identity after verification failure"
                 fi
-            fi
-            if [ "$migrations_attempted" = false ] &&
-                ! restore_runtime_config "$app"; then
-                error "${app}: failed to restore runtime identity after verification failure"
+                if ! restore_previous_identity "$tenant" "$APP_TYPE" "$previous_identity" "$previous_image"; then
+                    error "${app}: failed to restore durable identity after verification failure"
+                fi
+            elif ! restore_previous_state "$tenant" "$APP_TYPE" "$app" "$previous_image" "$previous_identity"; then
+                error "${app}: failed to restore prior image and identity after verification failure"
             fi
             tenant_record_failure "$tenant" "$APP_TYPE" "post-deploy /version identity verification failed" 2>/dev/null || true
             tenant_record_audit "$tenant" "$APP_TYPE" "$image" "$resolved_ref" "$BUILD_DIGEST" \
@@ -296,14 +313,14 @@ deploy_one() {
         error "${app}: failed to persist verified deployment identity"
         if [ "$migrations_attempted" = true ]; then
             error "${app}: automatic rollback refused after migration; restore backup ${backup_id} before retry."
-        elif [ -n "$previous_image" ]; then
-            if ! dokku_git_from_image "$app" "$previous_image"; then
-                error "${app}: failed to restore the previous image"
+            if ! restore_runtime_config "$app"; then
+                error "${app}: failed to restore runtime identity after persistence failure"
             fi
-        fi
-        if [ "$migrations_attempted" = false ] &&
-            ! restore_runtime_config "$app"; then
-            error "${app}: failed to restore runtime identity after persistence failure"
+            if ! restore_previous_identity "$tenant" "$APP_TYPE" "$previous_identity" "$previous_image"; then
+                error "${app}: failed to restore durable identity after persistence failure"
+            fi
+        elif ! restore_previous_state "$tenant" "$APP_TYPE" "$app" "$previous_image" "$previous_identity"; then
+            error "${app}: failed to restore prior image and identity after persistence failure"
         fi
         tenant_record_failure "$tenant" "$APP_TYPE" "failed to persist verified deployment identity" 2>/dev/null || true
         return 1
@@ -317,18 +334,14 @@ deploy_one() {
         if [ "$migrations_attempted" = true ]; then
             error "${app}: automatic rollback refused after migration; image rollback cannot restore migrated DB schema/data."
             error "Restore backup ${backup_id} (${backup_artifact}) explicitly before retry."
-        else
-            if [ -n "$previous_image" ]; then
-                if ! dokku_git_from_image "$app" "$previous_image"; then
-                    error "${app}: failed to restore the previous image"
-                fi
-            fi
             if ! restore_runtime_config "$app"; then
                 error "${app}: failed to restore runtime identity after audit failure"
             fi
-            if ! restore_previous_identity "$tenant" "$APP_TYPE" "$previous_identity"; then
+            if ! restore_previous_identity "$tenant" "$APP_TYPE" "$previous_identity" "$previous_image"; then
                 error "${app}: failed to restore durable identity after audit failure"
             fi
+        elif ! restore_previous_state "$tenant" "$APP_TYPE" "$app" "$previous_image" "$previous_identity"; then
+            error "${app}: failed to restore prior image and identity after audit failure"
         fi
         tenant_record_failure "$tenant" "$APP_TYPE" "deployment audit completion failed" 2>/dev/null || true
         return 1
@@ -383,8 +396,8 @@ restore_runtime_config() {
 }
 
 restore_previous_identity() {
-    local tenant="$1" app_type="$2" previous="$3"
-    local old_ref old_digest old_channel old_version old_commit old_short old_workflow old_workflow_url old_built
+    local tenant="$1" app_type="$2" previous="$3" previous_image="${4:-}"
+    local old_ref old_digest old_channel old_version old_commit old_short old_workflow old_workflow_url old_built old_resolved
     split_tab_fields "$previous"
     old_ref="${TAB_FIELDS[0]-}"
     old_digest="${TAB_FIELDS[1]-}"
@@ -395,8 +408,10 @@ restore_previous_identity() {
     old_workflow="${TAB_FIELDS[6]-}"
     old_workflow_url="${TAB_FIELDS[7]-}"
     old_built="${TAB_FIELDS[8]-}"
+    old_resolved="$(provenance_immutable_image_ref "$old_ref" "$old_digest" \
+        "$previous_image" || true)"
     if [ -n "$old_ref" ] || [ -n "$old_digest" ]; then
-        if ! tenant_record_identity "$tenant" "$app_type" "$old_ref" "$old_ref" "$old_digest" \
+        if ! tenant_record_identity "$tenant" "$app_type" "$old_ref" "${old_resolved:-$old_ref}" "$old_digest" \
             "$old_channel" "$old_version" "$old_commit" "$old_short" \
             "$old_workflow" "$old_workflow_url" "$old_built"; then
             error "Failed to restore durable identity for ${tenant}-${app_type}."
@@ -409,6 +424,41 @@ restore_previous_identity() {
             return 1
         fi
     fi
+}
+
+rollback_previous_image() {
+    local app="$1" image="$2"
+    if ! image="$(provenance_immutable_image_ref "$image")"; then
+        error "${app}: previous image rollback requires an immutable digest reference"
+        return 1
+    fi
+    log "Rolling back ${app} to ${image}"
+    if ! dokku_git_from_image "$app" "$image"; then
+        error "${app}: failed to restore the previous image"
+        return 1
+    fi
+    if ! verify_runtime_immutable_image "$app" "$image"; then
+        error "${app}: running image does not match the immutable rollback reference ${image}"
+        return 1
+    fi
+}
+
+restore_previous_state() {
+    local tenant="$1" app_type="$2" app="$3" previous_image="$4" previous_identity="$5"
+    local restore_status=0
+
+    if ! rollback_previous_image "$app" "$previous_image"; then
+        restore_status=1
+    fi
+    if ! restore_runtime_config "$app"; then
+        error "${app}: failed to restore runtime identity after image rollback"
+        restore_status=1
+    fi
+    if ! restore_previous_identity "$tenant" "$app_type" "$previous_identity" "$previous_image"; then
+        error "${app}: failed to restore durable identity after image rollback"
+        restore_status=1
+    fi
+    return "$restore_status"
 }
 
 # Get matching apps â€” either specific tenants or all

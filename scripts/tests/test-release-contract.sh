@@ -173,25 +173,17 @@ guard_line="$(printf '%s\n' "$audit_block" |
     grep -nF 'if [ "$migrations_attempted" = true ]; then' |
     head -1 | cut -d: -f1 || true)"
 rollback_branch_line="$(printf '%s\n' "$audit_block" |
-    grep -nF '        else' |
-    head -1 | cut -d: -f1 || true)"
-previous_image_guard_line="$(printf '%s\n' "$audit_block" |
-    grep -nF 'if [ -n "$previous_image" ]; then' |
-    head -1 | cut -d: -f1 || true)"
-rollback_line="$(printf '%s\n' "$audit_block" |
-    grep -nF 'dokku_git_from_image "$app" "$previous_image"' |
+    grep -nF '        elif ! restore_previous_state' |
     head -1 | cut -d: -f1 || true)"
 rollback_count="$(printf '%s\n' "$audit_block" |
-    grep -cF 'dokku_git_from_image "$app" "$previous_image"' || true)"
-[ -n "$guard_line" ] && [ -n "$rollback_branch_line" ] &&
-    [ -n "$previous_image_guard_line" ] && [ -n "$rollback_line" ] \
+    grep -cF 'restore_previous_state "$tenant" "$APP_TYPE" "$app" "$previous_image" "$previous_identity"' || true)"
+[ -n "$guard_line" ] && [ -n "$rollback_branch_line" ] \
     || fail "deploy-all audit failure lacks a migration rollback guard"
 [ "$guard_line" -lt "$rollback_branch_line" ] &&
-    [ "$rollback_branch_line" -lt "$previous_image_guard_line" ] &&
-    [ "$previous_image_guard_line" -lt "$rollback_line" ] \
+    [ "$rollback_count" -eq 1 ] \
     || fail "deploy-all previous-image rollback is not confined to the non-migrated branch"
 [ "$rollback_count" -eq 1 ] \
-    || fail "deploy-all audit failure has an unconditional or duplicate previous-image rollback"
+    || fail "deploy-all audit failure has an unconditional or duplicate previous-state rollback"
 printf '%s\n' "$audit_block" |
     grep -qF 'automatic rollback refused after migration' \
     || fail "deploy-all audit failure lacks the post-migration rollback refusal"

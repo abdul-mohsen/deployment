@@ -354,17 +354,14 @@ mkdir -p "${STORAGE_ROOT}"
 
 # ---- Step 5b: External MySQL — master database ----
 if [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" != "changeme" ]; then
-    log "Setting up master database: ${MYSQL_MASTER_DB}"
+    log "Preparing master database: ${MYSQL_MASTER_DB}"
 
-    # zatca_master.tenant (the registry, incl. tenant_key) belongs to the zatca_master
-    # schema. This repo writes rows there but never creates or alters its tables.
-    run_mysql <<SQLEOF
-CREATE DATABASE IF NOT EXISTS \`${MYSQL_MASTER_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-SQLEOF
-    if require_registry_tenant_key; then
-        log "Registry ready: ${MYSQL_MASTER_DB}.tenant has tenant_key and trigger tenant_key_default"
-    else
-        warn "Create tenants only after ZATCA's zatca_master migrations are applied (see above)."
+    # The registry schema is owned by ZATCA. The orchestration command creates
+    # or backs up the database, invokes its external Goose artifact, and
+    # verifies tenant_key plus both triggers before setup continues.
+    if ! bash "$SCRIPT_DIR/migrate-zatca-master.sh" --config "$CONFIG_FILE"; then
+        error "ZATCA master migration failed; refusing to continue setup."
+        exit 1
     fi
 
     # Deployment-owned state is created and upgraded before any deploy-all

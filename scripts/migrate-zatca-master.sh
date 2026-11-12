@@ -48,7 +48,14 @@ info()  { deployment_log INFO "$*"; echo -e "${BLUE}[i]${NC} $*"; }
 
 MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
 ARTIFACT_DIR="${ZATCA_MASTER_MIGRATION_ARTIFACT:-${ZATCA_MASTER_MIGRATIONS_DIR:-}}"
-GOOSE_BIN="${ZATCA_MASTER_GOOSE_BIN:-goose}"
+# Pinned Pressly Goose release; digests are selected per supported Linux arch.
+GOOSE_RELEASE_VERSION="v3.30.0"
+GOOSE_BIN="${ZATCA_MASTER_GOOSE_BIN:-}"
+GOOSE_BIN_EXPLICIT=false
+if [ -n "$GOOSE_BIN" ]; then
+    GOOSE_BIN_EXPLICIT=true
+fi
+GOOSE_CACHE_DIR="${ZATCA_MASTER_GOOSE_CACHE_DIR:-${DEPLOY_STATE_DIR:-${PROJECT_DIR}/state}/bin}"
 GOOSE_DSN="${ZATCA_MASTER_GOOSE_DSN:-${MYSQL_MASTER_DSN:-}}"
 LEGACY_POLICY="${ZATCA_MASTER_LEGACY_POLICY:-refuse}"
 LOCK_FILE="${ZATCA_MASTER_MIGRATION_LOCK_FILE:-${DEPLOY_STATE_DIR:-${PROJECT_DIR}/state}/zatca-master-migration.lock}"
@@ -67,7 +74,7 @@ Options:
   --config <path>                 Config file (default: ../config.env)
   --artifact <dir>                ZATCA migrations/zatca_master directory
   --migrations-dir <dir>          Alias for --artifact
-  --goose-bin <path>              Goose executable (default: goose)
+  --goose-bin <path>              Goose executable (otherwise auto-installed)
   --dsn <dsn>                     Goose MySQL DSN (otherwise built from config)
   --master-db <name>              Master database (default: zatca_master)
   --legacy-policy refuse|baseline Refuse legacy DBs, or explicitly baseline v1
@@ -90,7 +97,7 @@ while [[ $# -gt 0 ]]; do
         --config)          CONFIG_FILE="$2"; shift 2 ;;
         --artifact|--migrations-dir)
                             ARTIFACT_DIR="$2"; shift 2 ;;
-        --goose-bin)       GOOSE_BIN="$2"; shift 2 ;;
+        --goose-bin)       GOOSE_BIN="$2"; GOOSE_BIN_EXPLICIT=true; shift 2 ;;
         --dsn)             GOOSE_DSN="$2"; shift 2 ;;
         --master-db)       MASTER_DB="$2"; shift 2 ;;
         --legacy-policy)   LEGACY_POLICY="$2"; shift 2 ;;
@@ -120,10 +127,6 @@ for migration in 00001_baseline.sql 00002_tenant_key.sql; do
         exit 1
     fi
 done
-if ! command -v "$GOOSE_BIN" >/dev/null 2>&1 && [ ! -x "$GOOSE_BIN" ]; then
-    error "Goose executable is unavailable: $GOOSE_BIN"
-    exit 1
-fi
 
 mysql_dsn_escape() {
     local value="$1"
@@ -225,6 +228,151 @@ EOF
     MASTER_BACKUP_PATH="$backup_path"
 }
 
+goose_download_metadata() {
+    local os arch
+    os="$(uname -s 2>/dev/null || true)"
+    arch="$(uname -m 2>/dev/null || true)"
+    if [ "$os" != "Linux" ]; then
+        error "Automatic Goose installation supports Linux only (detected $os). Set ZATCA_MASTER_GOOSE_BIN to an installed executable."
+        return 1
+    fi
+
+    case "$arch" in
+        x86_64|amd64)
+            GOOSE_ASSET="goose_linux_x86_64"
+            GOOSE_PLATFORM="amd64"
+            GOOSE_SHA256="cce6e6371670f0654adc0ece407b81a22e53ba51e24e17a80ff7a0e25cda8548"
+            ;;
+        aarch64|arm64)
+            GOOSE_ASSET="goose_linux_arm64"
+            GOOSE_PLATFORM="arm64"
+            GOOSE_SHA256="624ae3159e221494c5e780c772cc000d788a4afe34a791553e43b2419174a715"
+            ;;
+        *)
+            error "Automatic Goose installation does not support Linux architecture '$arch'. Set ZATCA_MASTER_GOOSE_BIN to an installed executable."
+            return 1
+            ;;
+    esac
+}
+
+goose_file_sha256() {
+    sha256sum "$1" | awk '{ print $1; exit }'
+}
+
+download_goose() {
+    local cache_path temp_file url actual download_tool
+    goose_download_metadata || return 1
+
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        error "sha256sum is required to verify the automatic Goose download."
+        return 1
+    fi
+    mkdir -p "$GOOSE_CACHE_DIR" || {
+        error "Could not create the Goose cache directory: $GOOSE_CACHE_DIR"
+        return 1
+    }
+
+    cache_path="$GOOSE_CACHE_DIR/goose-${GOOSE_RELEASE_VERSION}-${GOOSE_PLATFORM}"
+    if [ -e "$cache_path" ]; then
+        if [ -f "$cache_path" ] && actual="$(goose_file_sha256 "$cache_path")" &&
+            [ "$actual" = "$GOOSE_SHA256" ]; then
+            chmod 0755 "$cache_path" || {
+                error "Could not make the cached Goose executable: $cache_path"
+                return 1
+            }
+            GOOSE_BIN="$cache_path"
+            log "Using verified cached Goose ${GOOSE_RELEASE_VERSION} ($GOOSE_PLATFORM)"
+            return 0
+        fi
+        warn "Discarding an invalid cached Goose binary: $cache_path"
+        rm -f "$cache_path" || {
+            error "Could not remove the invalid cached Goose binary: $cache_path"
+            return 1
+        }
+    fi
+
+    if command -v curl >/dev/null 2>&1; then
+        download_tool=curl
+    elif command -v wget >/dev/null 2>&1; then
+        download_tool=wget
+    else
+        error "Automatic Goose installation requires curl or wget."
+        return 1
+    fi
+
+    temp_file="$(mktemp "$GOOSE_CACHE_DIR/.goose-download.XXXXXX")" || {
+        error "Could not create a temporary Goose download in $GOOSE_CACHE_DIR"
+        return 1
+    }
+    url="https://github.com/pressly/goose/releases/download/${GOOSE_RELEASE_VERSION}/${GOOSE_ASSET}"
+    log "Downloading verified Goose ${GOOSE_RELEASE_VERSION} ($GOOSE_PLATFORM)"
+    if [ "$download_tool" = "curl" ]; then
+        if ! curl --fail --location --silent --show-error --retry 3 \
+            --connect-timeout 10 --max-time 120 --output "$temp_file" "$url"; then
+            rm -f "$temp_file"
+            error "Goose download failed."
+            return 1
+        fi
+    elif ! wget --quiet --timeout=10 --tries=3 --output-document="$temp_file" "$url"; then
+        rm -f "$temp_file"
+        error "Goose download failed."
+        return 1
+    fi
+
+    if [ ! -s "$temp_file" ]; then
+        rm -f "$temp_file"
+        error "Goose download returned an empty file."
+        return 1
+    fi
+    actual="$(goose_file_sha256 "$temp_file")" || actual=""
+    if [ "$actual" != "$GOOSE_SHA256" ]; then
+        rm -f "$temp_file"
+        error "Goose download checksum verification failed."
+        return 1
+    fi
+    chmod 0755 "$temp_file" || {
+        rm -f "$temp_file"
+        error "Could not make the downloaded Goose executable."
+        return 1
+    }
+    if ! mv -f "$temp_file" "$cache_path"; then
+        rm -f "$temp_file"
+        error "Could not install Goose into the cache: $cache_path"
+        return 1
+    fi
+    GOOSE_BIN="$cache_path"
+    log "Installed verified Goose ${GOOSE_RELEASE_VERSION} ($GOOSE_PLATFORM)"
+}
+
+resolve_goose_bin() {
+    local allow_download="${1:-true}" resolved
+    if $GOOSE_BIN_EXPLICIT; then
+        if command -v "$GOOSE_BIN" >/dev/null 2>&1; then
+            resolved="$(command -v "$GOOSE_BIN")"
+        elif [ -x "$GOOSE_BIN" ]; then
+            resolved="$GOOSE_BIN"
+        else
+            error "Goose executable is unavailable: $GOOSE_BIN"
+            return 1
+        fi
+        GOOSE_BIN="$resolved"
+        log "Using explicitly configured Goose: $GOOSE_BIN"
+        return 0
+    fi
+
+    if command -v goose >/dev/null 2>&1; then
+        GOOSE_BIN="$(command -v goose)"
+        log "Using Goose from PATH: $GOOSE_BIN"
+        return 0
+    fi
+
+    if [ "$allow_download" != "true" ]; then
+        info "Dry run: Goose is not on PATH; a verified ${GOOSE_RELEASE_VERSION} binary would be downloaded."
+        return 0
+    fi
+    download_goose
+}
+
 goose_run() {
     local action="$1" dsn
     dsn="$(goose_dsn)" || return 1
@@ -273,9 +421,11 @@ verify_registry() {
 run_migration() {
     local db_state backup_path=""
     if $DRY_RUN; then
+        resolve_goose_bin false || return 1
         info "Dry run: would lock, back up, and run Goose from the ZATCA artifact against $MASTER_DB."
         return 0
     fi
+    resolve_goose_bin true || return 1
 
     if ! command -v flock >/dev/null 2>&1; then
         error "flock is required to serialize ZATCA master migrations."

@@ -61,10 +61,10 @@ if $LIST; then
     prefix="$(tenant_name_prefix)"
     if [ -n "$prefix" ]; then
         run_mysql -t "$MYSQL_MASTER_DB" -e \
-            "SELECT name, backend_image, frontend_image, enabled FROM tenant WHERE name LIKE '${prefix}%' ORDER BY name;"
+            "SELECT t.name, IFNULL(i.backend_image,'') AS backend_image, IFNULL(i.frontend_image,'') AS frontend_image, t.enabled FROM tenant t LEFT JOIN \`${DEPLOY_STATE_DB}\`.tenant_image i ON i.name = t.name WHERE t.name LIKE '${prefix}%' ORDER BY t.name;"
     else
         run_mysql -t "$MYSQL_MASTER_DB" -e \
-            "SELECT name, backend_image, frontend_image, enabled FROM tenant ORDER BY name;"
+            "SELECT t.name, IFNULL(i.backend_image,'') AS backend_image, IFNULL(i.frontend_image,'') AS frontend_image, t.enabled FROM tenant t LEFT JOIN \`${DEPLOY_STATE_DB}\`.tenant_image i ON i.name = t.name ORDER BY t.name;"
     fi
     exit 0
 fi
@@ -79,21 +79,21 @@ TENANT="$(tenant_full_name "$TENANT")" || exit 1
 
 if $UNPIN; then
     log "Unpinning ${TENANT} (will follow global image)"
-    run_mysql "$MYSQL_MASTER_DB" -e \
-        "UPDATE tenant SET backend_image='', frontend_image='' WHERE name='${TENANT}';"
+    run_mysql "$DEPLOY_STATE_DB" -e \
+        "UPDATE tenant_image SET backend_image='', frontend_image='' WHERE name='${TENANT}';"
     exit 0
 fi
 
 if [ -n "$BACKEND_IMG" ]; then
     log "Pinning ${TENANT} backend → ${BACKEND_IMG}"
-    run_mysql "$MYSQL_MASTER_DB" -e \
-        "UPDATE tenant SET backend_image='${BACKEND_IMG}' WHERE name='${TENANT}';"
+    run_mysql "$DEPLOY_STATE_DB" -e \
+        "INSERT INTO tenant_image (name, backend_image) SELECT name, '${BACKEND_IMG}' FROM \`${MYSQL_MASTER_DB}\`.tenant WHERE name='${TENANT}' ON DUPLICATE KEY UPDATE backend_image=VALUES(backend_image);"
 fi
 
 if [ -n "$FRONTEND_IMG" ]; then
     log "Pinning ${TENANT} frontend → ${FRONTEND_IMG}"
-    run_mysql "$MYSQL_MASTER_DB" -e \
-        "UPDATE tenant SET frontend_image='${FRONTEND_IMG}' WHERE name='${TENANT}';"
+    run_mysql "$DEPLOY_STATE_DB" -e \
+        "INSERT INTO tenant_image (name, frontend_image) SELECT name, '${FRONTEND_IMG}' FROM \`${MYSQL_MASTER_DB}\`.tenant WHERE name='${TENANT}' ON DUPLICATE KEY UPDATE frontend_image=VALUES(frontend_image);"
 fi
 
 log "Done. Use update-tenant.sh to apply the pinned image."

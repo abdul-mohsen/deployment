@@ -110,4 +110,50 @@ else
 fi
 
 echo ""
+echo "=== dry-run --schema-only plans goose from the backend image ==="
+output=$(bash scripts/init-tenant-db.sh acme --schema-only --dry-run \
+    --config "$tmpcfg" \
+    --backend-image example/api:v1 2>&1 || true)
+
+if echo "$output" | grep -qF "/app/migrate up from example/api:v1"; then
+    pass "dry-run schema prints the goose command"
+else
+    echo "--- output ---"
+    echo "$output"
+    echo "--- end ---"
+    fail "dry-run schema did not plan goose migrations"
+fi
+
+echo ""
+echo "=== existing-data schema checks remain after goose and before completion ==="
+goose_line="$(grep -n 'goose_run "\$image" up' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+tables_line="$(grep -n '^tenant_missing_required_tables()' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+validate_line="$(grep -n '^    validate_tenant_schema$' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+key_line="$(grep -n '^    ensure_company_tenant_key$' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+[ -n "$goose_line" ] && [ -n "$tables_line" ] && [ -n "$validate_line" ] && [ -n "$key_line" ] \
+    || fail "existing-data migration checks are missing"
+[ "$goose_line" -lt "$validate_line" ] && [ "$validate_line" -lt "$key_line" ] \
+    || fail "required-table/key checks are not ordered after goose"
+for table in company branches store user; do
+    grep -q "SELECT '${table}'" scripts/init-tenant-db.sh \
+        || fail "required existing-data table is not checked: $table"
+done
+grep -q 'tenant_registry_key "\$TENANT_DB_NAME"' scripts/init-tenant-db.sh \
+    || fail "existing-data path does not read the registry tenant_key"
+grep -q 'UPDATE company SET tenant_key =.*WHERE id = 1' scripts/init-tenant-db.sh \
+    || fail "existing-data path does not update company row 1 with a WHERE guard"
+pass "existing-data required tables and registry tenant_key remain after goose"
+
+echo ""
+echo "=== status mode remains read-only ==="
+status_line="$(grep -n 'if \$STATUS_ONLY; then' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+status_exit_line="$(grep -n '^    exit \$?' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+apply_line="$(grep -n '^if ! \$SEED_ONLY; then' scripts/init-tenant-db.sh | head -1 | cut -d: -f1)"
+[ -n "$status_line" ] && [ -n "$status_exit_line" ] && [ -n "$apply_line" ] \
+    || fail "status-only control flow is missing"
+[ "$status_line" -lt "$status_exit_line" ] && [ "$status_exit_line" -lt "$apply_line" ] \
+    || fail "status mode can fall through into schema or seed work"
+pass "status mode exits before schema or seed work"
+
+echo ""
 echo "=== all tests passed ==="

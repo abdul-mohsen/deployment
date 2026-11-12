@@ -140,7 +140,50 @@ bash scripts/restart-stack.sh --help | grep -qi 'restart' && PASS "help works" \
     || FAIL "help missing"
 
 echo
-echo "=== 7. restart-stack.sh stops before starting ==="
+echo "=== 7. full boot runs ZATCA migration before service changes ==="
+migration_line="$(grep -n 'run_zatca_master_migration' scripts/restart-stack.sh | tail -1 | cut -d: -f1)"
+stop_line="$(grep -n 'stop_dashboard_env' scripts/restart-stack.sh | tail -1 | cut -d: -f1)"
+[ -n "$migration_line" ] && [ -n "$stop_line" ] && [ "$migration_line" -lt "$stop_line" ] \
+    && grep -q 'migrate-zatca-master.sh' scripts/restart-stack.sh \
+    && PASS "full boot runs the ZATCA migration before stopping services" \
+    || FAIL "full boot must migrate ZATCA before changing services"
+
+echo
+echo "=== 8. boot migration failure is logged and blocks startup ==="
+BOOT_TEST_DIR="$(mktemp -d)"
+cat > "$BOOT_TEST_DIR/config.env" <<EOF
+BASE_DOMAIN=example.test
+MYSQL_CLIENT_MODE=host
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_ROOT_USER=root
+MYSQL_ROOT_PASSWORD=test-password
+MYSQL_MASTER_DB=zatca_master
+ZATCA_MASTER_MIGRATION_ARTIFACT=$BOOT_TEST_DIR/missing-artifact
+LOG_DIR=$BOOT_TEST_DIR/logs
+DEPLOY_STATE_DIR=$BOOT_TEST_DIR/state
+EOF
+mkdir -p "$BOOT_TEST_DIR/bin"
+cat > "$BOOT_TEST_DIR/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${DOCKER_CALL_LOG:?}"
+exit 0
+STUB
+chmod +x "$BOOT_TEST_DIR/bin/docker"
+OUT="$(
+    DOCKER_CALL_LOG="$BOOT_TEST_DIR/docker.log" \
+    PATH="$BOOT_TEST_DIR/bin:$PATH" \
+    bash scripts/restart-stack.sh --env dev --config "$BOOT_TEST_DIR/config.env" 2>&1 || true
+)"
+[ ! -s "$BOOT_TEST_DIR/docker.log" ] \
+    && echo "$OUT" | grep -q 'startup aborted' \
+    && grep -q 'artifact directory does not exist' "$BOOT_TEST_DIR/logs/zatca-master-migration.log" \
+    && PASS "boot migration failure is persisted and prevents service startup" \
+    || { echo "$OUT"; find "$BOOT_TEST_DIR" -type f -maxdepth 3 -print -exec cat {} \;; FAIL "boot migration failure was not logged or startup was not blocked"; }
+rm -rf "$BOOT_TEST_DIR"
+
+echo
+echo "=== 9. restart-stack.sh stops before starting ==="
 if grep -q 'docker restart dokku' scripts/restart-stack.sh; then
     FAIL "restart-stack must not use docker restart dokku"
 else
@@ -168,20 +211,20 @@ grep -q 'docker compose -f "$compose_file" down --remove-orphans' scripts/restar
     || FAIL "dashboard compose down must be bounded"
 
 echo
-echo "=== 8. restart-stack.sh accepts --env all ==="
+echo "=== 10. restart-stack.sh accepts --env all ==="
 bash scripts/restart-stack.sh --help | grep -q -- '--env all' \
     && PASS "help documents --env all" \
     || FAIL "help must document --env all"
 
 echo
-echo "=== 9. restart-stack.sh rejects unknown env ==="
+echo "=== 11. restart-stack.sh rejects unknown env ==="
 OUT="$(bash scripts/restart-stack.sh --env staging 2>&1 || true)"
 echo "$OUT" | grep -q "must be 'dev', 'prod', or 'all'" \
     && PASS "rejects unknown env" \
     || { echo "$OUT"; FAIL "should reject --env staging"; }
 
 echo
-echo "=== 10. stopped dokku with unavailable docker port is restarted ==="
+echo "=== 12. stopped dokku with unavailable docker port is restarted ==="
 STATE_FILE="$STUB_DIR/dokku-state"
 echo stopped > "$STATE_FILE"
 cat > "$STUB_DIR/docker" <<'STUB'
@@ -239,7 +282,7 @@ echo "$OUT" | grep -q 'Dokku container already stopped' \
     || { echo "$OUT"; FAIL "stopped dokku should recreate/start even when docker port exits non-zero"; }
 
 echo
-echo "=== 11. stopped dokku with inspectable port is started, not recreated ==="
+echo "=== 13. stopped dokku with inspectable port is started, not recreated ==="
 echo stopped > "$STATE_FILE"
 cat > "$STUB_DIR/docker" <<'STUB'
 #!/usr/bin/env bash
@@ -287,7 +330,7 @@ echo "$OUT" | grep -q 'Dokku container already stopped' \
     || { echo "$OUT"; FAIL "stopped dokku with inspectable correct port should start without recreate"; }
 
 echo
-echo "=== 12. tenant DB initializer is wired ==="
+echo "=== 14. tenant DB initializer is wired ==="
 if [ -e scripts/sql ]; then
     FAIL "deployment repo must not bundle backend schema/migrations"
 else

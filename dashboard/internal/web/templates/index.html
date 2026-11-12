@@ -24,6 +24,80 @@
 
 <script id="fleet-bootstrap" type="application/json">{{.FleetBootstrap}}</script>
 
+{{if .IsAdmin}}
+<div class="panel" id="zatca-master-migration-panel" aria-labelledby="zatca-master-migration-title">
+  <div class="panel-toolbar">
+    <span id="zatca-master-migration-title" class="panel-title" style="border:none;padding:0;margin:0">ZATCA master migration</span>
+    <div style="display:flex;align-items:center;gap:8px">
+      <span id="zatca-master-migration-badge" class="badge badge-neutral" role="status" aria-live="polite">ready</span>
+      <button id="zatca-master-migration-run" class="btn btn-primary" type="button">Run migration</button>
+    </div>
+  </div>
+  <div style="padding:12px 16px">
+    <p id="zatca-master-migration-message" role="status" aria-live="polite" aria-atomic="true" style="margin:0">
+      Ready to run the ZATCA master migration.
+    </p>
+    <p id="zatca-master-migration-error" class="alert alert-danger" role="alert" hidden style="margin:10px 0 0"></p>
+  </div>
+</div>
+<script>
+(function () {
+  'use strict';
+  const badge = document.getElementById('zatca-master-migration-badge');
+  const message = document.getElementById('zatca-master-migration-message');
+  const error = document.getElementById('zatca-master-migration-error');
+  const runButton = document.getElementById('zatca-master-migration-run');
+  let pollTimer = null;
+
+  function badgeClass(state) {
+    if (state === 'success') return 'badge badge-success';
+    if (state === 'failure') return 'badge badge-danger';
+    if (state === 'running') return 'badge badge-warn';
+    return 'badge badge-neutral';
+  }
+
+  function render(status) {
+    const state = status && status.state ? status.state : 'failure';
+    badge.className = badgeClass(state);
+    badge.textContent = state;
+    message.textContent = (status && status.message) || 'Migration status is unavailable.';
+    error.hidden = !(status && status.error);
+    error.textContent = (status && status.error) || '';
+    runButton.disabled = state === 'running';
+    if (state === 'running' && !pollTimer) {
+      pollTimer = window.setInterval(load, 2000);
+    } else if (state !== 'running' && pollTimer) {
+      window.clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  async function load() {
+    try {
+      const response = await fetch('/api/migrations/zatca-master', {headers: {'Accept': 'application/json'}});
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      render(await response.json());
+    } catch (err) {
+      render({state: 'failure', message: 'Unable to load migration status.', error: err.message});
+    }
+  }
+
+  runButton.addEventListener('click', async function () {
+    runButton.disabled = true;
+    try {
+      const response = await fetch('/api/migrations/zatca-master/run', {method: 'POST', headers: {'Accept': 'application/json'}});
+      const status = await response.json();
+      render(status);
+    } catch (err) {
+      render({state: 'failure', message: 'Unable to start the migration job.', error: err.message});
+    }
+  });
+
+  load();
+}());
+</script>
+{{end}}
+
 <div class="panel fleet-panel">
   <div class="panel-toolbar fleet-toolbar">
     <div class="status-summary">

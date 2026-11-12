@@ -11,6 +11,8 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 TEST_DIR="$REPO_DIR/.test-migrate-zatca-master.$$"
 BIN="$TEST_DIR/bin"
 ARTIFACT="$TEST_DIR/zatca-migrations"
+GOOSE_CACHE="$TEST_DIR/goose-cache"
+GOOSE_FIXTURE="$TEST_DIR/goose-fixture"
 mkdir -p "$BIN" "$ARTIFACT"
 trap 'rm -rf "$TEST_DIR"' EXIT
 
@@ -27,6 +29,46 @@ cat > "$BIN/goose" <<'EOF'
 printf '%s\n' "$*" >> "$STUB_GOOSE_LOG"
 [ "${STUB_GOOSE_FAIL:-0}" = "1" ] && exit 1
 exit 0
+EOF
+
+cat > "$GOOSE_FIXTURE" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_GOOSE_LOG"
+exit 0
+EOF
+
+cat > "$BIN/uname" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+    -s) printf '%s\n' Linux ;;
+    -m) printf '%s\n' x86_64 ;;
+    *) exit 1 ;;
+esac
+EOF
+
+cat > "$BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+output=""
+previous=""
+for arg in "$@"; do
+    if [ "$previous" = "--output" ]; then
+        output="$arg"
+    fi
+    previous="$arg"
+done
+[ -n "$output" ] || exit 1
+[ "${STUB_CURL_FAIL:-0}" = "1" ] && exit 1
+printf '%s\n' download >> "${STUB_CURL_LOG:?}"
+cp "${GOOSE_FIXTURE:?}" "$output"
+EOF
+
+cat > "$BIN/sha256sum" <<'EOF'
+#!/usr/bin/env bash
+if [ "${STUB_SHA256_MISMATCH:-0}" = "1" ]; then
+    printf '%s  %s\n' 0000000000000000000000000000000000000000000000000000000000000000 "${1:?}"
+else
+    printf '%s  %s\n' cce6e6371670f0654adc0ece407b81a22e53ba51e24e17a80ff7a0e25cda8548 "${1:?}"
+fi
 EOF
 
 cat > "$BIN/mysql" <<'EOF'
@@ -62,6 +104,7 @@ fi
 EOF
 
 chmod +x "$BIN"/*
+chmod +x "$GOOSE_FIXTURE"
 
 cat > "$TEST_DIR/config.env" <<EOF
 MYSQL_CLIENT_MODE=host
@@ -76,6 +119,8 @@ ZATCA_MASTER_MIGRATION_ARTIFACT=$ARTIFACT
 ZATCA_MASTER_GOOSE_BIN=goose
 ZATCA_MASTER_MIGRATION_LOCK_FILE=$TEST_DIR/master.lock
 EOF
+grep -v '^ZATCA_MASTER_GOOSE_BIN=' "$TEST_DIR/config.env" > "$TEST_DIR/auto-config.env"
+printf 'ZATCA_MASTER_GOOSE_CACHE_DIR=%s\n' "$GOOSE_CACHE" >> "$TEST_DIR/auto-config.env"
 
 run_migration() {
     : > "$TEST_DIR/goose.log"
@@ -161,6 +206,87 @@ if STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 
 fi
 grep -q 'already running' "$TEST_DIR/output" || fail "lock failure was not reported"
 pass "verification and lock failures are fail-closed"
+
+echo
+echo "=== Goose on PATH is reused without downloading ==="
+: > "$TEST_DIR/goose.log"
+: > "$TEST_DIR/mysql.log"
+: > "$TEST_DIR/curl.log"
+if ! STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
+    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
+    STUB_CURL_LOG="$TEST_DIR/curl.log" GOOSE_FIXTURE="$GOOSE_FIXTURE" \
+    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh \
+    --config "$TEST_DIR/auto-config.env" >"$TEST_DIR/output" 2>&1; then
+    cat "$TEST_DIR/output"
+    fail "Goose PATH resolution failed"
+fi
+[ ! -s "$TEST_DIR/curl.log" ] || fail "PATH Goose triggered a download"
+grep -q ' mysql .* up$' "$TEST_DIR/goose.log" ||
+    fail "PATH Goose did not run the migration"
+pass "Goose on PATH is reused"
+
+echo
+echo "=== unset Goose downloads and runs the verified release ==="
+rm -f "$BIN/goose"
+rm -rf "$GOOSE_CACHE" "$TEST_DIR/backups" "$TEST_DIR/logs"
+mkdir -p "$TEST_DIR/backups" "$TEST_DIR/logs"
+: > "$TEST_DIR/goose.log"
+: > "$TEST_DIR/mysql.log"
+: > "$TEST_DIR/curl.log"
+if ! STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
+    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
+    STUB_CURL_LOG="$TEST_DIR/curl.log" GOOSE_FIXTURE="$GOOSE_FIXTURE" \
+    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh \
+    --config "$TEST_DIR/auto-config.env" >"$TEST_DIR/output" 2>&1; then
+    cat "$TEST_DIR/output"
+    fail "automatic Goose download failed"
+fi
+if [ ! -x "$GOOSE_CACHE/goose-v3.30.0-amd64" ]; then
+    cat "$TEST_DIR/output"
+    find "$GOOSE_CACHE" -maxdepth 1 -type f -print 2>/dev/null || true
+    fail "automatic Goose download did not install the cached binary"
+fi
+grep -q ' mysql .* up$' "$TEST_DIR/goose.log" ||
+    fail "automatically installed Goose did not run the migration"
+[ "$(wc -l < "$TEST_DIR/curl.log" | tr -d ' ')" = "1" ] ||
+    fail "automatic Goose download did not use the downloader exactly once"
+pass "unset Goose downloads, verifies, caches, and runs the release"
+
+echo
+echo "=== verified Goose cache is reused without downloading ==="
+: > "$TEST_DIR/goose.log"
+: > "$TEST_DIR/mysql.log"
+: > "$TEST_DIR/curl.log"
+if ! STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
+    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
+    STUB_CURL_LOG="$TEST_DIR/curl.log" GOOSE_FIXTURE="$GOOSE_FIXTURE" \
+    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh \
+    --config "$TEST_DIR/auto-config.env" >"$TEST_DIR/output" 2>&1; then
+    cat "$TEST_DIR/output"
+    fail "cached Goose reuse failed"
+fi
+[ ! -s "$TEST_DIR/curl.log" ] || fail "cached Goose triggered a second download"
+grep -q ' mysql .* up$' "$TEST_DIR/goose.log" ||
+    fail "cached Goose did not run the migration"
+pass "verified Goose cache is reused"
+
+echo
+echo "=== Goose checksum mismatches fail closed ==="
+rm -rf "$GOOSE_CACHE"
+: > "$TEST_DIR/curl.log"
+if STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
+    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
+    STUB_CURL_LOG="$TEST_DIR/curl.log" GOOSE_FIXTURE="$GOOSE_FIXTURE" \
+    STUB_SHA256_MISMATCH=1 PATH="$BIN:$PATH" \
+    bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/auto-config.env" \
+    >"$TEST_DIR/output" 2>&1; then
+    fail "checksum mismatch was accepted"
+fi
+grep -q 'checksum verification failed' "$TEST_DIR/output" ||
+    fail "checksum failure was not reported"
+[ ! -e "$GOOSE_CACHE/goose-v3.30.0-amd64" ] ||
+    fail "checksum failure left an installed Goose binary"
+pass "Goose checksum mismatches fail closed"
 
 echo
 echo "=== no ZATCA DDL is duplicated in deployment ==="

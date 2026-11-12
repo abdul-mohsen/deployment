@@ -45,6 +45,7 @@ Areas:
   stack restart [flags]              Restart Dokku/dashboard stack
   setup all|dokku|nats|dev-tenant    Bootstrap server pieces
   db verify                          Check MySQL connectivity
+  db migrate-master [flags]          Apply the ZATCA-owned master Goose artifact
   dokku fix-hostname|discover-nginx|traffic
   webhook serve|tls
   cleanup old-files
@@ -71,7 +72,7 @@ need_arg() {
 
 script_accepts_config() {
     case "$1" in
-        auto-pull.sh|backup-tenant.sh|cleanup-broken-tenant.sh|create-tenant.sh|deploy-all.sh|health-zatca-daemon.sh|init-tenant-db.sh|list-tenants.sh|manage-backups.sh|migration-status.sh|remove-tenant.sh|reload-zatca-daemon.sh|restore-tenant.sh|restart-stack.sh|rollback-tenant.sh|set-tenant-image.sh|setup-dev-tenant.sh|setup-nats.sh|setup-zatca-daemon.sh|setup.sh|status.sh|update-tenant.sh|webhook-server.sh)
+        auto-pull.sh|backup-tenant.sh|cleanup-broken-tenant.sh|create-tenant.sh|deploy-all.sh|health-zatca-daemon.sh|init-tenant-db.sh|list-tenants.sh|manage-backups.sh|migrate-zatca-master.sh|migration-status.sh|remove-tenant.sh|reload-zatca-daemon.sh|restore-tenant.sh|restart-stack.sh|rollback-tenant.sh|set-tenant-image.sh|setup-dev-tenant.sh|setup-nats.sh|setup-zatca-daemon.sh|setup.sh|status.sh|update-tenant.sh|webhook-server.sh)
             return 0
             ;;
         *)
@@ -264,6 +265,9 @@ db_cmd() {
     shift || true
     case "$verb" in
         verify|check) run_script verify-mysql.sh "$@" ;;
+        migrate-master|migrate-zatca-master|master-migrate)
+            run_script migrate-zatca-master.sh "$@"
+            ;;
         init)
             local name="${1:-}"; need_arg "$name" "tenant name"; shift
             run_script init-tenant-db.sh "$name" "$@"

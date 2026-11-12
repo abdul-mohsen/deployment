@@ -565,6 +565,16 @@ if [ -n "$BACKEND_IMAGE" ]; then
     fi
 fi
 
+# Prepare the ZATCA-owned master registry before even checking for tenant apps.
+# The migration command owns the lock, pre-Goose backup, legacy policy, Goose
+# invocation, and trigger verification.
+if ! $DRY_RUN && ! $NO_DATABASE && mysql_admin_configured; then
+    if ! bash "$SCRIPT_DIR/migrate-zatca-master.sh" --config "$CONFIG_FILE"; then
+        error "ZATCA master migration failed; refusing tenant provisioning."
+        exit 1
+    fi
+fi
+
 # Check if apps already exist
 if dokku apps:exists "$BACKEND_APP" 2>/dev/null; then
     BACKEND_APP_EXISTED=true

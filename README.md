@@ -144,6 +144,21 @@ sudo ./scripts/setup.sh
 sudo ./scripts/deployctl.sh setup dev-tenant        # creates the one dev tenant
 ```
 
+### ZATCA master migration and Goose
+
+Before the first tenant is created, the deployment runs the ZATCA-owned master
+migration artifact. `ZATCA_MASTER_MIGRATION_ARTIFACT` and the master database
+credentials/DSN are still required; the deployment repository does not contain
+the ZATCA SQL.
+
+`ZATCA_MASTER_GOOSE_BIN` is optional. When it is unset, the migration command
+uses `goose` from `PATH`; if that is unavailable, it downloads and checksum-
+verifies the pinned Linux Goose release into the deployment state cache and
+reuses it on later runs. Set `ZATCA_MASTER_GOOSE_BIN` only when you want to use
+a specific installed binary. The cache location can optionally be changed with
+`ZATCA_MASTER_GOOSE_CACHE_DIR`. Automatic acquisition supports Linux `amd64`
+and `arm64`; other hosts must provide an explicit Goose binary.
+
 ## Day-2 operations
 
 | Task | Command |

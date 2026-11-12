@@ -51,6 +51,7 @@ jobs:
           bash scripts/tests/test-runtime-identity-restore.sh
           bash scripts/tests/test-create-tenant-image-rollback.sh
           bash scripts/tests/test-deployctl.sh
+          bash scripts/tests/test-migrate-zatca-master.sh
           bash scripts/tests/test-zatca-runtime.sh
 
       - name: Check PR215 MySQL rehearsal availability

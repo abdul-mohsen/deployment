@@ -53,6 +53,7 @@ type server struct {
 	store           *sessions.CookieStore
 	snapshots       *snapshotCache
 	migrations      *migrationMonitor
+	masterMigration *masterMigrationJob
 	tenantState     *tenantstate.Store
 	imageTags       imageTagSetLookup
 	imageTagsByRepo imageTagRepoLookup
@@ -109,6 +110,7 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 	s.snapshots.Start(context.Background())
 	s.migrations = newMigrationMonitor(runner)
 	s.migrations.Start(context.Background())
+	s.masterMigration = newMasterMigrationJob(runner)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -150,6 +152,11 @@ func Router(cfg config.Config, d *dokku.Client, l *logbuf.Store, runner *scripts
 		r.Get("/api/status", s.handleAPIStatus)
 		r.Get("/api/image-tags", s.handleImageTags)
 		r.Get("/api/releases", s.handleAPIReleases)
+		r.Group(func(r chi.Router) {
+			r.Use(s.requireAdmin)
+			r.Get("/api/migrations/zatca-master", s.handleMasterMigrationStatus)
+			r.Post("/api/migrations/zatca-master/run", s.handleMasterMigrationRun)
+		})
 		r.Get("/events", s.handleEvents)
 		r.Get("/settings/password", s.handlePasswordPage)
 		r.Post("/settings/password", s.handlePasswordSubmit)
@@ -212,6 +219,22 @@ func (s *server) requireAuth(next http.Handler) http.Handler {
 				return
 			}
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *server) requireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.store == nil {
+			http.Error(w, "admin access required", http.StatusForbidden)
+			return
+		}
+		sess, _ := s.store.Get(r, sessionName)
+		user, _ := sess.Values["user"].(string)
+		if strings.TrimSpace(user) == "" || user != s.cfg.AdminUser {
+			http.Error(w, "admin access required", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -327,8 +350,34 @@ func (s *server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		"SnapshotError":  snap.Error,
 		"UpdatedAt":      snap.UpdatedAt,
 		"Refreshing":     snap.Refreshing,
+		"IsAdmin":        s.isAdminRequest(r),
 	}
 	s.render(w, "index.html", data)
+}
+
+func (s *server) isAdminRequest(r *http.Request) bool {
+	if s.store == nil {
+		return false
+	}
+	sess, _ := s.store.Get(r, sessionName)
+	user, _ := sess.Values["user"].(string)
+	return strings.TrimSpace(user) != "" && user == s.cfg.AdminUser
+}
+
+func (s *server) handleMasterMigrationStatus(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = writeMasterMigrationStatus(w, s.masterMigration.Status())
+}
+
+func (s *server) handleMasterMigrationRun(w http.ResponseWriter, _ *http.Request) {
+	status, started := s.masterMigration.Start()
+	w.Header().Set("Content-Type", "application/json")
+	if !started {
+		w.WriteHeader(http.StatusConflict)
+	} else {
+		w.WriteHeader(http.StatusAccepted)
+	}
+	_ = writeMasterMigrationStatus(w, status)
 }
 
 func (s *server) handleApp(w http.ResponseWriter, r *http.Request) {

@@ -365,6 +365,8 @@ func (s Script) ControlCommand() string {
 		return "tenant init-db"
 	case "migration-status":
 		return "tenant migration-status"
+	case "migrate-zatca-master":
+		return "db migrate-master"
 	case "remove-tenant":
 		return "tenant remove"
 	case "cleanup-broken-tenant":
@@ -626,6 +628,17 @@ func Catalog() []Script {
 			Fields: []Field{
 				{Name: "tenant", Label: "Tenant filter", Flag: "--tenant", Type: "text", Placeholder: "(all)"},
 				{Name: "json", Label: "JSON output", Flag: "--json", Type: "checkbox", Boolean: true},
+			},
+		},
+		{
+			Name: "migrate-zatca-master.sh", Title: "Migrate ZATCA master",
+			Summary: "Back up and apply the external ZATCA-owned master Goose artifact.",
+			Danger:  true,
+			Fields: []Field{
+				{Name: "legacy_policy", Label: "Legacy policy", Flag: "--legacy-policy", Type: "select",
+					Options: []string{"refuse", "baseline"}, Default: "refuse",
+					Help: "Legacy registries are refused by default; baseline requires explicit operator authorization."},
+				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
 			},
 		},
 		{

@@ -80,6 +80,25 @@ load_stack_env() {
     DOKKU_HOSTNAME="${DOKKU_HOSTNAME:-${BASE_DOMAIN:-localtest.me}}"
 }
 
+run_zatca_master_migration() {
+    local log_file="${DEPLOY_LOG_FILE:-${LOG_DIR:-${REPO_DIR}/logs}/zatca-master-migration.log}"
+    local log_dir
+    log_dir="$(dirname "$log_file")"
+    if ! mkdir -p "$log_dir"; then
+        error "Could not create the ZATCA migration log directory: $log_dir"
+        return 1
+    fi
+    export DEPLOY_LOG_FILE="$log_file"
+
+    log "Running ZATCA master migration before stack startup."
+    if ! bash "${SCRIPT_DIR}/migrate-zatca-master.sh" --config "$CONFIG_FILE" 2>&1 |
+        tee -a "$log_file"; then
+        error "ZATCA master migration failed during stack startup; startup aborted. Review $log_file."
+        return 1
+    fi
+    log "ZATCA master migration completed before stack startup."
+}
+
 zatca_daemon_enabled() {
     case "${ZATCA_DAEMON_ENABLED:-0}" in
         1|true|yes) return 0 ;;
@@ -281,6 +300,12 @@ start_or_recreate_dokku() {
 }
 
 load_stack_env
+
+if ! $DOKKU_ONLY && ! $DASHBOARD_ONLY; then
+    if ! run_zatca_master_migration; then
+        exit 1
+    fi
+fi
 
 if ! $DOKKU_ONLY; then
     while IFS= read -r env_name; do

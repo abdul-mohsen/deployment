@@ -91,11 +91,18 @@ run_zatca_master_migration() {
     export DEPLOY_LOG_FILE="$log_file"
 
     log "Running ZATCA master migration before stack startup."
-    if ! bash "${SCRIPT_DIR}/migrate-zatca-master.sh" --config "$CONFIG_FILE" 2>&1 |
-        tee -a "$log_file"; then
+    if ! (
+        DEPLOY_LOG_FILE="$log_file" \
+            bash "${SCRIPT_DIR}/migrate-zatca-master.sh" --config "$CONFIG_FILE" 2>&1 |
+            tee -a "$log_file"
+    ); then
+        DEPLOY_LOG_FILE="$log_file" deployment_log ERROR \
+            "ZATCA master migration failed during stack startup"
         error "ZATCA master migration failed during stack startup; startup aborted. Review $log_file."
         return 1
     fi
+    DEPLOY_LOG_FILE="$log_file" deployment_log INFO \
+        "ZATCA master migration completed before stack startup"
     log "ZATCA master migration completed before stack startup."
 }
 
@@ -132,6 +139,10 @@ dashboard_container_for() { echo "dokku-dashboard-$1"; }
 
 dump_logs() {
     local container="$1"
+    if ! docker inspect "$container" >/dev/null 2>&1; then
+        echo "    container=${container} not found; no container logs available." >&2
+        return 0
+    fi
     docker logs --tail 200 "$container" 2>&1 | sed 's/^/    /' >&2 || true
 }
 

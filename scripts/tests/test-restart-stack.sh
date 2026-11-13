@@ -184,6 +184,11 @@ rm -rf "$BOOT_TEST_DIR"
 
 echo
 echo "=== 9. restart-stack.sh stops before starting ==="
+grep -q 'docker inspect "\$container"' scripts/restart-stack.sh \
+    && grep -q 'container=\${container} not found' scripts/restart-stack.sh \
+    && grep -q 'Compose failed before the dashboard container was created' dashboard/prod-up.sh \
+    && PASS "missing dashboard containers do not produce secondary log errors" \
+    || FAIL "dashboard failure diagnostics must handle missing containers"
 if grep -q 'docker restart dokku' scripts/restart-stack.sh; then
     FAIL "restart-stack must not use docker restart dokku"
 else

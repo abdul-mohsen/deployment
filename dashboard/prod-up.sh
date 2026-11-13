@@ -52,10 +52,18 @@ deployment_failure_report() {
         2>/dev/null | sed -n '1p' | cut -c1-2048 >&2; then
         echo "    container=${CONTAINER} not found" >&2
     fi
-    echo "    Recent dashboard logs (up to ${DASHBOARD_LOG_TAIL_LINES} lines):" >&2
-    docker logs --tail "$DASHBOARD_LOG_TAIL_LINES" --timestamps "$CONTAINER" 2>&1 \
-        | sed -n "1,${DASHBOARD_LOG_TAIL_LINES}p" \
-        | sed 's/^/      /' >&2 || true
+    if docker inspect "$CONTAINER" >/dev/null 2>&1; then
+        echo "    Recent dashboard logs (up to ${DASHBOARD_LOG_TAIL_LINES} lines):" >&2
+        docker logs --tail "$DASHBOARD_LOG_TAIL_LINES" --timestamps "$CONTAINER" 2>&1 \
+            | sed -n "1,${DASHBOARD_LOG_TAIL_LINES}p" \
+            | sed 's/^/      /' >&2 || true
+    else
+        echo "    container=${CONTAINER} not found; Compose failed before the dashboard container was created." >&2
+        echo "    Compose state:" >&2
+        docker compose -f "$COMPOSE_FILE" ps -a 2>&1 \
+            | sed -n '1,80p' \
+            | sed 's/^/      /' >&2 || true
+    fi
 }
 
 deployment_init_logging

@@ -59,7 +59,6 @@ if [ -n "$GOOSE_BIN" ]; then
     GOOSE_BIN_EXPLICIT=true
 fi
 GOOSE_CACHE_DIR="${ZATCA_MASTER_GOOSE_CACHE_DIR:-${DEPLOY_STATE_DIR:-${PROJECT_DIR}/state}/bin}"
-GOOSE_DSN="${ZATCA_MASTER_GOOSE_DSN:-${MYSQL_MASTER_DSN:-}}"
 LOCK_FILE="${ZATCA_MASTER_MIGRATION_LOCK_FILE:-${DEPLOY_STATE_DIR:-${PROJECT_DIR}/state}/zatca-master-migration.lock}"
 BACKUP_DIR="${ZATCA_MASTER_BACKUP_DIR:-${BACKUP_DIR:-/opt/tenant-backups}}"
 DRY_RUN=false
@@ -75,7 +74,6 @@ The approved ZATCA source is fetched at a pinned revision and cached locally.
 Options:
   --config <path>                 Config file (default: ../config.env)
   --goose-bin <path>              Goose executable (otherwise auto-installed)
-  --dsn <dsn>                     Goose MySQL DSN (otherwise built from config)
   --master-db <name>              Master database (default: zatca_master)
   --dry-run                       Validate configuration without changing MySQL
 USAGE
@@ -83,7 +81,7 @@ USAGE
 
 for ((i = 1; i <= $#; i++)); do
     case "${!i}" in
-        --config|--goose-bin|--dsn|--master-db)
+        --config|--goose-bin|--master-db)
             i=$((i + 1))
             ;;
         --dry-run|--help|-h) ;;
@@ -95,7 +93,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)          CONFIG_FILE="$2"; shift 2 ;;
         --goose-bin)       GOOSE_BIN="$2"; GOOSE_BIN_EXPLICIT=true; shift 2 ;;
-        --dsn)             GOOSE_DSN="$2"; shift 2 ;;
         --master-db)       MASTER_DB="$2"; shift 2 ;;
         --dry-run)         DRY_RUN=true; shift ;;
         --help|-h)         usage; exit 0 ;;
@@ -202,10 +199,6 @@ mysql_dsn_escape() {
 }
 
 goose_dsn() {
-    if [ -n "$GOOSE_DSN" ]; then
-        printf '%s' "$GOOSE_DSN"
-        return 0
-    fi
     local host user password port
     host="$(goose_connection_host)"
     port="${MYSQL_PORT:-3306}"
@@ -445,6 +438,48 @@ resolve_goose_bin() {
     download_goose
 }
 
+goose_run_in_bridge() {
+    local action="$1" dsn="$2" bundle_dir bundle
+    command -v docker >/dev/null 2>&1 || {
+        error "Docker is required to run Goose through the deployment MySQL network."
+        return 1
+    }
+    mkdir -p "$GOOSE_CACHE_DIR" || return 1
+    bundle_dir="$(mktemp -d "$GOOSE_CACHE_DIR/.goose-run.XXXXXX")" || return 1
+    bundle="$(mktemp "$GOOSE_CACHE_DIR/.goose-bundle.XXXXXX.tar.gz")" || {
+        rm -rf "$bundle_dir"
+        return 1
+    }
+    mkdir -p "$bundle_dir/bin" "$bundle_dir/migrations" || {
+        rm -rf "$bundle_dir" "$bundle"
+        return 1
+    }
+    cp "$GOOSE_BIN" "$bundle_dir/bin/goose" || {
+        rm -rf "$bundle_dir" "$bundle"
+        return 1
+    }
+    cp -R "$ARTIFACT_DIR/." "$bundle_dir/migrations/" || {
+        rm -rf "$bundle_dir" "$bundle"
+        return 1
+    }
+    chmod 0755 "$bundle_dir/bin/goose"
+    tar -czf "$bundle" -C "$bundle_dir" . || {
+        rm -rf "$bundle_dir" "$bundle"
+        return 1
+    }
+    docker run --rm -i \
+        --network bridge \
+        --add-host host.docker.internal:host-gateway \
+        -e "GOOSE_DSN=$dsn" \
+        -e "GOOSE_ACTION=$action" \
+        "${GOOSE_RUNNER_IMAGE:-${SCRIPT_RUNNER_IMAGE:-dokku/dokku:latest}}" \
+        bash -c 'set -e; mkdir -p /tmp/goose; tar -xzf - -C /tmp/goose; exec /tmp/goose/bin/goose -dir /tmp/goose/migrations mysql "$GOOSE_DSN" "$GOOSE_ACTION"' \
+        < "$bundle"
+    local status=$?
+    rm -rf "$bundle_dir" "$bundle"
+    return "$status"
+}
+
 classify_goose_failure() {
     local output="$1"
     if printf '%s\n' "$output" | grep -Eiq \
@@ -474,7 +509,12 @@ goose_run() {
     user="$(mysql_admin_user)"
     info "Running Goose action=$action database=$MASTER_DB host=$host port=$port user=$user"
     dsn="$(goose_dsn)" || return 1
-    if output="$("$GOOSE_BIN" -dir "$ARTIFACT_DIR" mysql "$dsn" "$action" 2>&1)"; then
+    if [ "${ZATCA_MASTER_GOOSE_IN_DOCKER:-0}" = "1" ]; then
+        if output="$(goose_run_in_bridge "$action" "$dsn" 2>&1)"; then
+            printf '%s\n' "$output"
+            return 0
+        fi
+    elif output="$("$GOOSE_BIN" -dir "$ARTIFACT_DIR" mysql "$dsn" "$action" 2>&1)"; then
         printf '%s\n' "$output"
         return 0
     fi

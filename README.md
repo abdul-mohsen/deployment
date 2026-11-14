@@ -101,6 +101,22 @@ templates/                  # COPY these into your backend / frontend repos
 - MySQL on the host (or reachable via `host.docker.internal`)
 - Wildcard DNS: `*.app.example.com → server IP`
 
+## Master database migration readiness
+
+Tenant provisioning checks host-MySQL connectivity before backing up or
+changing the `zatca_master` schema. The deployment client and Goose use the
+same configured account (`MYSQL_ADMIN_USER`/`MYSQL_ADMIN_PASSWORD`, with the
+existing `MYSQL_ROOT_USER`/`MYSQL_ROOT_PASSWORD` fallback) and host settings;
+hostnames are resolved for each client's execution context. The Goose-bridge
+preflight uses the MySQL client, not the Goose binary. Goose then receives the
+configured credentials in the MySQL driver's DSN format; do not URL-encode the
+username or password.
+
+Connection attempts are bounded to five seconds. A failed connectivity or
+authentication check stops provisioning before migration side effects. For an
+authentication rejection, verify the configured password and matching MySQL
+`user@host` account; do not expose credentials in logs or support reports.
+
 ## Deployment logging and observability
 
 The dashboard emits JSON `log/slog` events by default. Configure

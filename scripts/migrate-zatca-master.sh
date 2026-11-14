@@ -556,7 +556,7 @@ preflight_mysql_connection() {
             --network bridge \
             --add-host host.docker.internal:host-gateway \
             -e "MYSQL_PWD=$password" \
-            "${GOOSE_RUNNER_IMAGE:-${SCRIPT_RUNNER_IMAGE:-dokku/dokku:latest}}" \
+            mysql:8.0 \
             mysql --protocol=TCP -h "$host" -P "$port" -u "$user" "$MASTER_DB" \
             -N -B -e "$query" 2>&1)"; then
             printf '%s\n' "$goose_output" >&2

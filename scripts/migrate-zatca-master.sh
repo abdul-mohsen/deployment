@@ -57,7 +57,7 @@ if [ -n "$GOOSE_BIN" ]; then
 fi
 GOOSE_CACHE_DIR="${ZATCA_MASTER_GOOSE_CACHE_DIR:-${DEPLOY_STATE_DIR:-${PROJECT_DIR}/state}/bin}"
 GOOSE_DSN="${ZATCA_MASTER_GOOSE_DSN:-${MYSQL_MASTER_DSN:-}}"
-LEGACY_POLICY="${ZATCA_MASTER_LEGACY_POLICY:-refuse}"
+LEGACY_POLICY="${ZATCA_MASTER_LEGACY_POLICY:-baseline}"
 LOCK_FILE="${ZATCA_MASTER_MIGRATION_LOCK_FILE:-${DEPLOY_STATE_DIR:-${PROJECT_DIR}/state}/zatca-master-migration.lock}"
 BACKUP_DIR="${ZATCA_MASTER_BACKUP_DIR:-${BACKUP_DIR:-/opt/tenant-backups}}"
 DRY_RUN=false
@@ -77,7 +77,7 @@ Options:
   --goose-bin <path>              Goose executable (otherwise auto-installed)
   --dsn <dsn>                     Goose MySQL DSN (otherwise built from config)
   --master-db <name>              Master database (default: zatca_master)
-  --legacy-policy refuse|baseline Refuse legacy DBs, or explicitly baseline v1
+  --legacy-policy refuse|baseline Refuse legacy DBs, or baseline v1 (default: baseline)
   --dry-run                       Validate configuration without changing MySQL
 USAGE
 }

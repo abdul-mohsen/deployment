@@ -31,6 +31,10 @@ EOF
 cat > "$BIN/goose" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_GOOSE_LOG"
+[ -n "${STUB_GOOSE_ERROR:-}" ] && {
+    printf '%s\n' "$STUB_GOOSE_ERROR" >&2
+    exit 1
+}
 [ "${STUB_GOOSE_FAIL:-0}" = "1" ] && exit 1
 exit 0
 EOF
@@ -38,6 +42,10 @@ EOF
 cat > "$GOOSE_FIXTURE" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$STUB_GOOSE_LOG"
+[ -n "${STUB_GOOSE_ERROR:-}" ] && {
+    printf '%s\n' "$STUB_GOOSE_ERROR" >&2
+    exit 1
+}
 exit 0
 EOF
 
@@ -154,7 +162,7 @@ grep -v '^ZATCA_MASTER_GOOSE_BIN=' "$TEST_DIR/config.env" > "$TEST_DIR/auto-conf
 printf 'ZATCA_MASTER_GOOSE_CACHE_DIR=%s\n' "$GOOSE_CACHE" >> "$TEST_DIR/auto-config.env"
 ZATCA_SOURCE_ARCHIVE="$SOURCE_ARCHIVE"
 STUB_CURL_LOG="$TEST_DIR/curl.log"
-export ZATCA_SOURCE_ARCHIVE STUB_CURL_LOG
+export ZATCA_SOURCE_ARCHIVE STUB_CURL_LOG GOOSE_FIXTURE
 
 run_migration() {
     : > "$TEST_DIR/goose.log"
@@ -323,6 +331,32 @@ grep -q 'checksum verification failed' "$TEST_DIR/output" ||
 [ ! -e "$GOOSE_CACHE/goose-v3.30.0-amd64" ] ||
     fail "checksum failure left an installed Goose binary"
 pass "Goose checksum mismatches fail closed"
+
+echo
+echo "=== Goose failures are classified by layer ==="
+run_classification_case() {
+    local goose_error="$1" expected="$2"
+    : > "$TEST_DIR/goose.log"
+    if STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
+        STUB_GOOSE_ERROR="$goose_error" STUB_GOOSE_LOG="$TEST_DIR/goose.log" \
+        STUB_MYSQL_LOG="$TEST_DIR/mysql.log" PATH="$BIN:$PATH" \
+        bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/auto-config.env" \
+        >"$TEST_DIR/output" 2>&1; then
+        fail "Goose failure was accepted: $goose_error"
+    fi
+    grep -q "$expected" "$TEST_DIR/output" ||
+        { cat "$TEST_DIR/output"; fail "Goose failure was not classified: $goose_error"; }
+}
+run_classification_case \
+    "Error 1045 (28000): Access denied for user 'dokku_admin'@'192.168.8.103'" \
+    'authentication was rejected'
+run_classification_case \
+    'dial tcp: lookup host.docker.internal: no such host' \
+    'could not connect to MySQL'
+run_classification_case \
+    "Error 1050 (42S01): Table 'tenant' already exists" \
+    'migration SQL failed'
+pass "Goose authentication, connection, and SQL failures are distinct"
 
 echo
 echo "=== no ZATCA DDL is duplicated in deployment ==="

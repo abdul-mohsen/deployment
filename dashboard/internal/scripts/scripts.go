@@ -911,7 +911,9 @@ func (r *Runner) dockerArgs(dockerSocket string) []string {
 		"-e", "TENANT_NAME_PREFIX_OVERRIDE=" + os.Getenv("TENANT_NAME_PREFIX"),
 		"-e", "DASHBOARD_ENV=" + os.Getenv("DASHBOARD_ENV"),
 		"-e", "DEPLOYMENT_SCRIPTS_REVISION=" + os.Getenv("DEPLOYMENT_SCRIPTS_REVISION"),
+		"-e", "ZATCA_MASTER_GOOSE_IN_DOCKER=1",
 		"-v", dockerSocket,
+		"--add-host", "host.docker.internal:host-gateway",
 		"-v", r.scriptsHostPath + ":/opt/deployment:ro",
 		"--network", "host",
 	}

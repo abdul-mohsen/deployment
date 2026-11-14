@@ -22,3 +22,12 @@ func TestRunnerMountsPersistentTenantDirectories(t *testing.T) {
 		}
 	}
 }
+
+func TestRunnerAddsDockerHostGateway(t *testing.T) {
+	r := NewRunner("docker", "runner:latest", "/opt/deployment", "")
+	args := r.dockerArgs("/var/run/docker.sock:/var/run/docker.sock")
+	if !slices.Contains(args, "--add-host") ||
+		!slices.Contains(args, "host.docker.internal:host-gateway") {
+		t.Fatalf("runner args missing host-gateway mapping: %v", args)
+	}
+}

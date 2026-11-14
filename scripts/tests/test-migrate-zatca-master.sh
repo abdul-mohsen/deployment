@@ -192,18 +192,19 @@ grep -q ' mysql .* up$' "$TEST_DIR/goose.log" || fail "fresh migration did not r
 pass "fresh database backup and Goose ordering"
 
 echo
-echo "=== Goose uses host loopback in the host-network runner ==="
+echo "=== Goose uses the host gateway in the dashboard runner ==="
 : > "$TEST_DIR/goose.log"
 if ! STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
+    ZATCA_MASTER_GOOSE_IN_DOCKER=1 \
     STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
     PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/config.env" \
     >"$TEST_DIR/output" 2>&1; then
     cat "$TEST_DIR/output"
-    fail "host-network Goose migration failed"
+    fail "dashboard Goose host-gateway migration failed"
 fi
-grep -q '127.0.0.1' "$TEST_DIR/goose.log" ||
-    fail "host-network Goose did not use 127.0.0.1"
-pass "host-network Goose uses host loopback"
+grep -q 'host.docker.internal' "$TEST_DIR/goose.log" ||
+    fail "dashboard Goose did not use host.docker.internal"
+pass "dashboard Goose uses the host gateway"
 
 echo
 echo "=== legacy database auto-baselines by default ==="

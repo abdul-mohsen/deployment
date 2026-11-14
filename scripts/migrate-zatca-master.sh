@@ -207,8 +207,7 @@ goose_dsn() {
         return 0
     fi
     local host user password port
-    host="${ZATCA_MASTER_GOOSE_HOST:-${MYSQL_HOST:-127.0.0.1}}"
-    [ "$host" = "host.docker.internal" ] && host="127.0.0.1"
+    host="$(goose_connection_host)"
     port="${MYSQL_PORT:-3306}"
     user="$(mysql_admin_user)"
     password="$(mysql_admin_password)"
@@ -220,6 +219,18 @@ goose_dsn() {
         "$(mysql_dsn_escape "$user")" \
         "$(mysql_dsn_escape "$password")" \
         "$host" "$port" "$MASTER_DB"
+}
+
+goose_connection_host() {
+    local host="${ZATCA_MASTER_GOOSE_HOST:-${MYSQL_HOST:-127.0.0.1}}"
+    if [ "${ZATCA_MASTER_GOOSE_IN_DOCKER:-0}" = "1" ]; then
+        case "$host" in
+            localhost|127.0.0.1|::1) host="host.docker.internal" ;;
+        esac
+    elif [ "$host" = "host.docker.internal" ]; then
+        host="127.0.0.1"
+    fi
+    printf '%s' "$host"
 }
 
 master_database_exists() {
@@ -435,13 +446,20 @@ resolve_goose_bin() {
 }
 
 goose_run() {
-    local action="$1" dsn
+    local action="$1" dsn host port user
+    host="$(goose_connection_host)"
+    port="${MYSQL_PORT:-3306}"
+    user="$(mysql_admin_user)"
+    info "Running Goose action=$action database=$MASTER_DB host=$host port=$port user=$user"
     dsn="$(goose_dsn)" || return 1
-    "$GOOSE_BIN" -dir "$ARTIFACT_DIR" mysql "$dsn" "$action"
+    if ! "$GOOSE_BIN" -dir "$ARTIFACT_DIR" mysql "$dsn" "$action"; then
+        error "Goose action failed: action=$action database=$MASTER_DB host=$host port=$port user=$user"
+        return 1
+    fi
 }
 
 baseline_legacy_registry() {
-    log "Recording the explicit ZATCA baseline for the legacy master registry"
+    log "Recording the ZATCA baseline for the legacy master registry"
     goose_run version || {
         error "Goose could not initialize its ledger for the legacy master registry."
         return 1

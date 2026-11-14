@@ -92,6 +92,13 @@ EOF
 cat > "$BIN/docker" <<'EOF'
 #!/usr/bin/env bash
 cat >/dev/null
+if [ -n "${STUB_DOCKER_LOG:-}" ]; then
+    for arg in "$@"; do
+        case "$arg" in
+            --connect-timeout=*) printf '%s\n' "$arg" >> "$STUB_DOCKER_LOG" ;;
+        esac
+    done
+fi
 dsn=""
 for arg in "$@"; do
     case "$arg" in
@@ -188,6 +195,7 @@ export ZATCA_SOURCE_ARCHIVE STUB_CURL_LOG GOOSE_FIXTURE
 run_migration() {
     : > "$TEST_DIR/goose.log"
     : > "$TEST_DIR/mysql.log"
+    : > "$TEST_DIR/docker.log"
     rm -rf "$TEST_DIR/backups" "$TEST_DIR/logs"
     mkdir -p "$TEST_DIR/backups" "$TEST_DIR/logs"
     STUB_GOOSE_LOG="$TEST_DIR/goose.log" \
@@ -217,7 +225,58 @@ grep -q 'Deployment MySQL preflight failed' "$TEST_DIR/output" ||
     fail "preflight failure was not reported"
 [ ! -e "$TEST_DIR/backups" ] ||
     fail "preflight failure created a backup"
+grep -Fq -- '--connect-timeout=5' "$TEST_DIR/mysql.log" ||
+    fail "deployment preflight did not set a five-second connection timeout"
+if grep -Fq 'root-password' "$TEST_DIR/output"; then
+    fail "deployment preflight output leaked the configured password"
+fi
 pass "failed MySQL preflight stops before backup"
+
+echo
+echo "=== failed Goose-bridge preflight stops before backup ==="
+rm -rf "$TEST_DIR/backups" "$TEST_DIR/logs"
+mkdir -p "$TEST_DIR/logs"
+: > "$TEST_DIR/docker.log"
+if STUB_GOOSE_ERROR="Error 1045 (28000): Access denied for user 'root'@'172.0.0.4' (using password: YES)" \
+    ZATCA_MASTER_GOOSE_IN_DOCKER=1 STUB_DOCKER_LOG="$TEST_DIR/docker.log" \
+    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
+    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh \
+    --config "$TEST_DIR/config.env" >"$TEST_DIR/output" 2>&1; then
+    fail "failed Goose-bridge preflight was accepted"
+fi
+grep -q 'Goose bridge MySQL preflight failed (category=authentication' "$TEST_DIR/output" ||
+    fail "Goose-bridge authentication failure was not reported"
+[ ! -e "$TEST_DIR/backups" ] ||
+    fail "Goose-bridge preflight failure created a backup"
+grep -Fq -- '--connect-timeout=5' "$TEST_DIR/docker.log" ||
+    fail "Goose-bridge preflight did not set a five-second connection timeout"
+if grep -Fq 'root-password' "$TEST_DIR/output"; then
+    fail "Goose-bridge preflight output leaked the configured password"
+fi
+pass "failed Goose-bridge preflight stops before backup"
+
+echo
+echo "=== failed Goose-bridge connection preflight stops before backup ==="
+rm -rf "$TEST_DIR/backups" "$TEST_DIR/logs"
+mkdir -p "$TEST_DIR/logs"
+: > "$TEST_DIR/docker.log"
+if STUB_GOOSE_ERROR='dial tcp: lookup host.docker.internal: no such host' \
+    ZATCA_MASTER_GOOSE_IN_DOCKER=1 STUB_DOCKER_LOG="$TEST_DIR/docker.log" \
+    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
+    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh \
+    --config "$TEST_DIR/config.env" >"$TEST_DIR/output" 2>&1; then
+    fail "failed Goose-bridge connection preflight was accepted"
+fi
+grep -q 'Goose bridge MySQL preflight failed (category=connection' "$TEST_DIR/output" ||
+    fail "Goose-bridge connection failure was not reported"
+[ ! -e "$TEST_DIR/backups" ] ||
+    fail "Goose-bridge connection failure created a backup"
+grep -Fq -- '--connect-timeout=5' "$TEST_DIR/docker.log" ||
+    fail "Goose-bridge connection preflight did not set a five-second timeout"
+if grep -Fq 'root-password' "$TEST_DIR/output"; then
+    fail "Goose-bridge connection output leaked the configured password"
+fi
+pass "failed Goose-bridge connection preflight stops before backup"
 
 echo
 echo "=== fresh database backs up before Goose ==="
@@ -248,6 +307,51 @@ fi
 grep -q 'host.docker.internal' "$TEST_DIR/goose.log" ||
     fail "bridge Goose did not use host.docker.internal"
 pass "dashboard Goose uses the host gateway"
+
+echo
+echo "=== Goose preserves punctuation in configured MySQL credentials ==="
+SPECIAL_PASSWORD='special%:@/?#;password'
+cat > "$TEST_DIR/special-config.env" <<EOF
+MYSQL_CLIENT_MODE=host
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_ROOT_USER=root
+MYSQL_ROOT_PASSWORD='$SPECIAL_PASSWORD'
+MYSQL_MASTER_DB=zatca_master
+BACKUP_DIR=$TEST_DIR/backups
+LOG_DIR=$TEST_DIR/logs
+ZATCA_MASTER_GOOSE_BIN=goose
+ZATCA_MASTER_MIGRATION_LOCK_FILE=$TEST_DIR/master.lock
+ZATCA_MASTER_MIGRATION_CACHE_DIR=$TEST_DIR/zatca-cache
+EOF
+: > "$TEST_DIR/goose.log"
+: > "$TEST_DIR/mysql.log"
+: > "$TEST_DIR/docker.log"
+rm -rf "$TEST_DIR/backups" "$TEST_DIR/logs"
+mkdir -p "$TEST_DIR/backups" "$TEST_DIR/logs"
+if ! STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
+    ZATCA_MASTER_GOOSE_IN_DOCKER=1 \
+    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
+    STUB_DOCKER_LOG="$TEST_DIR/docker.log" \
+    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh \
+    --config "$TEST_DIR/special-config.env" >"$TEST_DIR/output" 2>&1; then
+    cat "$TEST_DIR/output"
+    fail "Goose rejected the punctuation credential fixture"
+fi
+expected_dsn="root:${SPECIAL_PASSWORD}@tcp(host.docker.internal:3306)/zatca_master?timeout=5s"
+grep -Fq "$expected_dsn" "$TEST_DIR/goose.log" ||
+    fail "Goose did not receive the configured credentials and timeout unchanged"
+grep -Fq -- '--connect-timeout=5' "$TEST_DIR/mysql.log" ||
+    fail "MySQL helper preflight did not set a five-second connection timeout"
+grep -Fq -- '--connect-timeout=5' "$TEST_DIR/docker.log" ||
+    fail "Goose-bridge MySQL preflight did not set a five-second connection timeout"
+if grep -Fq "$SPECIAL_PASSWORD" "$TEST_DIR/output"; then
+    fail "migration output leaked the dummy MySQL password"
+fi
+if grep -Fq "$expected_dsn" "$TEST_DIR/output"; then
+    fail "migration output leaked the credential-bearing Goose DSN"
+fi
+pass "Goose receives the original punctuation credential"
 
 echo
 echo "=== legacy database auto-baselines by default ==="

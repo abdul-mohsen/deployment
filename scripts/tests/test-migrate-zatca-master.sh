@@ -89,6 +89,23 @@ else
 fi
 EOF
 
+cat > "$BIN/docker" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+dsn=""
+for arg in "$@"; do
+    case "$arg" in
+        GOOSE_DSN=*) dsn="${arg#GOOSE_DSN=}" ;;
+    esac
+done
+[ -n "$dsn" ] && printf '%s\n' "$dsn" >> "${STUB_GOOSE_LOG:?}"
+[ -n "${STUB_GOOSE_ERROR:-}" ] && {
+    printf '%s\n' "$STUB_GOOSE_ERROR" >&2
+    exit 1
+}
+exit 0
+EOF
+
 cat > "$BIN/mysql" <<'EOF'
 #!/usr/bin/env bash
 query="$*"
@@ -211,7 +228,7 @@ if ! STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=
     fail "dashboard Goose host-gateway migration failed"
 fi
 grep -q 'host.docker.internal' "$TEST_DIR/goose.log" ||
-    fail "dashboard Goose did not use host.docker.internal"
+    fail "bridge Goose did not use host.docker.internal"
 pass "dashboard Goose uses the host gateway"
 
 echo

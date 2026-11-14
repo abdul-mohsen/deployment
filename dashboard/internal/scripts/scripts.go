@@ -946,22 +946,25 @@ func validateRuntimeRevision() error {
 	return nil
 }
 
-// safeArg only allows characters that cannot escape an argv slot. We split on
-// whitespace ourselves and pass each piece as a discrete argv element, but we
-// still defensively reject anything that looks like a shell metachar so a
-// pasted command can't surprise us. Spaces and tabs are safe in arg values.
+// safeArg describes characters that are safe to display as a shell-compatible
+// argument. Arguments are still passed as discrete argv elements, so values
+// outside this set are warned about rather than rejected.
 var safeArg = regexp.MustCompile(`^[A-Za-z0-9._@/:=+,\-\s]+$`)
 
-func validateArgs(argv []string) error {
-	for _, a := range argv {
+func validateArgs(argv []string) ([]string, error) {
+	var warnings []string
+	for i, a := range argv {
 		if a == "" {
-			return errors.New("empty argument")
+			return nil, errors.New("empty argument")
 		}
 		if !safeArg.MatchString(a) {
-			return fmt.Errorf("argument %q contains disallowed characters", a)
+			warnings = append(warnings, fmt.Sprintf(
+				"argument %d contains characters outside the safe display set; it will be passed literally",
+				i+1,
+			))
 		}
 	}
-	return nil
+	return warnings, nil
 }
 
 // Run executes a script with already-built argv (extra flags after the script
@@ -999,8 +1002,18 @@ func (r *Runner) RunWithCallback(ctx context.Context, w io.Writer, scriptName st
 	if r.scriptsHostPath == "" {
 		return errors.New("SCRIPTS_HOST_PATH is not set; cannot mount scripts into runner container")
 	}
-	if err := validateArgs(argv); err != nil {
+	argWarnings, err := validateArgs(argv)
+	if err != nil {
 		return err
+	}
+	for _, warning := range argWarnings {
+		line := "WARNING: " + warning
+		if onLine != nil {
+			onLine(line)
+		}
+		if _, werr := fmt.Fprintf(w, "data: %s\n\n", line); werr != nil {
+			return werr
+		}
 	}
 	if r.configFile != "" {
 		argv = append(argv, "--config", r.configFile)

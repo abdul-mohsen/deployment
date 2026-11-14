@@ -2,6 +2,7 @@ package scripts
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/abdul-mohsen/deployment/dashboard/internal/buildinfo"
@@ -72,4 +73,34 @@ func TestValidateRuntimeRevisionRequiresMatchingProductionIdentity(t *testing.T)
 		t.Fatal("validateRuntimeRevision() = nil without script revision")
 	}
 
+}
+
+func TestValidateArgsWarnsForDisallowedCharacters(t *testing.T) {
+	warnings, err := validateArgs([]string{"--env", "ADMIN_PASSWORD=p@ss!word"})
+	if err != nil {
+		t.Fatalf("validateArgs returned an error: %v", err)
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings=%v, want one warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "argument 2") {
+		t.Fatalf("warning=%q, want argument index", warnings[0])
+	}
+}
+
+func TestValidateArgsStillRejectsEmptyArguments(t *testing.T) {
+	_, err := validateArgs([]string{"--env", ""})
+	if err == nil {
+		t.Fatal("validateArgs accepted an empty argument")
+	}
+}
+
+func TestValidateArgsAcceptsSafeArguments(t *testing.T) {
+	warnings, err := validateArgs([]string{"--env", "COMPANY_NAME=Acme Trading"})
+	if err != nil {
+		t.Fatalf("validateArgs returned an error: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings=%v, want none", warnings)
+	}
 }

@@ -186,18 +186,6 @@ fetch_zatca_migration_artifact() {
 
 fetch_zatca_migration_artifact || exit 1
 
-mysql_dsn_escape() {
-    local value="$1"
-    value="${value//%/%25}"
-    value="${value//\//%2F}"
-    value="${value//@/%40}"
-    value="${value//:/%3A}"
-    value="${value//\?/%3F}"
-    value="${value//#/%23}"
-    value="${value//;/%3B}"
-    printf '%s' "$value"
-}
-
 goose_dsn() {
     local host user password port
     host="$(goose_connection_host)"
@@ -208,10 +196,8 @@ goose_dsn() {
         error "A Goose DSN or configured MySQL admin credentials are required."
         return 1
     }
-    printf '%s:%s@tcp(%s:%s)/%s' \
-        "$(mysql_dsn_escape "$user")" \
-        "$(mysql_dsn_escape "$password")" \
-        "$host" "$port" "$MASTER_DB"
+    printf '%s:%s@tcp(%s:%s)/%s?timeout=5s' \
+        "$user" "$password" "$host" "$port" "$MASTER_DB"
 }
 
 goose_connection_host() {
@@ -541,7 +527,7 @@ preflight_mysql_connection() {
     local query helper_output goose_output host port user password category
     query="SELECT 1 AS ok, CURRENT_USER() AS authenticated_user, USER() AS connection_user, DATABASE() AS database_name;"
     log "Preflight: checking deployment MySQL connection"
-    if ! helper_output="$(run_mysql -N -B -e "$query")"; then
+    if ! helper_output="$(run_mysql --connect-timeout=5 -N -B -e "$query")"; then
         error "Deployment MySQL preflight failed before migration; no backup or schema change was attempted."
         return 1
     fi
@@ -557,7 +543,7 @@ preflight_mysql_connection() {
             --add-host host.docker.internal:host-gateway \
             -e "MYSQL_PWD=$password" \
             mysql:8.0 \
-            mysql --protocol=TCP -h "$host" -P "$port" -u "$user" "$MASTER_DB" \
+            mysql --protocol=TCP -h "$host" -P "$port" -u "$user" --connect-timeout=5 "$MASTER_DB" \
             -N -B -e "$query" 2>&1)"; then
             printf '%s\n' "$goose_output" >&2
             category="$(classify_goose_failure "$goose_output")"
@@ -566,7 +552,7 @@ preflight_mysql_connection() {
         fi
     else
         if ! goose_output="$(
-            MYSQL_PWD="$password" mysql --protocol=TCP -h "$host" -P "$port" -u "$user" "$MASTER_DB" \
+            MYSQL_PWD="$password" mysql --protocol=TCP -h "$host" -P "$port" -u "$user" --connect-timeout=5 "$MASTER_DB" \
                 -N -B -e "$query" 2>&1
         )"; then
             printf '%s\n' "$goose_output" >&2

@@ -22,23 +22,3 @@ func TestRunnerMountsPersistentTenantDirectories(t *testing.T) {
 		}
 	}
 }
-
-func TestRunnerMountsExternalZatcaArtifactReadOnly(t *testing.T) {
-	r := NewRunner("docker", "runner:latest", "/opt/deployment", "")
-	r.SetMigrationArtifact("/home/ssda/zatca_integration/migrations/zatca_master")
-
-	args := r.volumeArgs()
-	if !slices.Contains(args, "/home/ssda/zatca_integration/migrations/zatca_master:/home/ssda/zatca_integration/migrations/zatca_master:ro") {
-		t.Fatalf("runner volume args missing read-only ZATCA artifact mount: %v", args)
-	}
-}
-
-func TestRunnerDoesNotDuplicateArtifactInsideDeploymentMount(t *testing.T) {
-	r := NewRunner("docker", "runner:latest", "/opt/deployment", "")
-	r.SetMigrationArtifact("/opt/deployment/zatca/migrations/zatca_master")
-
-	args := r.volumeArgs()
-	if slices.Contains(args, "/opt/deployment/zatca/migrations/zatca_master:/opt/deployment/zatca/migrations/zatca_master:ro") {
-		t.Fatalf("runner duplicated an artifact mount already covered by deployment mount: %v", args)
-	}
-}

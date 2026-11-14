@@ -99,6 +99,7 @@ for arg in "$@"; do
     esac
 done
 [ -n "$dsn" ] && printf '%s\n' "$dsn" >> "${STUB_GOOSE_LOG:?}"
+[ -z "$dsn" ] && printf '%s\n' '1	dokku_admin@172.%	dokku_admin@172.%	zatca_master'
 [ -n "${STUB_GOOSE_ERROR:-}" ] && {
     printf '%s\n' "$STUB_GOOSE_ERROR" >&2
     exit 1
@@ -111,6 +112,9 @@ cat > "$BIN/mysql" <<'EOF'
 query="$*"
 stdin="$(cat || true)"
 printf 'ARGS=%s\nSQL=%s\n' "$query" "$stdin" >> "$STUB_MYSQL_LOG"
+if [[ "$query" == *"CURRENT_USER()"* ]] && [ "${STUB_PREFLIGHT_FAIL:-0}" = "1" ]; then
+    exit 1
+fi
 case "$query" in
     *"information_schema.schemata"*) printf '%s\n' "${STUB_DB_EXISTS:-1}" ;;
     *"information_schema.columns"*) printf '%s\n' "${STUB_TENANT_KEY_COLUMN:-1}" ;;
@@ -200,6 +204,20 @@ plan="$(bash scripts/deployctl.sh --plan db migrate-master --config "$TEST_DIR/c
 [ "$plan" = "bash scripts/migrate-zatca-master.sh --config $TEST_DIR/config.env" ] ||
     fail "deployctl does not map db migrate-master to the orchestration script"
 pass "syntax and deployctl command wiring"
+
+echo
+echo "=== failed MySQL preflight stops before backup ==="
+if STUB_PREFLIGHT_FAIL=1 STUB_GOOSE_LOG="$TEST_DIR/goose.log" \
+    STUB_MYSQL_LOG="$TEST_DIR/mysql.log" PATH="$BIN:$PATH" \
+    bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/config.env" \
+    >"$TEST_DIR/output" 2>&1; then
+    fail "failed MySQL preflight was accepted"
+fi
+grep -q 'Deployment MySQL preflight failed' "$TEST_DIR/output" ||
+    fail "preflight failure was not reported"
+[ ! -e "$TEST_DIR/backups" ] ||
+    fail "preflight failure created a backup"
+pass "failed MySQL preflight stops before backup"
 
 echo
 echo "=== fresh database backs up before Goose ==="

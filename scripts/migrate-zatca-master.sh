@@ -537,6 +537,47 @@ goose_run() {
     return 1
 }
 
+preflight_mysql_connection() {
+    local query helper_output goose_output host port user password category
+    query="SELECT 1 AS ok, CURRENT_USER() AS authenticated_user, USER() AS connection_user, DATABASE() AS database_name;"
+    log "Preflight: checking deployment MySQL connection"
+    if ! helper_output="$(run_mysql -N -B -e "$query")"; then
+        error "Deployment MySQL preflight failed before migration; no backup or schema change was attempted."
+        return 1
+    fi
+    info "Deployment MySQL preflight passed: $(printf '%s' "$helper_output" | tr '\t' ' ' | tr '\n' ' ' | cut -c1-512)"
+
+    host="$(goose_connection_host)"
+    port="${MYSQL_PORT:-3306}"
+    user="$(mysql_admin_user)"
+    password="$(mysql_admin_password)"
+    if [ "${ZATCA_MASTER_GOOSE_IN_DOCKER:-0}" = "1" ]; then
+        if ! goose_output="$(docker run --rm \
+            --network bridge \
+            --add-host host.docker.internal:host-gateway \
+            -e "MYSQL_PWD=$password" \
+            "${GOOSE_RUNNER_IMAGE:-${SCRIPT_RUNNER_IMAGE:-dokku/dokku:latest}}" \
+            mysql --protocol=TCP -h "$host" -P "$port" -u "$user" "$MASTER_DB" \
+            -N -B -e "$query" 2>&1)"; then
+            printf '%s\n' "$goose_output" >&2
+            category="$(classify_goose_failure "$goose_output")"
+            error "Goose bridge MySQL preflight failed (category=$category host=$host port=$port database=$MASTER_DB user=$user); no migration was attempted."
+            return 1
+        fi
+    else
+        if ! goose_output="$(
+            MYSQL_PWD="$password" mysql --protocol=TCP -h "$host" -P "$port" -u "$user" "$MASTER_DB" \
+                -N -B -e "$query" 2>&1
+        )"; then
+            printf '%s\n' "$goose_output" >&2
+            category="$(classify_goose_failure "$goose_output")"
+            error "Goose host MySQL preflight failed (category=$category host=$host port=$port database=$MASTER_DB user=$user); no migration was attempted."
+            return 1
+        fi
+    fi
+    info "Goose MySQL preflight passed: $(printf '%s' "$goose_output" | tr '\t' ' ' | tr '\n' ' ' | cut -c1-512)"
+}
+
 baseline_legacy_registry() {
     log "Recording the ZATCA baseline for the legacy master registry"
     goose_run version || {
@@ -584,6 +625,7 @@ run_migration() {
         return 0
     fi
     resolve_goose_bin true || return 1
+    preflight_mysql_connection || return 1
 
     if ! command -v flock >/dev/null 2>&1; then
         error "flock is required to serialize ZATCA master migrations."

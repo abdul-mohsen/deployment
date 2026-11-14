@@ -223,9 +223,13 @@ goose_dsn() {
 
 goose_connection_host() {
     local host="${ZATCA_MASTER_GOOSE_HOST:-${MYSQL_HOST:-127.0.0.1}}"
-    case "$host" in
-        host.docker.internal|localhost|127.0.0.1|::1) host="127.0.0.1" ;;
-    esac
+    if [ "${ZATCA_MASTER_GOOSE_IN_DOCKER:-0}" = "1" ]; then
+        case "$host" in
+            localhost|127.0.0.1|::1) host="host.docker.internal" ;;
+        esac
+    elif [ "$host" = "host.docker.internal" ]; then
+        host="127.0.0.1"
+    fi
     printf '%s' "$host"
 }
 

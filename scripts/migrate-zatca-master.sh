@@ -59,7 +59,6 @@ if [ -n "$GOOSE_BIN" ]; then
     GOOSE_BIN_EXPLICIT=true
 fi
 GOOSE_CACHE_DIR="${ZATCA_MASTER_GOOSE_CACHE_DIR:-${DEPLOY_STATE_DIR:-${PROJECT_DIR}/state}/bin}"
-GOOSE_DSN="${ZATCA_MASTER_GOOSE_DSN:-${MYSQL_MASTER_DSN:-}}"
 LOCK_FILE="${ZATCA_MASTER_MIGRATION_LOCK_FILE:-${DEPLOY_STATE_DIR:-${PROJECT_DIR}/state}/zatca-master-migration.lock}"
 BACKUP_DIR="${ZATCA_MASTER_BACKUP_DIR:-${BACKUP_DIR:-/opt/tenant-backups}}"
 DRY_RUN=false
@@ -75,7 +74,6 @@ The approved ZATCA source is fetched at a pinned revision and cached locally.
 Options:
   --config <path>                 Config file (default: ../config.env)
   --goose-bin <path>              Goose executable (otherwise auto-installed)
-  --dsn <dsn>                     Goose MySQL DSN (otherwise built from config)
   --master-db <name>              Master database (default: zatca_master)
   --dry-run                       Validate configuration without changing MySQL
 USAGE
@@ -83,7 +81,7 @@ USAGE
 
 for ((i = 1; i <= $#; i++)); do
     case "${!i}" in
-        --config|--goose-bin|--dsn|--master-db)
+        --config|--goose-bin|--master-db)
             i=$((i + 1))
             ;;
         --dry-run|--help|-h) ;;
@@ -95,7 +93,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)          CONFIG_FILE="$2"; shift 2 ;;
         --goose-bin)       GOOSE_BIN="$2"; GOOSE_BIN_EXPLICIT=true; shift 2 ;;
-        --dsn)             GOOSE_DSN="$2"; shift 2 ;;
         --master-db)       MASTER_DB="$2"; shift 2 ;;
         --dry-run)         DRY_RUN=true; shift ;;
         --help|-h)         usage; exit 0 ;;
@@ -202,10 +199,6 @@ mysql_dsn_escape() {
 }
 
 goose_dsn() {
-    if [ -n "$GOOSE_DSN" ]; then
-        printf '%s' "$GOOSE_DSN"
-        return 0
-    fi
     local host user password port
     host="$(goose_connection_host)"
     port="${MYSQL_PORT:-3306}"

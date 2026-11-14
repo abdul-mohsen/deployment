@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -855,12 +856,13 @@ func Find(name string) *Script {
 // Runner executes scripts in a one-shot sidecar container so the dashboard
 // image doesn't need bash / mysql-client / curl installed locally.
 type Runner struct {
-	dockerBin       string
-	runnerImage     string // e.g. "mysql:8.0" — has bash, curl, mysql client
-	scriptsHostPath string // host path to /opt/deployment (mounted into runner)
-	configFile      string // optional --config path inside runner
-	backupDir       string // host path to backup dir (mounted rw so scripts can write)
-	storageRoot     string // host path to persistent tenant files (mounted rw)
+	dockerBin         string
+	runnerImage       string // e.g. "mysql:8.0" — has bash, curl, mysql client
+	scriptsHostPath   string // host path to /opt/deployment (mounted into runner)
+	configFile        string // optional --config path inside runner
+	backupDir         string // host path to backup dir (mounted rw so scripts can write)
+	storageRoot       string // host path to persistent tenant files (mounted rw)
+	migrationArtifact string // host path to the read-only ZATCA migration artifact
 }
 
 // NewRunner builds a runner. scriptsHostPath is the path on the docker
@@ -890,6 +892,23 @@ func (r *Runner) SetStorageRoot(dir string) {
 	r.storageRoot = dir
 }
 
+// SetMigrationArtifact configures the host path for the external ZATCA
+// migration artifact. The runner mounts it read-only at the same path.
+func (r *Runner) SetMigrationArtifact(dir string) {
+	r.migrationArtifact = strings.TrimSpace(dir)
+}
+
+func pathWithin(parent, child string) bool {
+	parent = filepath.Clean(parent)
+	child = filepath.Clean(child)
+	relative, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return relative == "." ||
+		(relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
+}
+
 func (r *Runner) volumeArgs() []string {
 	var args []string
 	if r.backupDir != "" {
@@ -899,6 +918,9 @@ func (r *Runner) volumeArgs() []string {
 	if r.storageRoot != "" {
 		args = append(args, "-v", r.storageRoot+":"+r.storageRoot)
 		args = append(args, "-e", "STORAGE_ROOT="+r.storageRoot)
+	}
+	if r.migrationArtifact != "" && !pathWithin(r.scriptsHostPath, r.migrationArtifact) {
+		args = append(args, "-v", r.migrationArtifact+":"+r.migrationArtifact+":ro")
 	}
 	return args
 }

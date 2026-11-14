@@ -156,35 +156,35 @@ grep -q ' mysql .* up$' "$TEST_DIR/goose.log" || fail "fresh migration did not r
 pass "fresh database backup and Goose ordering"
 
 echo
-echo "=== legacy database refuses silent adoption ==="
-: > "$TEST_DIR/goose.log"
-if STUB_DB_EXISTS=1 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
-    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
-    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/config.env" \
-    >"$TEST_DIR/output" 2>&1; then
-    fail "legacy registry was silently adopted"
-fi
-grep -q 'refusing silent adoption' "$TEST_DIR/output" ||
-    fail "legacy refusal did not explain the safe default"
-[ ! -s "$TEST_DIR/goose.log" ] || fail "legacy refusal invoked Goose"
-pass "legacy database is fail-closed by default"
-
-echo
-echo "=== explicitly authorized legacy baseline ==="
+echo "=== legacy database auto-baselines by default ==="
 : > "$TEST_DIR/goose.log"
 if ! STUB_DB_EXISTS=1 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
     STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
-    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh \
-    --config "$TEST_DIR/config.env" --legacy-policy baseline \
+    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/config.env" \
     >"$TEST_DIR/output" 2>&1; then
     cat "$TEST_DIR/output"
-    fail "explicit legacy baseline failed"
+    fail "legacy registry was not auto-baselined"
 fi
-grep -q ' version$' "$TEST_DIR/goose.log" || fail "legacy policy did not initialize Goose ledger"
-grep -q ' up$' "$TEST_DIR/goose.log" || fail "legacy policy did not run Goose up"
+grep -q ' version$' "$TEST_DIR/goose.log" || fail "default policy did not initialize Goose ledger"
+grep -q ' up$' "$TEST_DIR/goose.log" || fail "default policy did not run Goose up"
 grep -q 'INSERT INTO goose_db_version' "$TEST_DIR/mysql.log" ||
-    fail "legacy policy did not record the explicit baseline"
-pass "legacy adoption requires explicit baseline policy"
+    fail "default policy did not record the baseline"
+pass "legacy database auto-baselines with the approved default"
+
+echo
+echo "=== explicit refuse policy remains available ==="
+: > "$TEST_DIR/goose.log"
+if STUB_DB_EXISTS=1 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
+    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
+    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh \
+    --config "$TEST_DIR/config.env" --legacy-policy refuse \
+    >"$TEST_DIR/output" 2>&1; then
+    fail "explicit refuse policy accepted legacy registry"
+fi
+grep -q 'refusing silent adoption' "$TEST_DIR/output" ||
+    fail "explicit refusal did not explain the policy"
+[ ! -s "$TEST_DIR/goose.log" ] || fail "explicit refusal invoked Goose"
+pass "explicit refuse policy blocks legacy adoption"
 
 echo
 echo "=== verification and lock failures are fail-closed ==="

@@ -445,17 +445,56 @@ resolve_goose_bin() {
     download_goose
 }
 
+classify_goose_failure() {
+    local output="$1"
+    if printf '%s\n' "$output" | grep -Eiq \
+        'no such host|dial tcp|connection refused|network is unreachable|i/o timeout|timed out'; then
+        printf 'connection'
+    elif printf '%s\n' "$output" | grep -Eiq \
+        'error 1045|access denied for user|authentication'; then
+        printf 'authentication'
+    elif printf '%s\n' "$output" | grep -Eiq \
+        'error 1044|error 1142|access denied.*database|command denied'; then
+        printf 'database-access'
+    elif printf '%s\n' "$output" | grep -Eiq \
+        'error 1049|unknown database'; then
+        printf 'database-not-found'
+    elif printf '%s\n' "$output" | grep -Eiq \
+        'table .*already exists|table .*doesn.t exist|unknown column|syntax error|error 42'; then
+        printf 'migration-sql'
+    else
+        printf 'execution'
+    fi
+}
+
 goose_run() {
-    local action="$1" dsn host port user
+    local action="$1" dsn host port user output category
     host="$(goose_connection_host)"
     port="${MYSQL_PORT:-3306}"
     user="$(mysql_admin_user)"
     info "Running Goose action=$action database=$MASTER_DB host=$host port=$port user=$user"
     dsn="$(goose_dsn)" || return 1
-    if ! "$GOOSE_BIN" -dir "$ARTIFACT_DIR" mysql "$dsn" "$action"; then
-        error "Goose action failed: action=$action database=$MASTER_DB host=$host port=$port user=$user"
-        return 1
+    if output="$("$GOOSE_BIN" -dir "$ARTIFACT_DIR" mysql "$dsn" "$action" 2>&1)"; then
+        printf '%s\n' "$output"
+        return 0
     fi
+    printf '%s\n' "$output" >&2
+    category="$(classify_goose_failure "$output")"
+    case "$category" in
+        connection)
+            error "Goose could not connect to MySQL (host=$host port=$port database=$MASTER_DB). Check DNS, routing, and MySQL availability." ;;
+        authentication)
+            error "Goose reached MySQL but authentication was rejected (user=$user host=$host database=$MASTER_DB). Check the matching MySQL user@host account and password." ;;
+        database-access)
+            error "Goose reached MySQL but database/table access was denied (user=$user database=$MASTER_DB). Check grants for the matching user@host account." ;;
+        database-not-found)
+            error "Goose reached MySQL but database '$MASTER_DB' was not found." ;;
+        migration-sql)
+            error "Goose reached MySQL but the migration SQL failed for database '$MASTER_DB'. Review the SQL error above; no table/column diagnosis is assumed." ;;
+        *)
+            error "Goose migration command failed (action=$action database=$MASTER_DB host=$host user=$user). Review the command error above." ;;
+    esac
+    return 1
 }
 
 baseline_legacy_registry() {

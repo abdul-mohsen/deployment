@@ -10,13 +10,17 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 TEST_DIR="$REPO_DIR/.test-migrate-zatca-master.$$"
 BIN="$TEST_DIR/bin"
-ARTIFACT="$TEST_DIR/zatca-migrations"
 GOOSE_CACHE="$TEST_DIR/goose-cache"
 GOOSE_FIXTURE="$TEST_DIR/goose-fixture"
-mkdir -p "$BIN" "$ARTIFACT"
+SOURCE_ROOT="$TEST_DIR/zatca-source/zatca_integration-7ea7056c1092a1ff5986e5267e876510a0465ab7"
+SOURCE_ARCHIVE="$TEST_DIR/zatca-source.tar.gz"
+mkdir -p "$BIN" "$SOURCE_ROOT/migrations/zatca_master"
 trap 'rm -rf "$TEST_DIR"' EXIT
 
-touch "$ARTIFACT/00001_baseline.sql" "$ARTIFACT/00002_tenant_key.sql"
+touch "$SOURCE_ROOT/migrations/zatca_master/00001_baseline.sql" \
+    "$SOURCE_ROOT/migrations/zatca_master/00002_tenant_key.sql"
+tar -czf "$SOURCE_ARCHIVE" -C "$TEST_DIR/zatca-source" \
+    zatca_integration-7ea7056c1092a1ff5986e5267e876510a0465ab7
 
 cat > "$BIN/flock" <<'EOF'
 #!/usr/bin/env bash
@@ -50,16 +54,22 @@ cat > "$BIN/curl" <<'EOF'
 #!/usr/bin/env bash
 output=""
 previous=""
+url=""
 for arg in "$@"; do
     if [ "$previous" = "--output" ]; then
         output="$arg"
     fi
+    url="$arg"
     previous="$arg"
 done
 [ -n "$output" ] || exit 1
 [ "${STUB_CURL_FAIL:-0}" = "1" ] && exit 1
 printf '%s\n' download >> "${STUB_CURL_LOG:?}"
-cp "${GOOSE_FIXTURE:?}" "$output"
+if [[ "$url" == *.tar.gz ]]; then
+    cp "${ZATCA_SOURCE_ARCHIVE:?}" "$output"
+else
+    cp "${GOOSE_FIXTURE:?}" "$output"
+fi
 EOF
 
 cat > "$BIN/sha256sum" <<'EOF'
@@ -103,6 +113,27 @@ else
 fi
 EOF
 
+cat > "$BIN/tar" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = "-xzf" ]; then
+    destination=""
+    previous=""
+    for arg in "$@"; do
+        if [ "$previous" = "-C" ]; then
+            destination="$arg"
+        fi
+        previous="$arg"
+    done
+    [ -n "$destination" ] || exit 1
+    mkdir -p "$destination/zatca_integration-7ea7056c1092a1ff5986e5267e876510a0465ab7/migrations/zatca_master"
+    touch \
+        "$destination/zatca_integration-7ea7056c1092a1ff5986e5267e876510a0465ab7/migrations/zatca_master/00001_baseline.sql" \
+        "$destination/zatca_integration-7ea7056c1092a1ff5986e5267e876510a0465ab7/migrations/zatca_master/00002_tenant_key.sql"
+    exit 0
+fi
+exec /usr/bin/tar "$@"
+EOF
+
 chmod +x "$BIN"/*
 chmod +x "$GOOSE_FIXTURE"
 
@@ -115,12 +146,15 @@ MYSQL_ROOT_PASSWORD=root-password
 MYSQL_MASTER_DB=zatca_master
 BACKUP_DIR=$TEST_DIR/backups
 LOG_DIR=$TEST_DIR/logs
-ZATCA_MASTER_MIGRATION_ARTIFACT=$ARTIFACT
 ZATCA_MASTER_GOOSE_BIN=goose
 ZATCA_MASTER_MIGRATION_LOCK_FILE=$TEST_DIR/master.lock
+ZATCA_MASTER_MIGRATION_CACHE_DIR=$TEST_DIR/zatca-cache
 EOF
 grep -v '^ZATCA_MASTER_GOOSE_BIN=' "$TEST_DIR/config.env" > "$TEST_DIR/auto-config.env"
 printf 'ZATCA_MASTER_GOOSE_CACHE_DIR=%s\n' "$GOOSE_CACHE" >> "$TEST_DIR/auto-config.env"
+ZATCA_SOURCE_ARCHIVE="$SOURCE_ARCHIVE"
+STUB_CURL_LOG="$TEST_DIR/curl.log"
+export ZATCA_SOURCE_ARCHIVE STUB_CURL_LOG
 
 run_migration() {
     : > "$TEST_DIR/goose.log"
@@ -149,6 +183,8 @@ if ! STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=
     PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/config.env" \
     >"$TEST_DIR/output" 2>&1; then
     cat "$TEST_DIR/output"
+    cat "$TEST_DIR/curl.log" 2>/dev/null || true
+    tar -tzf "$SOURCE_ARCHIVE" 2>/dev/null || true
     fail "fresh migration failed"
 fi
 ls "$TEST_DIR/backups"/*.sql.gz >/dev/null 2>&1 || fail "fresh migration did not create a backup"
@@ -170,21 +206,6 @@ grep -q ' up$' "$TEST_DIR/goose.log" || fail "default policy did not run Goose u
 grep -q 'INSERT INTO goose_db_version' "$TEST_DIR/mysql.log" ||
     fail "default policy did not record the baseline"
 pass "legacy database auto-baselines with the approved default"
-
-echo
-echo "=== explicit refuse policy remains available ==="
-: > "$TEST_DIR/goose.log"
-if STUB_DB_EXISTS=1 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
-    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
-    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh \
-    --config "$TEST_DIR/config.env" --legacy-policy refuse \
-    >"$TEST_DIR/output" 2>&1; then
-    fail "explicit refuse policy accepted legacy registry"
-fi
-grep -q 'refusing silent adoption' "$TEST_DIR/output" ||
-    fail "explicit refusal did not explain the policy"
-[ ! -s "$TEST_DIR/goose.log" ] || fail "explicit refusal invoked Goose"
-pass "explicit refuse policy blocks legacy adoption"
 
 echo
 echo "=== verification and lock failures are fail-closed ==="

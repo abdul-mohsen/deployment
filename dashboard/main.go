@@ -87,7 +87,6 @@ func main() {
 	if cfg.StorageRoot != "" {
 		runner.SetStorageRoot(cfg.StorageRoot)
 	}
-	runner.SetMigrationArtifact(os.Getenv("ZATCA_MASTER_MIGRATION_ARTIFACT"))
 
 	// Start the daily backup retention policy. User-origin backups are never
 	// pruned by this policy.

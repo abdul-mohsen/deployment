@@ -47,7 +47,10 @@ error() { deployment_log ERROR "$*"; echo -e "${RED}[x]${NC} $*" >&2; }
 info()  { deployment_log INFO "$*"; echo -e "${BLUE}[i]${NC} $*"; }
 
 MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
-ARTIFACT_DIR="${ZATCA_MASTER_MIGRATION_ARTIFACT:-${ZATCA_MASTER_MIGRATIONS_DIR:-}}"
+ZATCA_MIGRATION_REPOSITORY="https://github.com/abdul-mohsen/zatca_integration"
+ZATCA_MIGRATION_REF="7ea7056c1092a1ff5986e5267e876510a0465ab7"
+ZATCA_MIGRATION_CACHE_DIR="${ZATCA_MASTER_MIGRATION_CACHE_DIR:-${DEPLOY_STATE_DIR:-${PROJECT_DIR}/state}/zatca-master}"
+ARTIFACT_DIR=""
 # Pinned Pressly Goose release; digests are selected per supported Linux arch.
 GOOSE_RELEASE_VERSION="v3.30.0"
 GOOSE_BIN="${ZATCA_MASTER_GOOSE_BIN:-}"
@@ -57,7 +60,6 @@ if [ -n "$GOOSE_BIN" ]; then
 fi
 GOOSE_CACHE_DIR="${ZATCA_MASTER_GOOSE_CACHE_DIR:-${DEPLOY_STATE_DIR:-${PROJECT_DIR}/state}/bin}"
 GOOSE_DSN="${ZATCA_MASTER_GOOSE_DSN:-${MYSQL_MASTER_DSN:-}}"
-LEGACY_POLICY="${ZATCA_MASTER_LEGACY_POLICY:-baseline}"
 LOCK_FILE="${ZATCA_MASTER_MIGRATION_LOCK_FILE:-${DEPLOY_STATE_DIR:-${PROJECT_DIR}/state}/zatca-master-migration.lock}"
 BACKUP_DIR="${ZATCA_MASTER_BACKUP_DIR:-${BACKUP_DIR:-/opt/tenant-backups}}"
 DRY_RUN=false
@@ -68,23 +70,20 @@ usage() {
 Usage: migrate-zatca-master.sh [options]
 
 Apply the ZATCA-owned Goose artifact to MYSQL_MASTER_DB before tenant creation.
-The deployment repository does not contain or generate the ZATCA schema.
+The approved ZATCA source is fetched at a pinned revision and cached locally.
 
 Options:
   --config <path>                 Config file (default: ../config.env)
-  --artifact <dir>                ZATCA migrations/zatca_master directory
-  --migrations-dir <dir>          Alias for --artifact
   --goose-bin <path>              Goose executable (otherwise auto-installed)
   --dsn <dsn>                     Goose MySQL DSN (otherwise built from config)
   --master-db <name>              Master database (default: zatca_master)
-  --legacy-policy refuse|baseline Refuse legacy DBs, or baseline v1 (default: baseline)
   --dry-run                       Validate configuration without changing MySQL
 USAGE
 }
 
 for ((i = 1; i <= $#; i++)); do
     case "${!i}" in
-        --config|--artifact|--migrations-dir|--goose-bin|--dsn|--master-db|--legacy-policy)
+        --config|--goose-bin|--dsn|--master-db)
             i=$((i + 1))
             ;;
         --dry-run|--help|-h) ;;
@@ -95,12 +94,9 @@ done
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)          CONFIG_FILE="$2"; shift 2 ;;
-        --artifact|--migrations-dir)
-                            ARTIFACT_DIR="$2"; shift 2 ;;
         --goose-bin)       GOOSE_BIN="$2"; GOOSE_BIN_EXPLICIT=true; shift 2 ;;
         --dsn)             GOOSE_DSN="$2"; shift 2 ;;
         --master-db)       MASTER_DB="$2"; shift 2 ;;
-        --legacy-policy)   LEGACY_POLICY="$2"; shift 2 ;;
         --dry-run)         DRY_RUN=true; shift ;;
         --help|-h)         usage; exit 0 ;;
         *)                  error "Unknown option: $1"; usage; exit 1 ;;
@@ -108,25 +104,90 @@ while [[ $# -gt 0 ]]; do
 done
 
 validate_database_identifier "$MASTER_DB" || exit 1
-case "$LEGACY_POLICY" in
-    refuse|baseline) ;;
-    *) error "legacy policy must be 'refuse' or 'baseline'"; exit 1 ;;
-esac
 
-if [ -z "$ARTIFACT_DIR" ]; then
-    error "ZATCA_MASTER_MIGRATION_ARTIFACT is required; provide the ZATCA-owned migrations/zatca_master directory."
-    exit 1
-fi
-if [ ! -d "$ARTIFACT_DIR" ]; then
-    error "ZATCA migration artifact directory does not exist: $ARTIFACT_DIR"
-    exit 1
-fi
-for migration in 00001_baseline.sql 00002_tenant_key.sql; do
-    if [ ! -r "$ARTIFACT_DIR/$migration" ]; then
-        error "ZATCA migration artifact is incomplete; missing $migration."
-        exit 1
+fetch_zatca_migration_artifact() {
+    local cache_root archive extract_root source_root url download_tool
+    cache_root="$ZATCA_MIGRATION_CACHE_DIR/zatca_integration-$ZATCA_MIGRATION_REF"
+    ARTIFACT_DIR="$cache_root/migrations/zatca_master"
+
+    if [ -r "$ARTIFACT_DIR/00001_baseline.sql" ] &&
+        [ -r "$ARTIFACT_DIR/00002_tenant_key.sql" ]; then
+        log "Using cached approved ZATCA migrations at revision $ZATCA_MIGRATION_REF"
+        return 0
     fi
-done
+
+    mkdir -p "$ZATCA_MIGRATION_CACHE_DIR" || {
+        error "Could not create ZATCA migration cache: $ZATCA_MIGRATION_CACHE_DIR"
+        return 1
+    }
+    rm -rf "$cache_root"
+
+    if command -v curl >/dev/null 2>&1; then
+        download_tool=curl
+    elif command -v wget >/dev/null 2>&1; then
+        download_tool=wget
+    else
+        error "Fetching approved ZATCA migrations requires curl or wget."
+        return 1
+    fi
+    command -v tar >/dev/null 2>&1 || {
+        error "Fetching approved ZATCA migrations requires tar."
+        return 1
+    }
+
+    archive="$(mktemp "$ZATCA_MIGRATION_CACHE_DIR/.zatca-source.XXXXXX.tar.gz")" || {
+        error "Could not create a temporary ZATCA source archive."
+        return 1
+    }
+    extract_root="$(mktemp -d "$ZATCA_MIGRATION_CACHE_DIR/.zatca-extract.XXXXXX")" || {
+        rm -f "$archive"
+        error "Could not create a temporary ZATCA extraction directory."
+        return 1
+    }
+    url="${ZATCA_MIGRATION_REPOSITORY}/archive/${ZATCA_MIGRATION_REF}.tar.gz"
+    log "Fetching approved ZATCA migrations at revision $ZATCA_MIGRATION_REF"
+    if [ "$download_tool" = "curl" ]; then
+        if ! curl --fail --location --silent --show-error --retry 3 \
+            --connect-timeout 10 --max-time 120 --output "$archive" "$url"; then
+            rm -f "$archive"
+            rm -rf "$extract_root"
+            error "Approved ZATCA migration source download failed."
+            return 1
+        fi
+    elif ! wget --quiet --timeout=10 --tries=3 --output-document="$archive" "$url"; then
+        rm -f "$archive"
+        rm -rf "$extract_root"
+        error "Approved ZATCA migration source download failed."
+        return 1
+    fi
+
+    if ! tar -xzf "$archive" -C "$extract_root"; then
+        rm -f "$archive"
+        rm -rf "$extract_root"
+        error "Approved ZATCA migration source archive could not be extracted."
+        return 1
+    fi
+    rm -f "$archive"
+
+    source_root="$(find "$extract_root" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+    if [ -z "$source_root" ] ||
+        [ ! -r "$source_root/migrations/zatca_master/00001_baseline.sql" ] ||
+        [ ! -r "$source_root/migrations/zatca_master/00002_tenant_key.sql" ]; then
+        rm -rf "$extract_root"
+        error "Approved ZATCA source is missing the required master migration files."
+        return 1
+    fi
+    if ! mv "$source_root" "$cache_root"; then
+        rm -rf "$extract_root"
+        error "Could not cache the approved ZATCA migration source."
+        return 1
+    fi
+    rm -rf "$extract_root"
+    ARTIFACT_DIR="$cache_root/migrations/zatca_master"
+    log "Cached approved ZATCA migrations at revision $ZATCA_MIGRATION_REF"
+}
+
+fetch_zatca_migration_artifact || exit 1
 
 mysql_dsn_escape() {
     local value="$1"
@@ -499,13 +560,8 @@ run_migration() {
             }
             ;;
         legacy)
-            if [ "$LEGACY_POLICY" != "baseline" ]; then
-                error "Pre-Goose legacy registry detected; refusing silent adoption."
-                error "Review the verified backup and rerun with --legacy-policy baseline if adoption is authorized."
-                return 1
-            fi
             baseline_legacy_registry || return 1
-            log "Running ZATCA-owned Goose migrations after the explicit legacy baseline"
+            log "Running ZATCA-owned Goose migrations after the legacy baseline"
             goose_run up || {
                 error "ZATCA Goose migration failed after legacy baseline; restore the verified backup before retry."
                 return 1

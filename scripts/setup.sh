@@ -356,9 +356,9 @@ mkdir -p "${STORAGE_ROOT}"
 if [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" != "changeme" ]; then
     log "Preparing master database: ${MYSQL_MASTER_DB}"
 
-    # The registry schema is owned by ZATCA. The orchestration command creates
-    # or backs up the database, invokes its external Goose artifact, and
-    # verifies tenant_key plus both triggers before setup continues.
+    # The migration command creates or backs up the master database, ensures
+    # the registry and tenant_key schema through the configured MySQL helper,
+    # then verifies the identity contract before setup continues.
     if ! bash "$SCRIPT_DIR/migrate-zatca-master.sh" --config "$CONFIG_FILE"; then
         error "ZATCA master migration failed; refusing to continue setup."
         exit 1

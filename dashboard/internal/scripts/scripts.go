@@ -632,7 +632,7 @@ func Catalog() []Script {
 		},
 		{
 			Name: "migrate-zatca-master.sh", Title: "Migrate ZATCA master",
-			Summary: "Fetch the approved ZATCA source, back up, and apply its master Goose migrations.",
+			Summary: "Back up and ensure the master tenant identity schema through the configured MySQL helper.",
 			Danger:  true,
 			Fields: []Field{
 				{Name: "dry_run", Label: "Dry run", Flag: "--dry-run", Type: "checkbox", Boolean: true},
@@ -911,7 +911,6 @@ func (r *Runner) dockerArgs(dockerSocket string) []string {
 		"-e", "TENANT_NAME_PREFIX_OVERRIDE=" + os.Getenv("TENANT_NAME_PREFIX"),
 		"-e", "DASHBOARD_ENV=" + os.Getenv("DASHBOARD_ENV"),
 		"-e", "DEPLOYMENT_SCRIPTS_REVISION=" + os.Getenv("DEPLOYMENT_SCRIPTS_REVISION"),
-		"-e", "ZATCA_MASTER_GOOSE_IN_DOCKER=1",
 		"-v", dockerSocket,
 		"--add-host", "host.docker.internal:host-gateway",
 		"-v", r.scriptsHostPath + ":/opt/deployment:ro",

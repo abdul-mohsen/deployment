@@ -45,7 +45,7 @@ Areas:
   stack restart [flags]              Restart Dokku/dashboard stack
   setup all|dokku|nats|dev-tenant    Bootstrap server pieces
   db verify                          Check MySQL connectivity
-  db migrate-master [flags]          Apply the ZATCA-owned master Goose artifact
+  db migrate-master [flags]          Ensure and verify the master tenant identity schema
   dokku fix-hostname|discover-nginx|traffic
   webhook serve|tls
   cleanup old-files

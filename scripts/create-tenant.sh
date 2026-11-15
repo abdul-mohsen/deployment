@@ -551,11 +551,11 @@ TENANT_NETWORK="${TENANT_APP_NETWORK:-web}"
 export TENANT_NETWORK
 export BACKEND_PORT
 
-# A backend tenant needs goose migrations and the registry tenant_key, so it
-# needs MySQL provisioning. External DB env vars cannot replace it.
+# A backend tenant needs its Goose migrations and the master tenant_key schema,
+# so it needs MySQL provisioning. External DB env vars cannot replace it.
 if [ -n "$BACKEND_IMAGE" ]; then
     if $NO_DATABASE; then
-        error "Backend image deploy requires MySQL provisioning (goose migrations and tenant_key), but --no-database was set."
+        error "Backend image deploy requires MySQL provisioning (backend Goose migrations and master tenant_key), but --no-database was set."
         exit 1
     fi
     if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; then
@@ -565,9 +565,9 @@ if [ -n "$BACKEND_IMAGE" ]; then
     fi
 fi
 
-# Prepare the ZATCA-owned master registry before even checking for tenant apps.
-# The migration command owns the lock, pre-Goose backup, legacy policy, Goose
-# invocation, and trigger verification.
+# Prepare the master registry before even checking for tenant apps. The
+# migration command owns the lock, verified backup, schema setup, and
+# tenant identity verification.
 if ! $DRY_RUN && ! $NO_DATABASE && mysql_admin_configured; then
     if ! bash "$SCRIPT_DIR/migrate-zatca-master.sh" --config "$CONFIG_FILE"; then
         error "ZATCA master migration failed; refusing tenant provisioning."
@@ -684,8 +684,8 @@ if $DRY_RUN; then
     exit 0
 fi
 
-# The registry row below gets its tenant_key from ZATCA's trigger. Refuse before
-# anything is created if zatca_master is not migrated yet.
+# The registry row's default trigger derives tenant_key from db_name. Refuse
+# before creating resources if the script-managed identity schema is not ready.
 if ! $NO_DATABASE && [ -n "$MYSQL_ROOT_PASSWORD" ] && [ "$MYSQL_ROOT_PASSWORD" != "changeme" ]; then
     require_registry_tenant_key || exit 1
 

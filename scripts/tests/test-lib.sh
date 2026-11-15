@@ -124,34 +124,81 @@ fi
 unset -f docker
 
 echo ""
-echo "=== require_registry_tenant_key refuses an unmigrated zatca_master ==="
+echo "=== require_registry_tenant_key verifies the tenant identity contract ==="
 MYSQL_MASTER_DB=zatca_master
+MYSQL_QUERY_LOG="$tmpdir/registry-readiness-queries"
+VALID_DEFAULT_TRIGGER=$'BEFORE\tINSERT\tbeginifnew.tenant_key=\'\'thensetnew.tenant_key=new.db_name;endif;end'
+VALID_IMMUTABLE_TRIGGER=$'BEFORE\tUPDATE\tbeginifnew.tenant_key<>old.tenant_keythensignalstate\'45000\'setmessage_text=\'tenant_keyisimmutable\';endif;end'
+: > "$MYSQL_QUERY_LOG"
 run_mysql() {
+    local args="$*"
+    printf '%s\n' "$args" >> "$MYSQL_QUERY_LOG"
     case "$*" in
-        *"information_schema.columns"*) echo "${STUB_COLUMNS:-1}" ;;
-        *"information_schema.triggers"*) echo "${STUB_TRIGGERS:-1}" ;;
+        *"information_schema.columns"*) printf '%s\n' "${STUB_COLUMN_CONTRACT-1}" ;;
+        *"information_schema.statistics"*) printf '%s\n' "${STUB_INDEX_CONTRACT-1}" ;;
+        *"trigger_name='tenant_key_default'"*)
+            printf '%s\n' "${STUB_DEFAULT_TRIGGER-$VALID_DEFAULT_TRIGGER}"
+            ;;
+        *"trigger_name='tenant_key_immutable'"*)
+            printf '%s\n' "${STUB_IMMUTABLE_TRIGGER-$VALID_IMMUTABLE_TRIGGER}"
+            ;;
+        *".tenant WHERE tenant_key IS NULL"*) printf '%s\n' "${STUB_EMPTY_KEYS-0}" ;;
+        *) fail "unexpected MySQL query in tenant identity readiness check: $args" ;;
     esac
 }
-if STUB_COLUMNS=1 STUB_TRIGGERS=1 require_registry_tenant_key 2>/dev/null; then
-    pass "migrated registry (tenant_key + tenant_key_default) is accepted"
+if require_registry_tenant_key 2>/dev/null; then
+    pass "complete tenant identity schema is accepted"
 else
-    fail "migrated registry must be accepted"
+    fail "complete tenant identity schema must be accepted"
 fi
-if STUB_COLUMNS=0 STUB_TRIGGERS=1 require_registry_tenant_key 2>/dev/null; then
-    fail "registry without tenant_key must be refused"
+if STUB_COLUMN_CONTRACT=0 require_registry_tenant_key 2>/dev/null; then
+    fail "incompatible tenant_key column must be refused"
 else
-    pass "registry without tenant_key is refused"
+    pass "incompatible tenant_key column is refused"
 fi
-if STUB_COLUMNS=1 STUB_TRIGGERS=0 require_registry_tenant_key 2>/dev/null; then
-    fail "registry without tenant_key_default must be refused"
+if STUB_INDEX_CONTRACT=0 require_registry_tenant_key 2>/dev/null; then
+    fail "missing or incompatible unique index must be refused"
 else
-    pass "registry without tenant_key_default is refused"
+    pass "missing or incompatible unique index is refused"
 fi
-refusal="$(STUB_COLUMNS=0 require_registry_tenant_key 2>&1 || true)"
-if printf '%s' "$refusal" | grep -q "Apply ZATCA's zatca_master migrations first"; then
-    pass "refusal tells the operator to apply ZATCA's zatca_master migrations first"
+if STUB_DEFAULT_TRIGGER='' require_registry_tenant_key 2>/dev/null; then
+    fail "missing defaulting trigger must be refused"
 else
-    fail "refusal must name ZATCA's zatca_master migrations"
+    pass "missing defaulting trigger is refused"
+fi
+if STUB_DEFAULT_TRIGGER=$'BEFORE\tINSERT\tbeginsetnew.tenant_key=new.db_name;end' \
+    require_registry_tenant_key 2>/dev/null; then
+    fail "incompatible defaulting trigger must be refused"
+else
+    pass "incompatible defaulting trigger is refused"
+fi
+if STUB_IMMUTABLE_TRIGGER='' require_registry_tenant_key 2>/dev/null; then
+    fail "missing immutability trigger must be refused"
+else
+    pass "missing immutability trigger is refused"
+fi
+if STUB_IMMUTABLE_TRIGGER=$'BEFORE\tUPDATE\tbeginend' \
+    require_registry_tenant_key 2>/dev/null; then
+    fail "incompatible immutability trigger must be refused"
+else
+    pass "incompatible immutability trigger is refused"
+fi
+if STUB_EMPTY_KEYS=1 require_registry_tenant_key 2>/dev/null; then
+    fail "registry with a missing tenant_key value must be refused"
+else
+    pass "registry with a missing tenant_key value is refused"
+fi
+refusal="$(STUB_COLUMN_CONTRACT=0 require_registry_tenant_key 2>&1 || true)"
+if printf '%s' "$refusal" | grep -q 'scripts/migrate-zatca-master.sh'; then
+    pass "refusal tells the operator to run the script-managed migration"
+else
+    fail "refusal must name the script-managed migration"
+fi
+if grep -Eiq '(^|[[:space:]])(CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|REPLACE)[[:space:]]' \
+    "$MYSQL_QUERY_LOG"; then
+    fail "registry readiness check must not execute DDL or data changes"
+else
+    pass "registry readiness check performs read-only queries"
 fi
 unset -f run_mysql
 

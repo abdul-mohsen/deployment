@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Focused contract tests for the ZATCA master migration orchestration.
+# Focused contract tests for the ZATCA master registry migration.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -10,17 +10,13 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 TEST_DIR="$REPO_DIR/.test-migrate-zatca-master.$$"
 BIN="$TEST_DIR/bin"
-GOOSE_CACHE="$TEST_DIR/goose-cache"
-GOOSE_FIXTURE="$TEST_DIR/goose-fixture"
-SOURCE_ROOT="$TEST_DIR/zatca-source/zatca_integration-7ea7056c1092a1ff5986e5267e876510a0465ab7"
-SOURCE_ARCHIVE="$TEST_DIR/zatca-source.tar.gz"
-mkdir -p "$BIN" "$SOURCE_ROOT/migrations/zatca_master"
+STATE="$TEST_DIR/mysql-state"
+EVENTS="$TEST_DIR/events.log"
+MYSQL_LOG="$TEST_DIR/mysql.log"
+GOOSE_LOG="$TEST_DIR/goose.log"
+CURL_LOG="$TEST_DIR/curl.log"
+mkdir -p "$BIN"
 trap 'rm -rf "$TEST_DIR"' EXIT
-
-touch "$SOURCE_ROOT/migrations/zatca_master/00001_baseline.sql" \
-    "$SOURCE_ROOT/migrations/zatca_master/00002_tenant_key.sql"
-tar -czf "$SOURCE_ARCHIVE" -C "$TEST_DIR/zatca-source" \
-    zatca_integration-7ea7056c1092a1ff5986e5267e876510a0465ab7
 
 cat > "$BIN/flock" <<'EOF'
 #!/usr/bin/env bash
@@ -28,108 +24,170 @@ cat > "$BIN/flock" <<'EOF'
 exit 0
 EOF
 
-cat > "$BIN/goose" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$STUB_GOOSE_LOG"
-[ -n "${STUB_GOOSE_ERROR:-}" ] && {
-    printf '%s\n' "$STUB_GOOSE_ERROR" >&2
-    exit 1
-}
-[ "${STUB_GOOSE_FAIL:-0}" = "1" ] && exit 1
-exit 0
-EOF
-
-cat > "$GOOSE_FIXTURE" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$STUB_GOOSE_LOG"
-[ -n "${STUB_GOOSE_ERROR:-}" ] && {
-    printf '%s\n' "$STUB_GOOSE_ERROR" >&2
-    exit 1
-}
-exit 0
-EOF
-
-cat > "$BIN/uname" <<'EOF'
-#!/usr/bin/env bash
-case "${1:-}" in
-    -s) printf '%s\n' Linux ;;
-    -m) printf '%s\n' x86_64 ;;
-    *) exit 1 ;;
-esac
-EOF
-
-cat > "$BIN/curl" <<'EOF'
-#!/usr/bin/env bash
-output=""
-previous=""
-url=""
-for arg in "$@"; do
-    if [ "$previous" = "--output" ]; then
-        output="$arg"
-    fi
-    url="$arg"
-    previous="$arg"
-done
-[ -n "$output" ] || exit 1
-[ "${STUB_CURL_FAIL:-0}" = "1" ] && exit 1
-printf '%s\n' download >> "${STUB_CURL_LOG:?}"
-if [[ "$url" == *.tar.gz ]]; then
-    cp "${ZATCA_SOURCE_ARCHIVE:?}" "$output"
-else
-    cp "${GOOSE_FIXTURE:?}" "$output"
-fi
-EOF
-
-cat > "$BIN/sha256sum" <<'EOF'
-#!/usr/bin/env bash
-if [ "${STUB_SHA256_MISMATCH:-0}" = "1" ]; then
-    printf '%s  %s\n' 0000000000000000000000000000000000000000000000000000000000000000 "${1:?}"
-else
-    printf '%s  %s\n' cce6e6371670f0654adc0ece407b81a22e53ba51e24e17a80ff7a0e25cda8548 "${1:?}"
-fi
-EOF
-
-cat > "$BIN/docker" <<'EOF'
-#!/usr/bin/env bash
-cat >/dev/null
-dsn=""
-for arg in "$@"; do
-    case "$arg" in
-        GOOSE_DSN=*) dsn="${arg#GOOSE_DSN=}" ;;
-    esac
-done
-[ -n "$dsn" ] && printf '%s\n' "$dsn" >> "${STUB_GOOSE_LOG:?}"
-[ -z "$dsn" ] && printf '%s\n' '1	dokku_admin@172.%	dokku_admin@172.%	zatca_master'
-[ -n "${STUB_GOOSE_ERROR:-}" ] && {
-    printf '%s\n' "$STUB_GOOSE_ERROR" >&2
-    exit 1
-}
-exit 0
-EOF
-
 cat > "$BIN/mysql" <<'EOF'
 #!/usr/bin/env bash
-query="$*"
+set -euo pipefail
+
+args="$*"
 stdin="$(cat || true)"
-printf 'ARGS=%s\nSQL=%s\n' "$query" "$stdin" >> "$STUB_MYSQL_LOG"
-if [[ "$query" == *"CURRENT_USER()"* ]] && [ "${STUB_PREFLIGHT_FAIL:-0}" = "1" ]; then
-    exit 1
+query="${args}"$'\n'"${stdin}"
+printf 'ARGS=%s\nSQL=%s\n' "$args" "$stdin" >> "${STUB_MYSQL_LOG:?}"
+source "${STUB_MYSQL_STATE:?}"
+
+if [[ "$query" == *"CURRENT_USER()"* ]]; then
+    [ "${STUB_PREFLIGHT_FAIL:-0}" = "1" ] && exit 1
+    printf '1\troot@localhost\troot@localhost\t\n'
+    exit 0
 fi
+
 case "$query" in
-    *"information_schema.schemata"*) printf '%s\n' "${STUB_DB_EXISTS:-1}" ;;
-    *"information_schema.columns"*) printf '%s\n' "${STUB_TENANT_KEY_COLUMN:-1}" ;;
-    *"trigger_name='tenant_key_default'"*) printf '%s\n' "${STUB_DEFAULT_TRIGGER:-1}" ;;
-    *"trigger_name='tenant_key_immutable'"*) printf '%s\n' "${STUB_IMMUTABLE_TRIGGER:-1}" ;;
-    *"information_schema.statistics"*) printf '%s\n' "${STUB_UNIQUE_KEY:-1}" ;;
-    *"FROM goose_db_version"*) printf '%s\n' "${STUB_GOOSE_ROWS:-1}" ;;
-    *"table_name='goose_db_version'"*) printf '%s\n' "${STUB_GOOSE_TABLES:-0}" ;;
-    *"table_name='tenant'"*) printf '%s\n' "${STUB_TENANT_TABLES:-1}" ;;
-    *"table_type='BASE TABLE'"*) printf '%s\n' "${STUB_BASE_TABLES:-1}" ;;
+    *"information_schema.schemata"*)
+        printf '%s\n' "$DB_EXISTS"
+        exit 0
+        ;;
+    *"information_schema.tables"*"table_name='tenant'"*)
+        printf '%s\n' "$TENANT_TABLE"
+        exit 0
+        ;;
+    *"information_schema.columns"*"column_name IN ('id','name','db_name','zatca_env','alert_email','enabled','created_at')"*)
+        printf '%s\n' "$BASELINE_COLUMNS"
+        exit 0
+        ;;
+    *"SELECT CONCAT(is_nullable, CHAR(9)"*)
+        printf '%s\t%s\n' "$TENANT_KEY_NULLABLE" "$TENANT_KEY_DEFAULT"
+        exit 0
+        ;;
+    *"information_schema.columns"*"tenant_key"*)
+        printf '%s\n' "$TENANT_KEY_COLUMN"
+        exit 0
+        ;;
+    *"information_schema.statistics"*"index_name='db_name'"*)
+        if [[ "$query" == *"non_unique=0"* ]]; then
+            printf '%s\n' "$DB_NAME_INDEX_VALID"
+        else
+            printf '%s\n' "$DB_NAME_INDEX_ROWS"
+        fi
+        exit 0
+        ;;
+    *"information_schema.statistics"*"uq_tenant_key"*)
+        if [[ "$query" == *"non_unique=0"* ]]; then
+            printf '%s\n' "$UNIQUE_INDEX_VALID"
+        else
+            printf '%s\n' "$UNIQUE_INDEX_ROWS"
+        fi
+        exit 0
+        ;;
+    *"information_schema.triggers"*"tenant_key_default"*)
+        if [ "$DEFAULT_TRIGGER" = "1" ]; then
+            if [ "$DEFAULT_TRIGGER_VALID" = "1" ]; then
+                printf "BEFORE\tINSERT\tbeginifnew.tenant_key=''thensetnew.tenant_key=new.db_name;endif;end\n"
+            else
+                printf 'AFTER\tUPDATE\tbad-trigger\n'
+            fi
+        fi
+        exit 0
+        ;;
+    *"information_schema.triggers"*"tenant_key_immutable"*)
+        if [ "$IMMUTABLE_TRIGGER" = "1" ]; then
+            if [ "$IMMUTABLE_TRIGGER_VALID" = "1" ]; then
+                printf "BEFORE\tUPDATE\tbeginifnew.tenant_key<>old.tenant_keythensignalstate'45000'setmessage_text='tenant_keyisimmutable';endif;end\n"
+            else
+                printf 'AFTER\tINSERT\tbad-trigger\n'
+            fi
+        fi
+        exit 0
+        ;;
+    *"CHAR_LENGTH(db_name)>64"*)
+        printf '%s\n' "$TOO_LONG_DB_NAME"
+        exit 0
+        ;;
+    *"SELECT COUNT(*) FROM tenant WHERE tenant_key IS NULL OR tenant_key=''"*)
+        printf '%s\n' "$MISSING_KEYS"
+        exit 0
+        ;;
+    *"candidate_key"*)
+        printf '%s\n' "$DUPLICATE_KEYS"
+        exit 0
+        ;;
+    *"FROM tenant"*)
+        printf '0\n'
+        exit 0
+        ;;
 esac
+
+if [[ "$query" == *"UPDATE tenant SET tenant_key=db_name"* ]]; then
+    if [[ "$query" == *"WHERE tenant_key IS NULL OR tenant_key=''"* ]]; then
+        MISSING_KEYS=0
+    else
+        NONEMPTY_KEY=overwritten
+        MISSING_KEYS=0
+    fi
+    printf 'BACKFILL\n' >> "$STUB_EVENTS"
+fi
+if [[ "$query" == *"CREATE DATABASE"* ]]; then
+    DB_EXISTS=1
+    printf 'DATABASE_CREATE\n' >> "${STUB_EVENTS:?}"
+fi
+if [[ "$query" == *"CREATE TABLE IF NOT EXISTS"* && "$query" == *"tenant"* ]]; then
+    TENANT_TABLE=1
+    BASELINE_COLUMNS=7
+    DB_NAME_INDEX_ROWS=1
+    DB_NAME_INDEX_VALID=1
+    printf 'SCHEMA_DDL\n' >> "$STUB_EVENTS"
+fi
+if [[ "$query" == *"ADD COLUMN tenant_key"* ]]; then
+    TENANT_KEY_COLUMN=1
+    TENANT_KEY_NULLABLE=YES
+    TENANT_KEY_DEFAULT='<NULL>'
+    printf 'SCHEMA_DDL\n' >> "$STUB_EVENTS"
+fi
+if [[ "$query" == *"MODIFY COLUMN tenant_key"* ]]; then
+    TENANT_KEY_NULLABLE=NO
+    TENANT_KEY_DEFAULT=''
+    printf 'SCHEMA_DDL\n' >> "$STUB_EVENTS"
+fi
+if [[ "$query" == *"ADD UNIQUE KEY uq_tenant_key"* ||
+    "$query" == *"CREATE UNIQUE INDEX uq_tenant_key"* ]]; then
+    UNIQUE_INDEX_ROWS=1
+    UNIQUE_INDEX_VALID=1
+    printf 'SCHEMA_DDL\n' >> "$STUB_EVENTS"
+fi
+if [[ "$query" == *"CREATE TRIGGER tenant_key_default"* ]]; then
+    DEFAULT_TRIGGER=1
+    DEFAULT_TRIGGER_VALID=1
+    printf 'SCHEMA_DDL\n' >> "$STUB_EVENTS"
+fi
+if [[ "$query" == *"CREATE TRIGGER tenant_key_immutable"* ]]; then
+    IMMUTABLE_TRIGGER=1
+    IMMUTABLE_TRIGGER_VALID=1
+    printf 'SCHEMA_DDL\n' >> "$STUB_EVENTS"
+fi
+
+cat > "$STUB_MYSQL_STATE" <<STATE_EOF
+DB_EXISTS=$DB_EXISTS
+TENANT_TABLE=$TENANT_TABLE
+BASELINE_COLUMNS=$BASELINE_COLUMNS
+DB_NAME_INDEX_ROWS=$DB_NAME_INDEX_ROWS
+DB_NAME_INDEX_VALID=$DB_NAME_INDEX_VALID
+TENANT_KEY_COLUMN=$TENANT_KEY_COLUMN
+TENANT_KEY_NULLABLE=$TENANT_KEY_NULLABLE
+TENANT_KEY_DEFAULT=$(printf '%q' "$TENANT_KEY_DEFAULT")
+UNIQUE_INDEX_ROWS=$UNIQUE_INDEX_ROWS
+UNIQUE_INDEX_VALID=$UNIQUE_INDEX_VALID
+DEFAULT_TRIGGER=$DEFAULT_TRIGGER
+DEFAULT_TRIGGER_VALID=$DEFAULT_TRIGGER_VALID
+IMMUTABLE_TRIGGER=$IMMUTABLE_TRIGGER
+IMMUTABLE_TRIGGER_VALID=$IMMUTABLE_TRIGGER_VALID
+MISSING_KEYS=$MISSING_KEYS
+DUPLICATE_KEYS=$DUPLICATE_KEYS
+TOO_LONG_DB_NAME=$TOO_LONG_DB_NAME
+NONEMPTY_KEY=$(printf '%q' "$NONEMPTY_KEY")
+STATE_EOF
 EOF
 
 cat > "$BIN/mysqldump" <<'EOF'
 #!/usr/bin/env bash
+printf 'BACKUP\n' >> "${STUB_EVENTS:?}"
 printf 'stub master backup\n'
 EOF
 
@@ -142,62 +200,73 @@ else
 fi
 EOF
 
-cat > "$BIN/tar" <<'EOF'
+cat > "$BIN/goose" <<'EOF'
 #!/usr/bin/env bash
-if [ "${1:-}" = "-xzf" ]; then
-    destination=""
-    previous=""
-    for arg in "$@"; do
-        if [ "$previous" = "-C" ]; then
-            destination="$arg"
-        fi
-        previous="$arg"
-    done
-    [ -n "$destination" ] || exit 1
-    mkdir -p "$destination/zatca_integration-7ea7056c1092a1ff5986e5267e876510a0465ab7/migrations/zatca_master"
-    touch \
-        "$destination/zatca_integration-7ea7056c1092a1ff5986e5267e876510a0465ab7/migrations/zatca_master/00001_baseline.sql" \
-        "$destination/zatca_integration-7ea7056c1092a1ff5986e5267e876510a0465ab7/migrations/zatca_master/00002_tenant_key.sql"
-    exit 0
-fi
-exec /usr/bin/tar "$@"
+printf '%s\n' "$*" >> "${STUB_GOOSE_LOG:?}"
+exit 90
+EOF
+
+cat > "$BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${STUB_CURL_LOG:?}"
+exit 91
 EOF
 
 chmod +x "$BIN"/*
-chmod +x "$GOOSE_FIXTURE"
 
 cat > "$TEST_DIR/config.env" <<EOF
 MYSQL_CLIENT_MODE=host
 MYSQL_HOST=127.0.0.1
 MYSQL_PORT=3306
 MYSQL_ROOT_USER=root
-MYSQL_ROOT_PASSWORD=root-password
+MYSQL_ROOT_PASSWORD=test-only-password
 MYSQL_MASTER_DB=zatca_master
 BACKUP_DIR=$TEST_DIR/backups
 LOG_DIR=$TEST_DIR/logs
-ZATCA_MASTER_GOOSE_BIN=goose
+DEPLOY_STATE_DIR=$TEST_DIR/state
 ZATCA_MASTER_MIGRATION_LOCK_FILE=$TEST_DIR/master.lock
-ZATCA_MASTER_MIGRATION_CACHE_DIR=$TEST_DIR/zatca-cache
 EOF
-grep -v '^ZATCA_MASTER_GOOSE_BIN=' "$TEST_DIR/config.env" > "$TEST_DIR/auto-config.env"
-printf 'ZATCA_MASTER_GOOSE_CACHE_DIR=%s\n' "$GOOSE_CACHE" >> "$TEST_DIR/auto-config.env"
-ZATCA_SOURCE_ARCHIVE="$SOURCE_ARCHIVE"
-STUB_CURL_LOG="$TEST_DIR/curl.log"
-export ZATCA_SOURCE_ARCHIVE STUB_CURL_LOG GOOSE_FIXTURE
+
+reset_state() {
+    cat > "$STATE" <<'EOF'
+DB_EXISTS=0
+TENANT_TABLE=0
+BASELINE_COLUMNS=0
+DB_NAME_INDEX_ROWS=0
+DB_NAME_INDEX_VALID=0
+TENANT_KEY_COLUMN=0
+TENANT_KEY_NULLABLE=YES
+TENANT_KEY_DEFAULT='<NULL>'
+UNIQUE_INDEX_ROWS=0
+UNIQUE_INDEX_VALID=0
+DEFAULT_TRIGGER=0
+DEFAULT_TRIGGER_VALID=0
+IMMUTABLE_TRIGGER=0
+IMMUTABLE_TRIGGER_VALID=0
+MISSING_KEYS=0
+DUPLICATE_KEYS=0
+TOO_LONG_DB_NAME=0
+NONEMPTY_KEY=''
+EOF
+    : > "$EVENTS"
+    : > "$MYSQL_LOG"
+    : > "$GOOSE_LOG"
+    : > "$CURL_LOG"
+    rm -rf "$TEST_DIR/backups" "$TEST_DIR/logs"
+}
 
 run_migration() {
-    : > "$TEST_DIR/goose.log"
-    : > "$TEST_DIR/mysql.log"
-    rm -rf "$TEST_DIR/backups" "$TEST_DIR/logs"
-    mkdir -p "$TEST_DIR/backups" "$TEST_DIR/logs"
-    STUB_GOOSE_LOG="$TEST_DIR/goose.log" \
-    STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
+    STUB_MYSQL_STATE="$STATE" \
+    STUB_MYSQL_LOG="$MYSQL_LOG" \
+    STUB_EVENTS="$EVENTS" \
+    STUB_GOOSE_LOG="$GOOSE_LOG" \
+    STUB_CURL_LOG="$CURL_LOG" \
     PATH="$BIN:$PATH" \
         bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/config.env" \
         >"$TEST_DIR/output" 2>&1
 }
 
-echo "=== syntax and command wiring ==="
+echo "=== syntax and deployctl command wiring ==="
 bash -n scripts/migrate-zatca-master.sh
 bash -n scripts/tests/test-migrate-zatca-master.sh
 plan="$(bash scripts/deployctl.sh --plan db migrate-master --config "$TEST_DIR/config.env")"
@@ -207,10 +276,8 @@ pass "syntax and deployctl command wiring"
 
 echo
 echo "=== failed MySQL preflight stops before backup ==="
-if STUB_PREFLIGHT_FAIL=1 STUB_GOOSE_LOG="$TEST_DIR/goose.log" \
-    STUB_MYSQL_LOG="$TEST_DIR/mysql.log" PATH="$BIN:$PATH" \
-    bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/config.env" \
-    >"$TEST_DIR/output" 2>&1; then
+reset_state
+if STUB_PREFLIGHT_FAIL=1 run_migration; then
     fail "failed MySQL preflight was accepted"
 fi
 grep -q 'Deployment MySQL preflight failed' "$TEST_DIR/output" ||
@@ -220,189 +287,211 @@ grep -q 'Deployment MySQL preflight failed' "$TEST_DIR/output" ||
 pass "failed MySQL preflight stops before backup"
 
 echo
-echo "=== fresh database backs up before Goose ==="
-if ! STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
-    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
-    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/config.env" \
-    >"$TEST_DIR/output" 2>&1; then
-    cat "$TEST_DIR/output"
-    cat "$TEST_DIR/curl.log" 2>/dev/null || true
-    tar -tzf "$SOURCE_ARCHIVE" 2>/dev/null || true
-    fail "fresh migration failed"
-fi
-ls "$TEST_DIR/backups"/*.sql.gz >/dev/null 2>&1 || fail "fresh migration did not create a backup"
-grep -q ' mysql .* up$' "$TEST_DIR/goose.log" || fail "fresh migration did not run Goose up"
-pass "fresh database backup and Goose ordering"
-
-echo
-echo "=== Goose uses the host gateway in the dashboard runner ==="
-: > "$TEST_DIR/goose.log"
-if ! STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
-    ZATCA_MASTER_GOOSE_IN_DOCKER=1 \
-    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
-    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/config.env" \
-    >"$TEST_DIR/output" 2>&1; then
-    cat "$TEST_DIR/output"
-    fail "dashboard Goose host-gateway migration failed"
-fi
-grep -q 'host.docker.internal' "$TEST_DIR/goose.log" ||
-    fail "bridge Goose did not use host.docker.internal"
-pass "dashboard Goose uses the host gateway"
-
-echo
-echo "=== legacy database auto-baselines by default ==="
-: > "$TEST_DIR/goose.log"
-if ! STUB_DB_EXISTS=1 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
-    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
-    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/config.env" \
-    >"$TEST_DIR/output" 2>&1; then
-    cat "$TEST_DIR/output"
-    fail "legacy registry was not auto-baselined"
-fi
-grep -q ' version$' "$TEST_DIR/goose.log" || fail "default policy did not initialize Goose ledger"
-grep -q ' up$' "$TEST_DIR/goose.log" || fail "default policy did not run Goose up"
-grep -q 'INSERT INTO goose_db_version' "$TEST_DIR/mysql.log" ||
-    fail "default policy did not record the baseline"
-pass "legacy database auto-baselines with the approved default"
-
-echo
-echo "=== verification and lock failures are fail-closed ==="
-if STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
-    STUB_IMMUTABLE_TRIGGER=0 STUB_GOOSE_LOG="$TEST_DIR/goose.log" \
-    STUB_MYSQL_LOG="$TEST_DIR/mysql.log" PATH="$BIN:$PATH" \
-    bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/config.env" \
-    >"$TEST_DIR/output" 2>&1; then
-    fail "incomplete trigger verification was accepted"
-fi
-grep -q 'verification failed' "$TEST_DIR/output" ||
-    fail "verification failure was not reported"
-if STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
-    STUB_FLOCK_FAIL=1 STUB_GOOSE_LOG="$TEST_DIR/goose.log" \
-    STUB_MYSQL_LOG="$TEST_DIR/mysql.log" PATH="$BIN:$PATH" \
-    bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/config.env" \
-    >"$TEST_DIR/output" 2>&1; then
+echo "=== lock failure stops before schema changes ==="
+reset_state
+if STUB_FLOCK_FAIL=1 run_migration; then
     fail "lock contention was accepted"
 fi
-grep -q 'already running' "$TEST_DIR/output" || fail "lock failure was not reported"
-pass "verification and lock failures are fail-closed"
+grep -q 'already running' "$TEST_DIR/output" ||
+    fail "lock failure was not reported"
+! grep -q '^SCHEMA_DDL$' "$EVENTS" ||
+    fail "lock failure allowed schema changes"
+pass "lock failure stops before schema changes"
 
 echo
-echo "=== Goose on PATH is reused without downloading ==="
-: > "$TEST_DIR/goose.log"
-: > "$TEST_DIR/mysql.log"
-: > "$TEST_DIR/curl.log"
-if ! STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
-    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
-    STUB_CURL_LOG="$TEST_DIR/curl.log" GOOSE_FIXTURE="$GOOSE_FIXTURE" \
-    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh \
-    --config "$TEST_DIR/auto-config.env" >"$TEST_DIR/output" 2>&1; then
+echo "=== fresh database is initialized directly after a verified backup ==="
+reset_state
+if ! run_migration; then
     cat "$TEST_DIR/output"
-    fail "Goose PATH resolution failed"
+    fail "fresh registry migration failed"
 fi
-[ ! -s "$TEST_DIR/curl.log" ] || fail "PATH Goose triggered a download"
-grep -q ' mysql .* up$' "$TEST_DIR/goose.log" ||
-    fail "PATH Goose did not run the migration"
-pass "Goose on PATH is reused"
+ls "$TEST_DIR/backups"/*.sql.gz >/dev/null 2>&1 ||
+    fail "fresh registry migration did not create a backup"
+grep -q 'CREATE DATABASE IF NOT EXISTS' "$MYSQL_LOG" ||
+    fail "fresh migration did not create the master database"
+grep -q 'CREATE TABLE IF NOT EXISTS' "$MYSQL_LOG" ||
+    fail "fresh migration did not create the baseline tenant table"
+grep -q 'tenant_key' "$MYSQL_LOG" ||
+    fail "fresh migration did not create the tenant identity schema"
+grep -q 'ADD UNIQUE KEY uq_tenant_key (tenant_key)' "$MYSQL_LOG" ||
+    fail "fresh migration did not create the unique tenant_key index"
+grep -q 'CREATE TRIGGER tenant_key_default' "$MYSQL_LOG" ||
+    fail "fresh migration did not create the tenant_key default trigger"
+grep -q 'SET NEW.tenant_key = NEW.db_name' "$MYSQL_LOG" ||
+    fail "default trigger does not use db_name for an empty tenant_key"
+grep -q 'CREATE TRIGGER tenant_key_immutable' "$MYSQL_LOG" ||
+    fail "fresh migration did not create the tenant_key immutable trigger"
+grep -q "SIGNAL SQLSTATE '45000'" "$MYSQL_LOG" ||
+    fail "immutable trigger does not reject tenant_key changes"
+[ ! -s "$GOOSE_LOG" ] || fail "migration invoked Goose"
+[ ! -s "$CURL_LOG" ] || fail "migration downloaded a Goose or migration artifact"
+backup_line="$(grep -n '^BACKUP$' "$EVENTS" | head -1 | cut -d: -f1)"
+ddl_line="$(grep -n '^SCHEMA_DDL$' "$EVENTS" | head -1 | cut -d: -f1)"
+[ -n "$backup_line" ] && [ -n "$ddl_line" ] && [ "$backup_line" -lt "$ddl_line" ] ||
+    fail "schema DDL did not follow the verified backup"
+pass "fresh database, backup ordering, and direct schema setup"
 
 echo
-echo "=== unset Goose downloads and runs the verified release ==="
-rm -f "$BIN/goose"
-rm -rf "$GOOSE_CACHE" "$TEST_DIR/backups" "$TEST_DIR/logs"
-mkdir -p "$TEST_DIR/backups" "$TEST_DIR/logs"
-: > "$TEST_DIR/goose.log"
-: > "$TEST_DIR/mysql.log"
-: > "$TEST_DIR/curl.log"
-if ! STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
-    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
-    STUB_CURL_LOG="$TEST_DIR/curl.log" GOOSE_FIXTURE="$GOOSE_FIXTURE" \
-    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh \
-    --config "$TEST_DIR/auto-config.env" >"$TEST_DIR/output" 2>&1; then
+echo "=== complete registry rerun performs no schema DDL ==="
+reset_state
+cat > "$STATE" <<'EOF'
+DB_EXISTS=1
+TENANT_TABLE=1
+BASELINE_COLUMNS=7
+DB_NAME_INDEX_ROWS=1
+DB_NAME_INDEX_VALID=1
+TENANT_KEY_COLUMN=1
+TENANT_KEY_NULLABLE=NO
+TENANT_KEY_DEFAULT=''
+UNIQUE_INDEX_ROWS=1
+UNIQUE_INDEX_VALID=1
+DEFAULT_TRIGGER=1
+DEFAULT_TRIGGER_VALID=1
+IMMUTABLE_TRIGGER=1
+IMMUTABLE_TRIGGER_VALID=1
+MISSING_KEYS=0
+DUPLICATE_KEYS=0
+TOO_LONG_DB_NAME=0
+NONEMPTY_KEY=stable-existing-key
+EOF
+if ! run_migration; then
     cat "$TEST_DIR/output"
-    fail "automatic Goose download failed"
+    fail "complete registry rerun failed"
 fi
-if [ ! -x "$GOOSE_CACHE/goose-v3.30.0-amd64" ]; then
+! grep -q '^SCHEMA_DDL$' "$EVENTS" ||
+    fail "complete registry rerun attempted schema DDL"
+pass "complete registry rerun is idempotent"
+
+echo
+echo "=== partial registry backfills only missing tenant keys ==="
+reset_state
+cat > "$STATE" <<'EOF'
+DB_EXISTS=1
+TENANT_TABLE=1
+BASELINE_COLUMNS=7
+DB_NAME_INDEX_ROWS=1
+DB_NAME_INDEX_VALID=1
+TENANT_KEY_COLUMN=1
+TENANT_KEY_NULLABLE=YES
+TENANT_KEY_DEFAULT='<NULL>'
+UNIQUE_INDEX_ROWS=0
+UNIQUE_INDEX_VALID=0
+DEFAULT_TRIGGER=0
+DEFAULT_TRIGGER_VALID=0
+IMMUTABLE_TRIGGER=0
+IMMUTABLE_TRIGGER_VALID=0
+MISSING_KEYS=2
+DUPLICATE_KEYS=0
+TOO_LONG_DB_NAME=0
+NONEMPTY_KEY=stable-existing-key
+EOF
+if ! run_migration; then
     cat "$TEST_DIR/output"
-    find "$GOOSE_CACHE" -maxdepth 1 -type f -print 2>/dev/null || true
-    fail "automatic Goose download did not install the cached binary"
+    fail "compatible partial registry failed"
 fi
-grep -q ' mysql .* up$' "$TEST_DIR/goose.log" ||
-    fail "automatically installed Goose did not run the migration"
-[ "$(wc -l < "$TEST_DIR/curl.log" | tr -d ' ')" = "1" ] ||
-    fail "automatic Goose download did not use the downloader exactly once"
-pass "unset Goose downloads, verifies, caches, and runs the release"
+grep -q "UPDATE tenant SET tenant_key=db_name WHERE tenant_key IS NULL OR tenant_key=''" "$MYSQL_LOG" ||
+    fail "partial registry did not limit backfill to missing keys"
+source "$STATE"
+[ "$NONEMPTY_KEY" = "stable-existing-key" ] ||
+    fail "partial registry overwrote a non-empty tenant key"
+grep -q '^BACKFILL$' "$EVENTS" ||
+    fail "partial registry did not backfill missing keys"
+pass "partial registry backfills missing keys and preserves existing values"
 
 echo
-echo "=== verified Goose cache is reused without downloading ==="
-: > "$TEST_DIR/goose.log"
-: > "$TEST_DIR/mysql.log"
-: > "$TEST_DIR/curl.log"
-if ! STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
-    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
-    STUB_CURL_LOG="$TEST_DIR/curl.log" GOOSE_FIXTURE="$GOOSE_FIXTURE" \
-    PATH="$BIN:$PATH" bash scripts/migrate-zatca-master.sh \
-    --config "$TEST_DIR/auto-config.env" >"$TEST_DIR/output" 2>&1; then
-    cat "$TEST_DIR/output"
-    fail "cached Goose reuse failed"
+echo "=== duplicate tenant identity values fail before backfill ==="
+reset_state
+cat > "$STATE" <<'EOF'
+DB_EXISTS=1
+TENANT_TABLE=1
+BASELINE_COLUMNS=7
+DB_NAME_INDEX_ROWS=1
+DB_NAME_INDEX_VALID=1
+TENANT_KEY_COLUMN=1
+TENANT_KEY_NULLABLE=YES
+TENANT_KEY_DEFAULT='<NULL>'
+UNIQUE_INDEX_ROWS=0
+UNIQUE_INDEX_VALID=0
+DEFAULT_TRIGGER=0
+DEFAULT_TRIGGER_VALID=0
+IMMUTABLE_TRIGGER=0
+IMMUTABLE_TRIGGER_VALID=0
+MISSING_KEYS=1
+DUPLICATE_KEYS=1
+TOO_LONG_DB_NAME=0
+NONEMPTY_KEY=stable-existing-key
+EOF
+if run_migration; then
+    fail "duplicate tenant identity values were accepted"
 fi
-[ ! -s "$TEST_DIR/curl.log" ] || fail "cached Goose triggered a second download"
-grep -q ' mysql .* up$' "$TEST_DIR/goose.log" ||
-    fail "cached Goose did not run the migration"
-pass "verified Goose cache is reused"
+grep -q 'would not be unique' "$TEST_DIR/output" ||
+    fail "duplicate tenant identity failure was not explicit"
+! grep -q '^BACKFILL$' "$EVENTS" ||
+    fail "duplicate values were changed before the conflict was reported"
+! grep -q 'Verified ZATCA master registry' "$TEST_DIR/output" ||
+    fail "duplicate tenant identity values passed readiness verification"
+pass "duplicate tenant identity values fail closed"
 
 echo
-echo "=== Goose checksum mismatches fail closed ==="
-rm -rf "$GOOSE_CACHE"
-: > "$TEST_DIR/curl.log"
-if STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
-    STUB_GOOSE_LOG="$TEST_DIR/goose.log" STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
-    STUB_CURL_LOG="$TEST_DIR/curl.log" GOOSE_FIXTURE="$GOOSE_FIXTURE" \
-    STUB_SHA256_MISMATCH=1 PATH="$BIN:$PATH" \
-    bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/auto-config.env" \
-    >"$TEST_DIR/output" 2>&1; then
-    fail "checksum mismatch was accepted"
+echo "=== conflicting triggers and indexes fail closed ==="
+reset_state
+cat > "$STATE" <<'EOF'
+DB_EXISTS=1
+TENANT_TABLE=1
+BASELINE_COLUMNS=7
+DB_NAME_INDEX_ROWS=1
+DB_NAME_INDEX_VALID=1
+TENANT_KEY_COLUMN=1
+TENANT_KEY_NULLABLE=NO
+TENANT_KEY_DEFAULT=''
+UNIQUE_INDEX_ROWS=0
+UNIQUE_INDEX_VALID=0
+DEFAULT_TRIGGER=1
+DEFAULT_TRIGGER_VALID=0
+IMMUTABLE_TRIGGER=0
+IMMUTABLE_TRIGGER_VALID=0
+MISSING_KEYS=0
+DUPLICATE_KEYS=0
+TOO_LONG_DB_NAME=0
+NONEMPTY_KEY=stable-existing-key
+EOF
+if run_migration; then
+    fail "incompatible tenant_key trigger was accepted"
 fi
-grep -q 'checksum verification failed' "$TEST_DIR/output" ||
-    fail "checksum failure was not reported"
-[ ! -e "$GOOSE_CACHE/goose-v3.30.0-amd64" ] ||
-    fail "checksum failure left an installed Goose binary"
-pass "Goose checksum mismatches fail closed"
+grep -q "trigger 'tenant_key_default' conflicts" "$TEST_DIR/output" ||
+    fail "incompatible trigger failure was not explicit"
+! grep -q 'Verified ZATCA master registry' "$TEST_DIR/output" ||
+    fail "incompatible trigger passed readiness verification"
 
-echo
-echo "=== Goose failures are classified by layer ==="
-run_classification_case() {
-    local goose_error="$1" expected="$2"
-    : > "$TEST_DIR/goose.log"
-    if STUB_DB_EXISTS=0 STUB_TENANT_TABLES=1 STUB_GOOSE_TABLES=0 STUB_BASE_TABLES=1 \
-        STUB_GOOSE_ERROR="$goose_error" STUB_GOOSE_LOG="$TEST_DIR/goose.log" \
-        STUB_MYSQL_LOG="$TEST_DIR/mysql.log" PATH="$BIN:$PATH" \
-        bash scripts/migrate-zatca-master.sh --config "$TEST_DIR/auto-config.env" \
-        >"$TEST_DIR/output" 2>&1; then
-        fail "Goose failure was accepted: $goose_error"
-    fi
-    grep -q "$expected" "$TEST_DIR/output" ||
-        { cat "$TEST_DIR/output"; fail "Goose failure was not classified: $goose_error"; }
-}
-run_classification_case \
-    "Error 1045 (28000): Access denied for user 'dokku_admin'@'192.168.8.103'" \
-    'authentication was rejected'
-run_classification_case \
-    'dial tcp: lookup host.docker.internal: no such host' \
-    'could not connect to MySQL'
-run_classification_case \
-    "Error 1050 (42S01): Table 'tenant' already exists" \
-    'migration SQL failed'
-pass "Goose authentication, connection, and SQL failures are distinct"
-
-echo
-echo "=== no ZATCA DDL is duplicated in deployment ==="
-if grep -Eq 'CREATE TABLE[^;]*tenant|ALTER TABLE[^;]*tenant' scripts/migrate-zatca-master.sh; then
-    fail "deployment migration script duplicates ZATCA tenant DDL"
+reset_state
+cat > "$STATE" <<'EOF'
+DB_EXISTS=1
+TENANT_TABLE=1
+BASELINE_COLUMNS=7
+DB_NAME_INDEX_ROWS=1
+DB_NAME_INDEX_VALID=1
+TENANT_KEY_COLUMN=1
+TENANT_KEY_NULLABLE=NO
+TENANT_KEY_DEFAULT=''
+UNIQUE_INDEX_ROWS=1
+UNIQUE_INDEX_VALID=0
+DEFAULT_TRIGGER=1
+DEFAULT_TRIGGER_VALID=1
+IMMUTABLE_TRIGGER=0
+IMMUTABLE_TRIGGER_VALID=0
+MISSING_KEYS=0
+DUPLICATE_KEYS=0
+TOO_LONG_DB_NAME=0
+NONEMPTY_KEY=stable-existing-key
+EOF
+if run_migration; then
+    fail "incompatible tenant_key index was accepted"
 fi
-create_line="$(grep -n 'migrate-zatca-master.sh' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
-apps_line="$(grep -n 'Check if apps already exist' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
-[ -n "$create_line" ] && [ -n "$apps_line" ] && [ "$create_line" -lt "$apps_line" ] ||
-    fail "tenant creation does not run master migration before app checks"
-pass "ZATCA DDL remains external and migration precedes tenant provisioning"
+grep -q "index 'uq_tenant_key' conflicts" "$TEST_DIR/output" ||
+    fail "incompatible index failure was not explicit"
+! grep -q 'Verified ZATCA master registry' "$TEST_DIR/output" ||
+    fail "incompatible index passed readiness verification"
+pass "incompatible tenant_key triggers and indexes fail closed"
 
 echo
 echo "ALL ZATCA MASTER MIGRATION TESTS PASSED"

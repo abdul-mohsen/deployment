@@ -25,6 +25,9 @@ func TestDockerArgsMountPersistentStorage(t *testing.T) {
 	if !slices.Contains(args, "DEPLOYMENT_SCRIPTS_REVISION=0123456789abcdef") {
 		t.Fatalf("runner args do not pass deployment script revision: %v", args)
 	}
+	if slices.Contains(args, "ZATCA_MASTER_GOOSE_IN_DOCKER=1") {
+		t.Fatalf("runner args still enable the obsolete master Goose mode: %v", args)
+	}
 }
 
 func TestDockerArgsOmitPersistentStorageWhenUnset(t *testing.T) {

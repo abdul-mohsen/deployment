@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
-# migrate-zatca-master.sh — apply the ZATCA-owned zatca_master Goose artifact
+# migrate-zatca-master.sh — prepare the ZATCA master tenant registry
 # =============================================================================
-# This script orchestrates the migration only. The migration SQL remains owned
-# by zatca_integration and is supplied as an external artifact directory.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Find the config path before loading the shared helpers. The helpers inspect
-# MYSQL_CLIENT_MODE while they are sourced.
 CONFIG_FILE="${CONFIG_FILE:-$PROJECT_DIR/config.env}"
 for ((i = 1; i <= $#; i++)); do
     if [ "${!i:-}" = "--config" ]; then
@@ -47,18 +43,6 @@ error() { deployment_log ERROR "$*"; echo -e "${RED}[x]${NC} $*" >&2; }
 info()  { deployment_log INFO "$*"; echo -e "${BLUE}[i]${NC} $*"; }
 
 MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
-ZATCA_MIGRATION_REPOSITORY="https://github.com/abdul-mohsen/zatca_integration"
-ZATCA_MIGRATION_REF="7ea7056c1092a1ff5986e5267e876510a0465ab7"
-ZATCA_MIGRATION_CACHE_DIR="${ZATCA_MASTER_MIGRATION_CACHE_DIR:-${DEPLOY_STATE_DIR:-${PROJECT_DIR}/state}/zatca-master}"
-ARTIFACT_DIR=""
-# Pinned Pressly Goose release; digests are selected per supported Linux arch.
-GOOSE_RELEASE_VERSION="v3.30.0"
-GOOSE_BIN="${ZATCA_MASTER_GOOSE_BIN:-}"
-GOOSE_BIN_EXPLICIT=false
-if [ -n "$GOOSE_BIN" ]; then
-    GOOSE_BIN_EXPLICIT=true
-fi
-GOOSE_CACHE_DIR="${ZATCA_MASTER_GOOSE_CACHE_DIR:-${DEPLOY_STATE_DIR:-${PROJECT_DIR}/state}/bin}"
 LOCK_FILE="${ZATCA_MASTER_MIGRATION_LOCK_FILE:-${DEPLOY_STATE_DIR:-${PROJECT_DIR}/state}/zatca-master-migration.lock}"
 BACKUP_DIR="${ZATCA_MASTER_BACKUP_DIR:-${BACKUP_DIR:-/opt/tenant-backups}}"
 DRY_RUN=false
@@ -68,169 +52,48 @@ usage() {
     cat <<'USAGE'
 Usage: migrate-zatca-master.sh [options]
 
-Apply the ZATCA-owned Goose artifact to MYSQL_MASTER_DB before tenant creation.
-The approved ZATCA source is fetched at a pinned revision and cached locally.
+Prepare and verify the master tenant registry using the configured MySQL client.
 
 Options:
   --config <path>                 Config file (default: ../config.env)
-  --goose-bin <path>              Goose executable (otherwise auto-installed)
   --master-db <name>              Master database (default: zatca_master)
   --dry-run                       Validate configuration without changing MySQL
 USAGE
 }
 
-for ((i = 1; i <= $#; i++)); do
-    case "${!i}" in
-        --config|--goose-bin|--master-db)
-            i=$((i + 1))
-            ;;
-        --dry-run|--help|-h) ;;
-        *) ;;
-    esac
-done
-
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --config)          CONFIG_FILE="$2"; shift 2 ;;
-        --goose-bin)       GOOSE_BIN="$2"; GOOSE_BIN_EXPLICIT=true; shift 2 ;;
-        --master-db)       MASTER_DB="$2"; shift 2 ;;
-        --dry-run)         DRY_RUN=true; shift ;;
-        --help|-h)         usage; exit 0 ;;
-        *)                  error "Unknown option: $1"; usage; exit 1 ;;
+        --config)
+            [ "$#" -ge 2 ] || { error "--config requires a path"; exit 1; }
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
+        --master-db)
+            [ "$#" -ge 2 ] || { error "--master-db requires a name"; exit 1; }
+            MASTER_DB="$2"
+            shift 2
+            ;;
+        --dry-run) DRY_RUN=true; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *) error "Unknown option: $1"; usage; exit 1 ;;
     esac
 done
 
 validate_database_identifier "$MASTER_DB" || exit 1
 
-fetch_zatca_migration_artifact() {
-    local cache_root archive extract_root source_root url download_tool
-    cache_root="$ZATCA_MIGRATION_CACHE_DIR/zatca_integration-$ZATCA_MIGRATION_REF"
-    ARTIFACT_DIR="$cache_root/migrations/zatca_master"
-
-    if [ -r "$ARTIFACT_DIR/00001_baseline.sql" ] &&
-        [ -r "$ARTIFACT_DIR/00002_tenant_key.sql" ]; then
-        log "Using cached approved ZATCA migrations at revision $ZATCA_MIGRATION_REF"
-        return 0
-    fi
-
-    mkdir -p "$ZATCA_MIGRATION_CACHE_DIR" || {
-        error "Could not create ZATCA migration cache: $ZATCA_MIGRATION_CACHE_DIR"
-        return 1
-    }
-    rm -rf "$cache_root"
-
-    if command -v curl >/dev/null 2>&1; then
-        download_tool=curl
-    elif command -v wget >/dev/null 2>&1; then
-        download_tool=wget
-    else
-        error "Fetching approved ZATCA migrations requires curl or wget."
-        return 1
-    fi
-    command -v tar >/dev/null 2>&1 || {
-        error "Fetching approved ZATCA migrations requires tar."
-        return 1
-    }
-
-    archive="$(mktemp "$ZATCA_MIGRATION_CACHE_DIR/.zatca-source.XXXXXX.tar.gz")" || {
-        error "Could not create a temporary ZATCA source archive."
-        return 1
-    }
-    extract_root="$(mktemp -d "$ZATCA_MIGRATION_CACHE_DIR/.zatca-extract.XXXXXX")" || {
-        rm -f "$archive"
-        error "Could not create a temporary ZATCA extraction directory."
-        return 1
-    }
-    url="${ZATCA_MIGRATION_REPOSITORY}/archive/${ZATCA_MIGRATION_REF}.tar.gz"
-    log "Fetching approved ZATCA migrations at revision $ZATCA_MIGRATION_REF"
-    if [ "$download_tool" = "curl" ]; then
-        if ! curl --fail --location --silent --show-error --retry 3 \
-            --connect-timeout 10 --max-time 120 --output "$archive" "$url"; then
-            rm -f "$archive"
-            rm -rf "$extract_root"
-            error "Approved ZATCA migration source download failed."
-            return 1
-        fi
-    elif ! wget --quiet --timeout=10 --tries=3 --output-document="$archive" "$url"; then
-        rm -f "$archive"
-        rm -rf "$extract_root"
-        error "Approved ZATCA migration source download failed."
-        return 1
-    fi
-
-    if ! tar -xzf "$archive" -C "$extract_root"; then
-        rm -f "$archive"
-        rm -rf "$extract_root"
-        error "Approved ZATCA migration source archive could not be extracted."
-        return 1
-    fi
-    rm -f "$archive"
-
-    source_root="$(find "$extract_root" -mindepth 1 -maxdepth 1 -type d -print -quit)"
-    if [ -z "$source_root" ] ||
-        [ ! -r "$source_root/migrations/zatca_master/00001_baseline.sql" ] ||
-        [ ! -r "$source_root/migrations/zatca_master/00002_tenant_key.sql" ]; then
-        rm -rf "$extract_root"
-        error "Approved ZATCA source is missing the required master migration files."
-        return 1
-    fi
-    if ! mv "$source_root" "$cache_root"; then
-        rm -rf "$extract_root"
-        error "Could not cache the approved ZATCA migration source."
-        return 1
-    fi
-    rm -rf "$extract_root"
-    ARTIFACT_DIR="$cache_root/migrations/zatca_master"
-    log "Cached approved ZATCA migrations at revision $ZATCA_MIGRATION_REF"
+mysql_output() {
+    run_mysql -N -B -e "$1"
 }
 
-fetch_zatca_migration_artifact || exit 1
-
-mysql_dsn_escape() {
-    local value="$1"
-    value="${value//%/%25}"
-    value="${value//\//%2F}"
-    value="${value//@/%40}"
-    value="${value//:/%3A}"
-    value="${value//\?/%3F}"
-    value="${value//#/%23}"
-    value="${value//;/%3B}"
-    printf '%s' "$value"
-}
-
-goose_dsn() {
-    local host user password port
-    host="$(goose_connection_host)"
-    port="${MYSQL_PORT:-3306}"
-    user="$(mysql_admin_user)"
-    password="$(mysql_admin_password)"
-    [ -n "$user" ] && [ -n "$password" ] || {
-        error "A Goose DSN or configured MySQL admin credentials are required."
-        return 1
-    }
-    printf '%s:%s@tcp(%s:%s)/%s' \
-        "$(mysql_dsn_escape "$user")" \
-        "$(mysql_dsn_escape "$password")" \
-        "$host" "$port" "$MASTER_DB"
-}
-
-goose_connection_host() {
-    local host="${ZATCA_MASTER_GOOSE_HOST:-${MYSQL_HOST:-127.0.0.1}}"
-    if [ "${ZATCA_MASTER_GOOSE_IN_DOCKER:-0}" = "1" ]; then
-        case "$host" in
-            localhost|127.0.0.1|::1) host="host.docker.internal" ;;
-        esac
-    elif [ "$host" = "host.docker.internal" ]; then
-        host="127.0.0.1"
-    fi
-    printf '%s' "$host"
+mysql_scalar() {
+    run_mysql_scalar "$1"
 }
 
 master_database_exists() {
     local count
-    count="$(run_mysql -N -B -e \
-        "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name='${MASTER_DB}';")" || return 2
-    count="$(printf '%s\n' "$count" | awk 'NF { print $1; exit }')"
+    count="$(mysql_scalar \
+        "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name='${MASTER_DB}';")" ||
+        return 2
     case "$count" in
         0) return 1 ;;
         1) return 0 ;;
@@ -239,53 +102,53 @@ master_database_exists() {
 }
 
 master_table_count() {
-    local table_name="$1" count
-    count="$(run_mysql -N -B -e \
-        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${MASTER_DB}' AND table_name='${table_name}';")" || return 1
-    printf '%s\n' "$count" | awk 'NF { print $1; exit }'
+    local table_name="$1"
+    mysql_scalar \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${MASTER_DB}' AND table_name='${table_name}';"
 }
 
 master_base_table_count() {
-    run_mysql -N -B -e \
-        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${MASTER_DB}' AND table_type='BASE TABLE';" |
-        awk 'NF { print $1; exit }'
-}
-
-master_goose_row_count() {
-    run_mysql -N -B "$MASTER_DB" -e \
-        "SELECT COUNT(*) FROM goose_db_version;" | awk 'NF { print $1; exit }'
+    local table_name="$1"
+    mysql_scalar \
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${MASTER_DB}' AND table_name='${table_name}' AND table_type='BASE TABLE';"
 }
 
 create_master_database() {
     log "Creating fresh master database: $MASTER_DB"
-    run_mysql -e \
-        "CREATE DATABASE IF NOT EXISTS \`${MASTER_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+    if ! run_mysql -e \
+        "CREATE DATABASE IF NOT EXISTS \`${MASTER_DB}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"; then
+        error "Could not create master database '$MASTER_DB'."
+        return 1
+    fi
 }
 
 backup_master_database() {
     local timestamp backup_path manifest
-    mkdir -p "$BACKUP_DIR"
+    if ! mkdir -p "$BACKUP_DIR"; then
+        error "Could not create master backup directory: $BACKUP_DIR"
+        return 1
+    fi
     timestamp="$(date -u '+%Y%m%d-%H%M%S')"
-    backup_path="$BACKUP_DIR/${MASTER_DB}_pre-goose_${timestamp}.sql.gz"
+    backup_path="$BACKUP_DIR/${MASTER_DB}_pre-script-migration_${timestamp}.sql.gz"
     manifest="${backup_path%.sql.gz}.meta.json"
 
-    log "Creating verified pre-Goose backup for $MASTER_DB"
+    log "Creating verified pre-migration backup for $MASTER_DB"
     if ! run_mysqldump --single-transaction --routines --triggers --no-tablespaces "$MASTER_DB" |
         gzip > "$backup_path"; then
         rm -f "$backup_path"
-        error "Pre-Goose backup failed for $MASTER_DB; refusing migration."
+        error "Pre-migration backup failed for $MASTER_DB; refusing schema changes."
         return 1
     fi
     if ! verify_gzip_artifact "$backup_path"; then
         rm -f "$backup_path"
-        error "Pre-Goose backup failed verification for $MASTER_DB; refusing migration."
+        error "Pre-migration backup failed verification for $MASTER_DB; refusing schema changes."
         return 1
     fi
     cat > "$manifest" <<EOF
 {
   "database": "$(json_escape "$MASTER_DB")",
   "artifact": "$(json_escape "$backup_path")",
-  "purpose": "zatca_master_pre_goose",
+  "purpose": "zatca_master_pre_script_migration",
   "verified": true,
   "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
@@ -293,346 +156,391 @@ EOF
     MASTER_BACKUP_PATH="$backup_path"
 }
 
-goose_download_metadata() {
-    local os arch
-    os="$(uname -s 2>/dev/null || true)"
-    arch="$(uname -m 2>/dev/null || true)"
-    if [ "$os" != "Linux" ]; then
-        error "Automatic Goose installation supports Linux only (detected $os). Set ZATCA_MASTER_GOOSE_BIN to an installed executable."
-        return 1
-    fi
-
-    case "$arch" in
-        x86_64|amd64)
-            GOOSE_ASSET="goose_linux_x86_64"
-            GOOSE_PLATFORM="amd64"
-            GOOSE_SHA256="cce6e6371670f0654adc0ece407b81a22e53ba51e24e17a80ff7a0e25cda8548"
-            ;;
-        aarch64|arm64)
-            GOOSE_ASSET="goose_linux_arm64"
-            GOOSE_PLATFORM="arm64"
-            GOOSE_SHA256="624ae3159e221494c5e780c772cc000d788a4afe34a791553e43b2419174a715"
-            ;;
-        *)
-            error "Automatic Goose installation does not support Linux architecture '$arch'. Set ZATCA_MASTER_GOOSE_BIN to an installed executable."
-            return 1
-            ;;
-    esac
-}
-
-goose_file_sha256() {
-    sha256sum "$1" | awk '{ print $1; exit }'
-}
-
-download_goose() {
-    local cache_path temp_file url actual download_tool
-    goose_download_metadata || return 1
-
-    if ! command -v sha256sum >/dev/null 2>&1; then
-        error "sha256sum is required to verify the automatic Goose download."
-        return 1
-    fi
-    mkdir -p "$GOOSE_CACHE_DIR" || {
-        error "Could not create the Goose cache directory: $GOOSE_CACHE_DIR"
-        return 1
-    }
-
-    cache_path="$GOOSE_CACHE_DIR/goose-${GOOSE_RELEASE_VERSION}-${GOOSE_PLATFORM}"
-    if [ -e "$cache_path" ]; then
-        if [ -f "$cache_path" ] && actual="$(goose_file_sha256 "$cache_path")" &&
-            [ "$actual" = "$GOOSE_SHA256" ]; then
-            chmod 0755 "$cache_path" || {
-                error "Could not make the cached Goose executable: $cache_path"
-                return 1
-            }
-            GOOSE_BIN="$cache_path"
-            log "Using verified cached Goose ${GOOSE_RELEASE_VERSION} ($GOOSE_PLATFORM)"
-            return 0
-        fi
-        warn "Discarding an invalid cached Goose binary: $cache_path"
-        rm -f "$cache_path" || {
-            error "Could not remove the invalid cached Goose binary: $cache_path"
-            return 1
-        }
-    fi
-
-    if command -v curl >/dev/null 2>&1; then
-        download_tool=curl
-    elif command -v wget >/dev/null 2>&1; then
-        download_tool=wget
-    else
-        error "Automatic Goose installation requires curl or wget."
-        return 1
-    fi
-
-    temp_file="$(mktemp "$GOOSE_CACHE_DIR/.goose-download.XXXXXX")" || {
-        error "Could not create a temporary Goose download in $GOOSE_CACHE_DIR"
-        return 1
-    }
-    url="https://github.com/pressly/goose/releases/download/${GOOSE_RELEASE_VERSION}/${GOOSE_ASSET}"
-    log "Downloading verified Goose ${GOOSE_RELEASE_VERSION} ($GOOSE_PLATFORM)"
-    if [ "$download_tool" = "curl" ]; then
-        if ! curl --fail --location --silent --show-error --retry 3 \
-            --connect-timeout 10 --max-time 120 --output "$temp_file" "$url"; then
-            rm -f "$temp_file"
-            error "Goose download failed."
-            return 1
-        fi
-    elif ! wget --quiet --timeout=10 --tries=3 --output-document="$temp_file" "$url"; then
-        rm -f "$temp_file"
-        error "Goose download failed."
-        return 1
-    fi
-
-    if [ ! -s "$temp_file" ]; then
-        rm -f "$temp_file"
-        error "Goose download returned an empty file."
-        return 1
-    fi
-    actual="$(goose_file_sha256 "$temp_file")" || actual=""
-    if [ "$actual" != "$GOOSE_SHA256" ]; then
-        rm -f "$temp_file"
-        error "Goose download checksum verification failed."
-        return 1
-    fi
-    chmod 0755 "$temp_file" || {
-        rm -f "$temp_file"
-        error "Could not make the downloaded Goose executable."
-        return 1
-    }
-    if ! mv -f "$temp_file" "$cache_path"; then
-        rm -f "$temp_file"
-        error "Could not install Goose into the cache: $cache_path"
-        return 1
-    fi
-    GOOSE_BIN="$cache_path"
-    log "Installed verified Goose ${GOOSE_RELEASE_VERSION} ($GOOSE_PLATFORM)"
-}
-
-resolve_goose_bin() {
-    local allow_download="${1:-true}" resolved
-    if $GOOSE_BIN_EXPLICIT; then
-        if command -v "$GOOSE_BIN" >/dev/null 2>&1; then
-            resolved="$(command -v "$GOOSE_BIN")"
-        elif [ -x "$GOOSE_BIN" ]; then
-            resolved="$GOOSE_BIN"
-        else
-            error "Goose executable is unavailable: $GOOSE_BIN"
-            return 1
-        fi
-        GOOSE_BIN="$resolved"
-        log "Using explicitly configured Goose: $GOOSE_BIN"
-        return 0
-    fi
-
-    if command -v goose >/dev/null 2>&1; then
-        GOOSE_BIN="$(command -v goose)"
-        log "Using Goose from PATH: $GOOSE_BIN"
-        return 0
-    fi
-
-    if [ "$allow_download" != "true" ]; then
-        info "Dry run: Goose is not on PATH; a verified ${GOOSE_RELEASE_VERSION} binary would be downloaded."
-        return 0
-    fi
-    download_goose
-}
-
-goose_run_in_bridge() {
-    local action="$1" dsn="$2" bundle_dir bundle
-    command -v docker >/dev/null 2>&1 || {
-        error "Docker is required to run Goose through the deployment MySQL network."
-        return 1
-    }
-    mkdir -p "$GOOSE_CACHE_DIR" || return 1
-    bundle_dir="$(mktemp -d "$GOOSE_CACHE_DIR/.goose-run.XXXXXX")" || return 1
-    bundle="$(mktemp "$GOOSE_CACHE_DIR/.goose-bundle.XXXXXX.tar.gz")" || {
-        rm -rf "$bundle_dir"
-        return 1
-    }
-    mkdir -p "$bundle_dir/bin" "$bundle_dir/migrations" || {
-        rm -rf "$bundle_dir" "$bundle"
-        return 1
-    }
-    cp "$GOOSE_BIN" "$bundle_dir/bin/goose" || {
-        rm -rf "$bundle_dir" "$bundle"
-        return 1
-    }
-    cp -R "$ARTIFACT_DIR/." "$bundle_dir/migrations/" || {
-        rm -rf "$bundle_dir" "$bundle"
-        return 1
-    }
-    chmod 0755 "$bundle_dir/bin/goose"
-    tar -czf "$bundle" -C "$bundle_dir" . || {
-        rm -rf "$bundle_dir" "$bundle"
-        return 1
-    }
-    docker run --rm -i \
-        --network bridge \
-        --add-host host.docker.internal:host-gateway \
-        -e "GOOSE_DSN=$dsn" \
-        -e "GOOSE_ACTION=$action" \
-        "${GOOSE_RUNNER_IMAGE:-${SCRIPT_RUNNER_IMAGE:-dokku/dokku:latest}}" \
-        bash -c 'set -e; mkdir -p /tmp/goose; tar -xzf - -C /tmp/goose; exec /tmp/goose/bin/goose -dir /tmp/goose/migrations mysql "$GOOSE_DSN" "$GOOSE_ACTION"' \
-        < "$bundle"
-    local status=$?
-    rm -rf "$bundle_dir" "$bundle"
-    return "$status"
-}
-
-classify_goose_failure() {
-    local output="$1"
-    if printf '%s\n' "$output" | grep -Eiq \
-        'no such host|dial tcp|connection refused|network is unreachable|i/o timeout|timed out'; then
-        printf 'connection'
-    elif printf '%s\n' "$output" | grep -Eiq \
-        'error 1045|access denied for user|authentication'; then
-        printf 'authentication'
-    elif printf '%s\n' "$output" | grep -Eiq \
-        'error 1044|error 1142|access denied.*database|command denied'; then
-        printf 'database-access'
-    elif printf '%s\n' "$output" | grep -Eiq \
-        'error 1049|unknown database'; then
-        printf 'database-not-found'
-    elif printf '%s\n' "$output" | grep -Eiq \
-        'table .*already exists|table .*doesn.t exist|unknown column|syntax error|error 42'; then
-        printf 'migration-sql'
-    else
-        printf 'execution'
-    fi
-}
-
-goose_run() {
-    local action="$1" dsn host port user output category
-    host="$(goose_connection_host)"
-    port="${MYSQL_PORT:-3306}"
-    user="$(mysql_admin_user)"
-    info "Running Goose action=$action database=$MASTER_DB host=$host port=$port user=$user"
-    dsn="$(goose_dsn)" || return 1
-    if [ "${ZATCA_MASTER_GOOSE_IN_DOCKER:-0}" = "1" ]; then
-        if output="$(goose_run_in_bridge "$action" "$dsn" 2>&1)"; then
-            printf '%s\n' "$output"
-            return 0
-        fi
-    elif output="$("$GOOSE_BIN" -dir "$ARTIFACT_DIR" mysql "$dsn" "$action" 2>&1)"; then
-        printf '%s\n' "$output"
-        return 0
-    fi
-    printf '%s\n' "$output" >&2
-    category="$(classify_goose_failure "$output")"
-    case "$category" in
-        connection)
-            error "Goose could not connect to MySQL (host=$host port=$port database=$MASTER_DB). Check DNS, routing, and MySQL availability." ;;
-        authentication)
-            error "Goose reached MySQL but authentication was rejected (user=$user host=$host database=$MASTER_DB). Check the matching MySQL user@host account and password." ;;
-        database-access)
-            error "Goose reached MySQL but database/table access was denied (user=$user database=$MASTER_DB). Check grants for the matching user@host account." ;;
-        database-not-found)
-            error "Goose reached MySQL but database '$MASTER_DB' was not found." ;;
-        migration-sql)
-            error "Goose reached MySQL but the migration SQL failed for database '$MASTER_DB'. Review the SQL error above; no table/column diagnosis is assumed." ;;
-        *)
-            error "Goose migration command failed (action=$action database=$MASTER_DB host=$host user=$user). Review the command error above." ;;
-    esac
-    return 1
-}
-
 preflight_mysql_connection() {
-    local query helper_output goose_output host port user password category
+    local query output
     query="SELECT 1 AS ok, CURRENT_USER() AS authenticated_user, USER() AS connection_user, DATABASE() AS database_name;"
     log "Preflight: checking deployment MySQL connection"
-    if ! helper_output="$(run_mysql -N -B -e "$query")"; then
+    if ! output="$(run_mysql -N -B -e "$query")"; then
         error "Deployment MySQL preflight failed before migration; no backup or schema change was attempted."
         return 1
     fi
-    info "Deployment MySQL preflight passed: $(printf '%s' "$helper_output" | tr '\t' ' ' | tr '\n' ' ' | cut -c1-512)"
+    info "Deployment MySQL preflight passed: $(printf '%s' "$output" | tr '\t' ' ' | tr '\n' ' ' | cut -c1-512)"
+}
 
-    host="$(goose_connection_host)"
-    port="${MYSQL_PORT:-3306}"
-    user="$(mysql_admin_user)"
-    password="$(mysql_admin_password)"
-    if [ "${ZATCA_MASTER_GOOSE_IN_DOCKER:-0}" = "1" ]; then
-        if ! goose_output="$(docker run --rm \
-            --network bridge \
-            --add-host host.docker.internal:host-gateway \
-            -e "MYSQL_PWD=$password" \
-            mysql:8.0 \
-            mysql --protocol=TCP -h "$host" -P "$port" -u "$user" "$MASTER_DB" \
-            -N -B -e "$query" 2>&1)"; then
-            printf '%s\n' "$goose_output" >&2
-            category="$(classify_goose_failure "$goose_output")"
-            error "Goose bridge MySQL preflight failed (category=$category host=$host port=$port database=$MASTER_DB user=$user); no migration was attempted."
+ensure_baseline_table() {
+    local table_count base_table_count column_count db_name_index_rows db_name_index_valid
+    table_count="$(master_table_count tenant)" || {
+        error "Could not inspect ${MASTER_DB}.tenant; refusing schema changes."
+        return 1
+    }
+    base_table_count="$(master_base_table_count tenant)" || {
+        error "Could not inspect the type of ${MASTER_DB}.tenant; refusing schema changes."
+        return 1
+    }
+
+    if [ "$table_count" = "0" ]; then
+        log "Creating the master tenant registry table"
+        if ! run_mysql "$MASTER_DB" <<'SQL'
+CREATE TABLE IF NOT EXISTS tenant (
+    id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name        VARCHAR(100)  NOT NULL,
+    db_name     VARCHAR(100)  NOT NULL UNIQUE,
+    zatca_env   VARCHAR(20)   NOT NULL DEFAULT 'production',
+    alert_email VARCHAR(255)  NOT NULL DEFAULT '',
+    enabled     TINYINT(1)    NOT NULL DEFAULT 1,
+    created_at  TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_enabled (enabled)
+) ENGINE=InnoDB;
+SQL
+        then
+            error "Could not create ${MASTER_DB}.tenant."
             return 1
         fi
-    else
-        if ! goose_output="$(
-            MYSQL_PWD="$password" mysql --protocol=TCP -h "$host" -P "$port" -u "$user" "$MASTER_DB" \
-                -N -B -e "$query" 2>&1
-        )"; then
-            printf '%s\n' "$goose_output" >&2
-            category="$(classify_goose_failure "$goose_output")"
-            error "Goose host MySQL preflight failed (category=$category host=$host port=$port database=$MASTER_DB user=$user); no migration was attempted."
+    elif [ "$table_count" != "1" ] || [ "$base_table_count" != "1" ]; then
+        error "${MASTER_DB}.tenant is not a compatible base table; refusing schema changes."
+        return 1
+    fi
+
+    column_count="$(mysql_scalar \
+        "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='${MASTER_DB}' AND table_name='tenant' AND column_name IN ('id','name','db_name','zatca_env','alert_email','enabled','created_at');")" || {
+        error "Could not inspect ${MASTER_DB}.tenant columns."
+        return 1
+    }
+    if [ "$column_count" != "7" ]; then
+        error "${MASTER_DB}.tenant is missing required baseline columns; refusing schema changes."
+        return 1
+    fi
+
+    db_name_index_rows="$(mysql_scalar \
+        "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema='${MASTER_DB}' AND table_name='tenant' AND index_name='db_name';")" || {
+        error "Could not inspect the tenant db_name index."
+        return 1
+    }
+    db_name_index_valid="$(mysql_scalar \
+        "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema='${MASTER_DB}' AND table_name='tenant' AND index_name='db_name' AND non_unique=0 AND seq_in_index=1 AND column_name='db_name';")" || {
+        error "Could not verify the tenant db_name index."
+        return 1
+    }
+    if [ "$db_name_index_rows" != "1" ] || [ "$db_name_index_valid" != "1" ]; then
+        error "${MASTER_DB}.tenant.db_name is missing its expected unique index; refusing schema changes."
+        return 1
+    fi
+}
+
+tenant_key_column_count() {
+    mysql_scalar \
+        "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='${MASTER_DB}' AND table_name='tenant' AND column_name='tenant_key';"
+}
+
+tenant_key_column_compatible_count() {
+    mysql_scalar \
+        "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='${MASTER_DB}' AND table_name='tenant' AND column_name='tenant_key' AND data_type='varchar' AND character_maximum_length=64 AND character_set_name='utf8mb4' AND collation_name='utf8mb4_0900_bin' AND is_nullable IN ('YES','NO') AND (column_default IS NULL OR column_default='');"
+}
+
+tenant_key_column_state() {
+    mysql_output \
+        "SELECT CONCAT(is_nullable, CHAR(9), IF(column_default IS NULL, '<NULL>', column_default)) FROM information_schema.columns WHERE table_schema='${MASTER_DB}' AND table_name='tenant' AND column_name='tenant_key';"
+}
+
+trigger_definition() {
+    registry_tenant_key_trigger_definition "$MASTER_DB" "$1"
+}
+
+trigger_is_compatible() {
+    registry_tenant_key_trigger_is_compatible "$@"
+}
+
+create_tenant_key_trigger() {
+    local name="$1"
+    case "$name" in
+        tenant_key_default)
+            if ! run_mysql "$MASTER_DB" <<'SQL'
+DELIMITER //
+CREATE TRIGGER tenant_key_default BEFORE INSERT ON tenant FOR EACH ROW
+BEGIN
+    IF NEW.tenant_key = '' THEN
+        SET NEW.tenant_key = NEW.db_name;
+    END IF;
+END//
+DELIMITER ;
+SQL
+            then
+                error "Could not create tenant_key_default."
+                return 1
+            fi
+            ;;
+        tenant_key_immutable)
+            if ! run_mysql "$MASTER_DB" <<'SQL'
+DELIMITER //
+CREATE TRIGGER tenant_key_immutable BEFORE UPDATE ON tenant FOR EACH ROW
+BEGIN
+    IF NEW.tenant_key <> OLD.tenant_key THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'tenant_key is immutable';
+    END IF;
+END//
+DELIMITER ;
+SQL
+            then
+                error "Could not create tenant_key_immutable."
+                return 1
+            fi
+            ;;
+        *) error "Unknown tenant identity trigger: $name"; return 1 ;;
+    esac
+}
+
+ensure_tenant_key_trigger() {
+    local name="$1" definition
+    if ! definition="$(trigger_definition "$name")"; then
+        error "Could not inspect trigger '$name'; refusing schema changes."
+        return 1
+    fi
+    if [ -n "$definition" ]; then
+        if ! trigger_is_compatible "$name" "$definition"; then
+            error "Existing trigger '$name' conflicts with the tenant identity contract."
+            return 1
+        fi
+        return 0
+    fi
+    create_tenant_key_trigger "$name"
+}
+
+tenant_key_duplicate_count() {
+    mysql_scalar \
+        "SELECT COUNT(*) FROM (SELECT candidate_key FROM (SELECT CASE WHEN tenant_key IS NULL OR tenant_key='' THEN db_name ELSE tenant_key END AS candidate_key FROM tenant) AS prepared_keys GROUP BY candidate_key HAVING COUNT(*) > 1) AS duplicate_keys;"
+}
+
+ensure_tenant_key_schema() {
+    local column_count compatible_count column_state nullable default_value
+    local too_long_count missing_count duplicate_count immutable_definition
+    local index_rows index_valid
+
+    column_count="$(tenant_key_column_count)" || {
+        error "Could not inspect ${MASTER_DB}.tenant.tenant_key."
+        return 1
+    }
+    case "$column_count" in
+        0)
+            log "Adding tenant_key to ${MASTER_DB}.tenant"
+            if ! run_mysql "$MASTER_DB" -e \
+                "ALTER TABLE tenant ADD COLUMN tenant_key VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NULL AFTER db_name;"; then
+                error "Could not add ${MASTER_DB}.tenant.tenant_key."
+                return 1
+            fi
+            ;;
+        1) ;;
+        *) error "Found an invalid number of tenant_key columns; refusing schema changes."; return 1 ;;
+    esac
+
+    compatible_count="$(tenant_key_column_compatible_count)" || {
+        error "Could not verify the tenant_key column definition."
+        return 1
+    }
+    if [ "$compatible_count" != "1" ]; then
+        error "${MASTER_DB}.tenant.tenant_key has an incompatible type, length, charset, or collation."
+        return 1
+    fi
+
+    ensure_tenant_key_trigger tenant_key_default || return 1
+    if ! immutable_definition="$(trigger_definition tenant_key_immutable)"; then
+        error "Could not inspect trigger tenant_key_immutable."
+        return 1
+    fi
+    if [ -n "$immutable_definition" ] &&
+        ! trigger_is_compatible tenant_key_immutable "$immutable_definition"; then
+        error "Existing trigger 'tenant_key_immutable' conflicts with the tenant identity contract."
+        return 1
+    fi
+
+    too_long_count="$(mysql_scalar \
+        "SELECT COUNT(*) FROM tenant WHERE (tenant_key IS NULL OR tenant_key='') AND CHAR_LENGTH(db_name)>64;")" || {
+        error "Could not check the length of tenant routing names."
+        return 1
+    }
+    if [ "$too_long_count" != "0" ]; then
+        error "A tenant db_name is longer than 64 characters and cannot become tenant_key."
+        return 1
+    fi
+    duplicate_count="$(tenant_key_duplicate_count)" || {
+        error "Could not check tenant_key uniqueness before backfill."
+        return 1
+    }
+    if [ "$duplicate_count" != "0" ]; then
+        error "Existing or backfilled tenant_key values would not be unique; refusing schema changes."
+        return 1
+    fi
+
+    missing_count="$(mysql_scalar \
+        "SELECT COUNT(*) FROM tenant WHERE tenant_key IS NULL OR tenant_key='';")" || {
+        error "Could not check for missing tenant_key values."
+        return 1
+    }
+    if [ "$missing_count" != "0" ] && [ -n "$immutable_definition" ]; then
+        error "Cannot safely backfill missing tenant_key values while tenant_key_immutable exists; resolve the partial schema before retrying."
+        return 1
+    fi
+    if [ "$missing_count" != "0" ]; then
+        log "Filling missing tenant_key values from db_name"
+        if ! run_mysql "$MASTER_DB" -e \
+            "UPDATE tenant SET tenant_key=db_name WHERE tenant_key IS NULL OR tenant_key='';"; then
+            error "Could not backfill missing tenant_key values from db_name."
             return 1
         fi
     fi
-    info "Goose MySQL preflight passed: $(printf '%s' "$goose_output" | tr '\t' ' ' | tr '\n' ' ' | cut -c1-512)"
-}
 
-baseline_legacy_registry() {
-    log "Recording the ZATCA baseline for the legacy master registry"
-    goose_run version || {
-        error "Goose could not initialize its ledger for the legacy master registry."
+    missing_count="$(mysql_scalar \
+        "SELECT COUNT(*) FROM tenant WHERE tenant_key IS NULL OR tenant_key='';")" || {
+        error "Could not verify the tenant_key backfill."
         return 1
     }
-    run_mysql "$MASTER_DB" -e \
-        "INSERT INTO goose_db_version (version_id, is_applied) SELECT 1, 1 FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM goose_db_version WHERE version_id=1);"
+    if [ "$missing_count" != "0" ]; then
+        error "Some tenant_key values remain empty after backfill."
+        return 1
+    fi
+    duplicate_count="$(tenant_key_duplicate_count)" || {
+        error "Could not verify tenant_key uniqueness."
+        return 1
+    }
+    if [ "$duplicate_count" != "0" ]; then
+        error "Tenant_key values are not unique after backfill."
+        return 1
+    fi
+
+    if ! column_state="$(tenant_key_column_state)"; then
+        error "Could not inspect tenant_key nullability and default."
+        return 1
+    fi
+    IFS=$'\t' read -r nullable default_value <<< "$column_state"
+    if [ "$nullable" != "NO" ] || [ "$default_value" != "" ]; then
+        log "Enforcing tenant_key NOT NULL with an empty insert default"
+        if ! run_mysql "$MASTER_DB" -e \
+            "ALTER TABLE tenant MODIFY COLUMN tenant_key VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL DEFAULT '';"; then
+            error "Could not enforce the tenant_key column constraints."
+            return 1
+        fi
+    fi
+
+    index_rows="$(mysql_scalar \
+        "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema='${MASTER_DB}' AND table_name='tenant' AND index_name='uq_tenant_key';")" || {
+        error "Could not inspect the uq_tenant_key index."
+        return 1
+    }
+    index_valid="$(mysql_scalar \
+        "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema='${MASTER_DB}' AND table_name='tenant' AND index_name='uq_tenant_key' AND non_unique=0 AND seq_in_index=1 AND column_name='tenant_key';")" || {
+        error "Could not verify the uq_tenant_key index."
+        return 1
+    }
+    if [ "$index_rows" = "0" ]; then
+        log "Adding the unique tenant_key index"
+        if ! run_mysql "$MASTER_DB" -e \
+            "ALTER TABLE tenant ADD UNIQUE KEY uq_tenant_key (tenant_key);"; then
+            error "Could not create the unique tenant_key index."
+            return 1
+        fi
+    elif [ "$index_rows" != "1" ] || [ "$index_valid" != "1" ]; then
+        error "Existing index 'uq_tenant_key' conflicts with the tenant identity contract."
+        return 1
+    fi
+
+    ensure_tenant_key_trigger tenant_key_immutable || return 1
 }
 
 verify_registry() {
-    local table_count column_count default_trigger immutable_trigger unique_key
-    table_count="$(master_table_count tenant)" || return 1
-    column_count="$(run_mysql -N -B -e \
-        "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='${MASTER_DB}' AND table_name='tenant' AND column_name='tenant_key';")" || return 1
-    default_trigger="$(run_mysql -N -B -e \
-        "SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema='${MASTER_DB}' AND event_object_table='tenant' AND trigger_name='tenant_key_default' AND action_timing='BEFORE' AND event_manipulation='INSERT';")" || return 1
-    immutable_trigger="$(run_mysql -N -B -e \
-        "SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema='${MASTER_DB}' AND event_object_table='tenant' AND trigger_name='tenant_key_immutable' AND action_timing='BEFORE' AND event_manipulation='UPDATE';")" || return 1
-    unique_key="$(run_mysql -N -B -e \
-        "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema='${MASTER_DB}' AND table_name='tenant' AND index_name='uq_tenant_key';")" || return 1
+    local table_count column_count compatible_count column_state nullable default_value
+    local index_rows index_valid missing_count duplicate_count definition
 
-    table_count="$(printf '%s\n' "$table_count" | awk 'NF { print $1; exit }')"
-    column_count="$(printf '%s\n' "$column_count" | awk 'NF { print $1; exit }')"
-    default_trigger="$(printf '%s\n' "$default_trigger" | awk 'NF { print $1; exit }')"
-    immutable_trigger="$(printf '%s\n' "$immutable_trigger" | awk 'NF { print $1; exit }')"
-    unique_key="$(printf '%s\n' "$unique_key" | awk 'NF { print $1; exit }')"
-
-    if [ "$table_count" != "1" ] ||
-        [ "$column_count" != "1" ] ||
-        [ "$default_trigger" != "1" ] ||
-        [ "$immutable_trigger" != "1" ] ||
-        [ "$unique_key" != "1" ]; then
-        error "ZATCA master migration verification failed (tenant_key column/triggers/index are incomplete)."
+    table_count="$(master_base_table_count tenant)" || {
+        error "Could not verify the master tenant registry table."
+        return 1
+    }
+    if [ "$table_count" != "1" ]; then
+        error "ZATCA master migration verification failed: tenant base table is missing."
         return 1
     fi
-    log "Verified ZATCA master registry: tenant_key, unique index, and both triggers are present."
+
+    column_count="$(tenant_key_column_count)" || {
+        error "Could not verify the tenant_key column."
+        return 1
+    }
+    compatible_count="$(tenant_key_column_compatible_count)" || {
+        error "Could not verify the tenant_key column definition."
+        return 1
+    }
+    if [ "$column_count" != "1" ] || [ "$compatible_count" != "1" ]; then
+        error "ZATCA master migration verification failed: tenant_key column is missing or incompatible."
+        return 1
+    fi
+    if ! column_state="$(tenant_key_column_state)"; then
+        error "Could not verify tenant_key nullability and default."
+        return 1
+    fi
+    IFS=$'\t' read -r nullable default_value <<< "$column_state"
+    if [ "$nullable" != "NO" ] || [ "$default_value" != "" ]; then
+        error "ZATCA master migration verification failed: tenant_key must be NOT NULL with an empty insert default (is_nullable=${nullable:-unknown}, default=${default_value:-<empty>})."
+        return 1
+    fi
+
+    index_rows="$(mysql_scalar \
+        "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema='${MASTER_DB}' AND table_name='tenant' AND index_name='uq_tenant_key';")" || {
+        error "Could not verify the uq_tenant_key index."
+        return 1
+    }
+    index_valid="$(mysql_scalar \
+        "SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema='${MASTER_DB}' AND table_name='tenant' AND index_name='uq_tenant_key' AND non_unique=0 AND seq_in_index=1 AND column_name='tenant_key';")" || {
+        error "Could not verify the uq_tenant_key index definition."
+        return 1
+    }
+    if [ "$index_rows" != "1" ] || [ "$index_valid" != "1" ]; then
+        error "ZATCA master migration verification failed: uq_tenant_key is missing or incompatible."
+        return 1
+    fi
+
+    for definition in tenant_key_default tenant_key_immutable; do
+        local trigger_sql
+        if ! trigger_sql="$(trigger_definition "$definition")"; then
+            error "Could not verify trigger '$definition'."
+            return 1
+        fi
+        if ! trigger_is_compatible "$definition" "$trigger_sql"; then
+            error "ZATCA master migration verification failed: trigger '$definition' is missing or incompatible."
+            return 1
+        fi
+    done
+
+    missing_count="$(mysql_scalar \
+        "SELECT COUNT(*) FROM tenant WHERE tenant_key IS NULL OR tenant_key='';")" || {
+        error "Could not verify tenant_key values."
+        return 1
+    }
+    duplicate_count="$(tenant_key_duplicate_count)" || {
+        error "Could not verify tenant_key uniqueness."
+        return 1
+    }
+    if [ "$missing_count" != "0" ] || [ "$duplicate_count" != "0" ]; then
+        error "ZATCA master migration verification failed: tenant_key values are empty or duplicated."
+        return 1
+    fi
+
+    log "Verified ZATCA master registry: tenant_key, unique index, and both triggers are compatible."
 }
 
 run_migration() {
-    local db_state backup_path=""
+    local db_state lock_fd
+
     if $DRY_RUN; then
-        resolve_goose_bin false || return 1
-        info "Dry run: would lock, back up, and run Goose from the ZATCA artifact against $MASTER_DB."
+        info "Dry run: would lock, back up, and ensure the tenant registry schema in $MASTER_DB."
         return 0
     fi
-    resolve_goose_bin true || return 1
-    preflight_mysql_connection || return 1
 
+    preflight_mysql_connection || return 1
     if ! command -v flock >/dev/null 2>&1; then
-        error "flock is required to serialize ZATCA master migrations."
+        error "flock is required to serialize ZATCA master registry changes."
         return 1
     fi
-    mkdir -p "$(dirname "$LOCK_FILE")"
-    local lock_fd
+    if ! mkdir -p "$(dirname "$LOCK_FILE")"; then
+        error "Could not create the master registry lock directory."
+        return 1
+    fi
     exec {lock_fd}>"$LOCK_FILE"
     if ! flock -n "$lock_fd"; then
         error "Another ZATCA master migration is already running; refusing concurrent execution."
@@ -648,67 +556,13 @@ run_migration() {
         esac
     fi
 
-    local tenant_tables goose_tables base_tables goose_rows
     if [ "$db_state" = "fresh" ]; then
-        create_master_database
-        backup_master_database || return 1
-        backup_path="$MASTER_BACKUP_PATH"
-        info "Fresh master database backed up before Goose: $backup_path"
-    else
-        tenant_tables="$(master_table_count tenant)" || {
-            error "Could not inspect ${MASTER_DB}.tenant; refusing migration."
-            return 1
-        }
-        goose_tables="$(master_table_count goose_db_version)" || {
-            error "Could not inspect ${MASTER_DB}.goose_db_version; refusing migration."
-            return 1
-        }
-        base_tables="$(master_base_table_count)" || {
-            error "Could not inspect master database tables; refusing migration."
-            return 1
-        }
-        goose_rows="0"
-        if [ "$goose_tables" = "1" ]; then
-            goose_rows="$(master_goose_row_count)" || {
-                error "Could not inspect the Goose ledger; refusing migration."
-                return 1
-            }
-        fi
-
-        if [ "$tenant_tables" = "0" ] && [ "$goose_tables" = "0" ] && [ "$base_tables" = "0" ]; then
-            db_state="empty"
-        elif [ "$goose_tables" = "1" ] && [ "$goose_rows" != "0" ]; then
-            db_state="goose"
-        elif [ "$tenant_tables" = "1" ] && [ "$goose_tables" = "0" ]; then
-            db_state="legacy"
-        else
-            error "Master database '$MASTER_DB' has an unknown pre-Goose shape; refusing to guess ownership."
-            return 1
-        fi
-        backup_master_database || return 1
-        backup_path="$MASTER_BACKUP_PATH"
-        info "Existing master database backed up before Goose: $backup_path"
+        create_master_database || return 1
     fi
-
-    case "$db_state" in
-        fresh|empty|goose)
-            log "Running ZATCA-owned Goose migrations for $MASTER_DB"
-            goose_run up || {
-                error "ZATCA Goose migration failed; master registry was not verified."
-                return 1
-            }
-            ;;
-        legacy)
-            baseline_legacy_registry || return 1
-            log "Running ZATCA-owned Goose migrations after the legacy baseline"
-            goose_run up || {
-                error "ZATCA Goose migration failed after legacy baseline; restore the verified backup before retry."
-                return 1
-            }
-            ;;
-        *) error "Internal error: unsupported master database state '$db_state'."; return 1 ;;
-    esac
-
+    backup_master_database || return 1
+    info "Master registry backed up before schema changes: $MASTER_BACKUP_PATH"
+    ensure_baseline_table || return 1
+    ensure_tenant_key_schema || return 1
     verify_registry
 }
 

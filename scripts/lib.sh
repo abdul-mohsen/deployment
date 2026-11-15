@@ -1734,20 +1734,96 @@ tenant_registry_entry_exists() {
     esac
 }
 
-# require_registry_tenant_key
-#   Refuses to create tenant rows unless ZATCA's zatca_master migrations are applied:
-#   tenant.tenant_key must exist and the BEFORE INSERT trigger tenant_key_default must
-#   fill it (zatca_integration migrations/zatca_master/00002_tenant_key.sql). Read-only:
-#   deployment never runs that DDL.
-require_registry_tenant_key() {
-    local master="${MYSQL_MASTER_DB:-zatca_master}" has_column has_trigger
+run_mysql_scalar() {
+    local query="${1:-}" output value
+    [ "$#" -eq 1 ] || return 2
+    if ! output="$(run_mysql -N -B -e "$query")"; then
+        return 1
+    fi
+    value="$(printf '%s\n' "$output" | awk 'NF { print $1; exit }')"
+    [ -n "$value" ] || return 1
+    printf '%s\n' "$value"
+}
+
+registry_tenant_key_trigger_definition() {
+    local master="${1:-}" name="${2:-}"
+    [ "$#" -eq 2 ] || return 2
     validate_database_identifier "$master" || return 1
-    has_column="$(run_mysql -N -B -e "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='${master}' AND table_name='tenant' AND column_name='tenant_key';" | awk 'NF { print $1; exit }')"
-    has_trigger="$(run_mysql -N -B -e "SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema='${master}' AND event_object_table='tenant' AND trigger_name='tenant_key_default' AND action_timing='BEFORE' AND event_manipulation='INSERT';" | awk 'NF { print $1; exit }')"
-    if [ "$has_column" != "1" ] || [ "$has_trigger" != "1" ]; then
-        echo "[✗] ${master}.tenant is not ready: it needs column tenant_key and trigger tenant_key_default." >&2
-        echo "    Apply ZATCA's zatca_master migrations first (zatca_integration: migrations/zatca_master, goose)." >&2
-        echo "    This script does not run that DDL." >&2
+    case "$name" in
+        tenant_key_default|tenant_key_immutable) ;;
+        *)
+            printf 'Unsupported tenant identity trigger %q.\n' "$name" >&2
+            return 2
+            ;;
+    esac
+    run_mysql -N -B -e \
+        "SELECT CONCAT(action_timing, CHAR(9), event_manipulation, CHAR(9), REGEXP_REPLACE(LOWER(action_statement), '[[:space:]]+', '')) FROM information_schema.triggers WHERE trigger_schema='${master}' AND event_object_table='tenant' AND trigger_name='${name}';"
+}
+
+registry_tenant_key_trigger_is_compatible() {
+    local name="${1:-}" definition="${2:-}" timing event action expected
+    [ "$#" -eq 2 ] || return 2
+    IFS=$'\t' read -r timing event action <<< "$definition"
+    case "$name" in
+        tenant_key_default)
+            expected="beginifnew.tenant_key=''thensetnew.tenant_key=new.db_name;endif;end"
+            [ "$timing" = "BEFORE" ] && [ "$event" = "INSERT" ] &&
+                [ "$action" = "$expected" ]
+            ;;
+        tenant_key_immutable)
+            expected="beginifnew.tenant_key<>old.tenant_keythensignalstate'45000'setmessage_text='tenant_keyisimmutable';endif;end"
+            [ "$timing" = "BEFORE" ] && [ "$event" = "UPDATE" ] &&
+                [ "$action" = "$expected" ]
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# require_registry_tenant_key
+#   Read-only guard for the script-managed tenant identity contract.
+require_registry_tenant_key() {
+    local master="${MYSQL_MASTER_DB:-zatca_master}"
+    local column_count index_count missing_count default_definition immutable_definition
+    validate_database_identifier "$master" || return 1
+
+    column_count="$(run_mysql_scalar \
+        "SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='${master}' AND table_name='tenant' AND column_name='tenant_key' AND data_type='varchar' AND character_maximum_length=64 AND character_set_name='utf8mb4' AND collation_name='utf8mb4_0900_bin' AND is_nullable='NO' AND column_default='';")" || {
+        echo "[✗] Could not inspect ${master}.tenant.tenant_key." >&2
+        return 1
+    }
+    index_count="$(run_mysql_scalar \
+        "SELECT COUNT(*) FROM (SELECT index_name FROM information_schema.statistics WHERE table_schema='${master}' AND table_name='tenant' AND index_name='uq_tenant_key' GROUP BY index_name HAVING COUNT(*)=1 AND MAX(non_unique)=0 AND MAX(seq_in_index)=1 AND MAX(column_name)='tenant_key' AND MAX(sub_part) IS NULL) AS compatible;")" || {
+        echo "[✗] Could not inspect ${master}.tenant.uq_tenant_key." >&2
+        return 1
+    }
+    if [ "$column_count" != "1" ] || [ "$index_count" != "1" ]; then
+        echo "[✗] ${master}.tenant does not satisfy the tenant_key column and unique-index contract." >&2
+        echo "    Run scripts/migrate-zatca-master.sh with the deployment config before provisioning." >&2
+        return 1
+    fi
+
+    default_definition="$(registry_tenant_key_trigger_definition "$master" tenant_key_default)" || {
+        echo "[✗] Could not inspect ${master}.tenant trigger tenant_key_default." >&2
+        return 1
+    }
+    immutable_definition="$(registry_tenant_key_trigger_definition "$master" tenant_key_immutable)" || {
+        echo "[✗] Could not inspect ${master}.tenant trigger tenant_key_immutable." >&2
+        return 1
+    }
+    if ! registry_tenant_key_trigger_is_compatible tenant_key_default "$default_definition" ||
+        ! registry_tenant_key_trigger_is_compatible tenant_key_immutable "$immutable_definition"; then
+        echo "[✗] ${master}.tenant is not ready: tenant_key defaulting or immutability behavior is incompatible." >&2
+        echo "    Run scripts/migrate-zatca-master.sh with the deployment config before provisioning." >&2
+        return 1
+    fi
+
+    missing_count="$(run_mysql_scalar \
+        "SELECT COUNT(*) FROM \`${master}\`.tenant WHERE tenant_key IS NULL OR tenant_key='';")" || {
+        echo "[✗] Could not verify ${master}.tenant tenant_key values." >&2
+        return 1
+    }
+    if [ "$missing_count" != "0" ]; then
+        echo "[✗] ${master}.tenant contains missing tenant_key values; refusing provisioning." >&2
         return 1
     fi
 }

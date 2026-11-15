@@ -270,6 +270,16 @@ duplicate webhook deliveries are therefore safe to retry. Legacy
 
 ## Tenant image provenance and migration safety
 
+### ZATCA master registry schema
+
+`setup.sh` and tenant provisioning run `scripts/migrate-zatca-master.sh` before
+using the shared master registry. The command uses the configured MySQL helper
+to ensure and verify the registry and its `tenant_key` uniqueness, defaulting,
+and immutability contract; it keeps the migration lock and verified backup and
+fills only missing keys from `db_name`. The master path no longer fetches or
+runs a Goose artifact. Goose migrations bundled in backend images remain
+separate and still run against each tenant database before an image swap.
+
 `update-tenant.sh` and `deploy-all.sh` resolve every requested tag to a full
 OCI repository digest before changing Dokku. The canonical runtime contract is:
 

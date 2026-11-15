@@ -13,19 +13,31 @@ source scripts/tenant-provenance.sh
 IMAGE_DIGEST="sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 echo "=== registry tenant_key guard is read-only ==="
+MYSQL_QUERY_LOG=""
 run_mysql() {
     local args="$*"
-    if [[ "$args" == *"information_schema.columns"* ]]; then
-        printf '1\n'
-    elif [[ "$args" == *"information_schema.triggers"* ]]; then
-        printf '1\n'
-    elif [[ "$args" == *"SELECT IFNULL(tenant_key"* ]]; then
-        printf 'tenant-key-marker\n'
-    fi
+    MYSQL_QUERY_LOG+="$args"$'\n'
+    case "$args" in
+        *"information_schema.columns"*) printf '1\n' ;;
+        *"information_schema.statistics"*) printf '1\n' ;;
+        *"trigger_name='tenant_key_default'"*)
+            printf '%s\n' $'BEFORE\tINSERT\tbeginifnew.tenant_key=\'\'thensetnew.tenant_key=new.db_name;endif;end'
+            ;;
+        *"trigger_name='tenant_key_immutable'"*)
+            printf '%s\n' $'BEFORE\tUPDATE\tbeginifnew.tenant_key<>old.tenant_keythensignalstate\'45000\'setmessage_text=\'tenant_keyisimmutable\';endif;end'
+            ;;
+        *".tenant WHERE tenant_key IS NULL"*) printf '0\n' ;;
+        *"SELECT IFNULL(tenant_key"*) printf 'tenant-key-marker\n' ;;
+        *) fail "unexpected MySQL query in tenant provenance test: $args" ;;
+    esac
 }
 require_registry_tenant_key || fail "migrated registry was rejected"
 [ "$(tenant_registry_key tenant_acme)" = "tenant-key-marker" ] \
     || fail "tenant_key was not read from the registry"
+if printf '%s\n' "$MYSQL_QUERY_LOG" |
+    grep -Eiq '(^|[[:space:]])(CREATE|ALTER|DROP|INSERT|UPDATE|DELETE|REPLACE)[[:space:]]'; then
+    fail "registry readiness and provenance checks must not modify MySQL"
+fi
 pass "registry readiness and tenant_key provenance are read-only"
 unset -f run_mysql
 

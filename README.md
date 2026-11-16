@@ -117,6 +117,25 @@ authentication check stops provisioning before migration side effects. For an
 authentication rejection, verify the configured password and matching MySQL
 `user@host` account; do not expose credentials in logs or support reports.
 
+## Tenant company seed readiness
+
+Tenant initialization verifies the backend's effective `HOST`/`DBNAME`
+against the database target it will migrate and seed. It reads the first
+company row back after the company/store seed and requires its `tenant_key` to
+match the master tenant registry before reporting initialization complete or
+deploying the backend image. A conflicting existing tenant key, target
+mismatch, seed error, or failed read-back stops deployment without dropping
+the tenant database or restoring a backup. Initializer MySQL client
+connections use a five-second connect timeout; this does not limit query time.
+
+For recovery, compare the non-secret backend `HOST`/`DBNAME` with the
+initializer's host/port and derived tenant database, then inspect the tenant
+company row and matching `zatca_master.tenant` identity. Correct configuration
+or repair the seed only after confirming tenant ownership; rerun the
+initializer and preserve the existing database and migration state. The
+reported `sudo` hostname, Dokku plugin, and PID-namespace warnings are separate
+host/container diagnostics, not evidence that explains a missing company row.
+
 ## Deployment logging and observability
 
 The dashboard emits JSON `log/slog` events by default. Configure

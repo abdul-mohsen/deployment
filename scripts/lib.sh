@@ -1694,7 +1694,7 @@ tenant_registry_key() {
     local db="$1" key db_sql
     validate_database_identifier "${MYSQL_MASTER_DB:-zatca_master}" || return 1
     db_sql="${db//\'/\'\'}"
-    key="$(run_mysql -N -B "${MYSQL_MASTER_DB:-zatca_master}" -e \
+    key="$(run_mysql --connect-timeout=5 -N -B "${MYSQL_MASTER_DB:-zatca_master}" -e \
         "SELECT IFNULL(tenant_key, '') FROM tenant WHERE db_name='${db_sql}' LIMIT 1;")" || key=""
     if [ -z "$key" ]; then
         echo "[✗] No tenant_key in ${MYSQL_MASTER_DB:-zatca_master}.tenant for ${db}." >&2

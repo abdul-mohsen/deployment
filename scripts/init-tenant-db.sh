@@ -164,7 +164,7 @@ ensure_tenant_database() {
         return 0
     fi
 
-    run_mysql <<SQLEOF
+    run_mysql --connect-timeout=5 <<SQLEOF
 CREATE DATABASE IF NOT EXISTS \`${TENANT_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 SQLEOF
 }
@@ -250,13 +250,25 @@ tenant_db_setting() {
 }
 
 tenant_db_host() {
-    local host
+    local host host_value
     host="$(tenant_db_setting DB_HOST "")"
     if [ -z "$host" ]; then
-        host="$(tenant_db_setting HOST "")"
-        host="${host%%:*}"
+        host_value="$(tenant_db_setting HOST "")"
+        case "$host_value" in
+            \[*\]:*)
+                host="${host_value#\[}"
+                host="${host%%]*}"
+                ;;
+            *:*) host="${host_value%:*}" ;;
+            *) host="$host_value" ;;
+        esac
     fi
-    printf '%s' "${host:-${MYSQL_HOST:-host.docker.internal}}"
+    if [[ "$host" == \[*\] ]]; then
+        host="${host#[}"
+        host="${host%]}"
+    fi
+    host="${host:-${MYSQL_HOST:-host.docker.internal}}"
+    printf '%s' "${host,,}"
 }
 
 tenant_db_port() {
@@ -264,11 +276,114 @@ tenant_db_port() {
     port="$(tenant_db_setting DB_PORT "")"
     if [ -z "$port" ]; then
         host_value="$(tenant_db_setting HOST "")"
-        if [[ "$host_value" == *:* ]]; then
+        if [[ "$host_value" == \[*\]:* || "$host_value" == *:* ]]; then
             port="${host_value##*:}"
         fi
     fi
     printf '%s' "${port:-${MYSQL_PORT:-3306}}"
+}
+
+parse_backend_host_port() {
+    local endpoint="$1" host port
+    if [[ "$endpoint" =~ ^\[([^]]+)\]:([0-9]{1,5})$ ]]; then
+        host="${BASH_REMATCH[1]}"
+        port="${BASH_REMATCH[2]}"
+    elif [[ "$endpoint" =~ ^([^:]+):([0-9]{1,5})$ ]]; then
+        host="${BASH_REMATCH[1]}"
+        port="${BASH_REMATCH[2]}"
+    else
+        error "Backend HOST must be configured as host:port; cannot verify tenant DB target."
+        return 1
+    fi
+
+    port="$(normalize_tenant_db_port "$port")" || return 1
+    printf '%s\t%s' "$host" "$port"
+}
+
+normalize_tenant_db_port() {
+    local port="$1" value
+    if ! [[ "$port" =~ ^[0-9]{1,5}$ ]]; then
+        error "Tenant database port is invalid; cannot verify tenant DB target."
+        return 1
+    fi
+    value=$((10#$port))
+    if [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
+        error "Tenant database port is outside the valid range; cannot verify tenant DB target."
+        return 1
+    fi
+    printf '%s' "$value"
+}
+
+normalize_backend_db_host() {
+    local host
+    host="$1"
+    host="${host,,}"
+    if [[ "$host" == \[*\] ]]; then
+        host="${host#[}"
+        host="${host%]}"
+    fi
+    host="${host%.}"
+    printf '%s' "${host,,}"
+}
+
+verify_backend_database_target() {
+    if $DRY_RUN; then
+        info "Dry run: backend database target parity will be checked before DB changes."
+        return 0
+    fi
+
+    local backend_hostport backend_db backend_host backend_port backend_target
+    local init_host init_port init_host_normalized backend_host_normalized
+    local backend_db_alias backend_host_alias backend_port_alias
+
+    backend_hostport="$(backend_config_value HOST)"
+    backend_db="$(backend_config_value DBNAME)"
+    if [ -z "$backend_hostport" ] || [ -z "$backend_db" ]; then
+        error "Cannot verify tenant DB target: ${BACKEND_APP} must have backend HOST and DBNAME configured."
+        return 1
+    fi
+    backend_target="$(parse_backend_host_port "$backend_hostport")" || return 1
+    IFS=$'\t' read -r backend_host backend_port <<< "$backend_target"
+
+    init_host="$(tenant_db_host)"
+    init_port="$(normalize_tenant_db_port "$(tenant_db_port)")" || return 1
+    init_host_normalized="$(normalize_backend_db_host "$(mysql_host_for_container "$init_host")")"
+    backend_host_normalized="$(normalize_backend_db_host "$backend_host")"
+    if [ "$TENANT_DB_NAME" != "$backend_db" ]; then
+        error "Tenant DB target mismatch: derived database does not match backend DBNAME; refusing initialization."
+        return 1
+    fi
+    if [ "$init_port" != "$backend_port" ]; then
+        error "Tenant DB target mismatch: initializer DB_PORT does not match the port in backend HOST; refusing initialization."
+        return 1
+    fi
+    if [ "$init_host_normalized" != "$backend_host_normalized" ]; then
+        error "Tenant DB target mismatch: initializer DB_HOST does not resolve to backend HOST; refusing initialization."
+        return 1
+    fi
+
+    backend_db_alias="$(backend_config_value DB_NAME)"
+    if [ -n "$backend_db_alias" ] && [ "$backend_db_alias" != "$backend_db" ]; then
+        error "Tenant DB target mismatch: backend DB_NAME differs from its runtime DBNAME; refusing initialization."
+        return 1
+    fi
+
+    backend_host_alias="$(backend_config_value DB_HOST)"
+    backend_port_alias="$(backend_config_value DB_PORT)"
+    if [ -n "$backend_host_alias" ] &&
+        [ "$(normalize_backend_db_host "$backend_host_alias")" != "$backend_host_normalized" ]; then
+        error "Tenant DB target mismatch: backend DB_HOST differs from its runtime HOST; refusing initialization."
+        return 1
+    fi
+    if [ -n "$backend_port_alias" ]; then
+        backend_port_alias="$(normalize_tenant_db_port "$backend_port_alias")" || return 1
+        if [ "$backend_port_alias" != "$backend_port" ]; then
+            error "Tenant DB target mismatch: backend DB_PORT differs from its runtime HOST; refusing initialization."
+            return 1
+        fi
+    fi
+
+    info "Verified tenant DB target for ${BACKEND_APP}: host, port, and database match backend HOST/DBNAME."
 }
 
 resolve_mysql_host_for_client() {
@@ -322,13 +437,13 @@ run_tenant_mysql() {
     fi
 
     if [ "$_MYSQL_VIA" = "host" ]; then
-        MYSQL_PWD="$password" mysql --protocol=TCP -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" "$db" "$@"
+        MYSQL_PWD="$password" mysql --protocol=TCP -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" --connect-timeout=5 "$db" "$@"
     else
         docker run --rm -i \
             --add-host=host.docker.internal:host-gateway \
             -e "MYSQL_PWD=$password" \
             mysql:8.0 \
-            mysql --protocol=TCP -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" "$db" "$@"
+            mysql --protocol=TCP -h "$(resolve_mysql_host_for_client "$host")" -P "$port" -u "$user" --connect-timeout=5 "$db" "$@"
     fi
 }
 
@@ -350,8 +465,8 @@ apply_schema() {
         }
     fi
 
-    validate_tenant_schema
-    seed_company_defaults
+    validate_tenant_schema || return 1
+    seed_company_defaults || return 1
 }
 
 seed_company_defaults() {
@@ -369,11 +484,21 @@ seed_company_defaults() {
 
     # The backend refuses to start without company.tenant_key. Copy it from the
     # zatca_master registry; it is never generated here.
-    local tenant_key tenant_key_sql
-    tenant_key="$(tenant_registry_key "$TENANT_DB_NAME")" || exit 1
+    local tenant_key tenant_key_sql existing_tenant_key verified_tenant_key
+    tenant_key="$(tenant_registry_key "$TENANT_DB_NAME")" || return 1
     tenant_key_sql="$(sql_escape "$tenant_key")"
 
-    run_tenant_mysql "$TENANT_DB_NAME" <<SQLEOF
+    if ! existing_tenant_key="$(run_tenant_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT tenant_key FROM company ORDER BY id LIMIT 1;")"; then
+        error "Could not inspect the existing company tenant identity in ${TENANT_DB_NAME}; refusing the seed."
+        return 1
+    fi
+    if [ -n "$existing_tenant_key" ] && [ "$existing_tenant_key" != "$tenant_key" ]; then
+        error "The existing company tenant_key in ${TENANT_DB_NAME} belongs to a different tenant; refusing to overwrite it."
+        return 1
+    fi
+
+    if ! run_tenant_mysql "$TENANT_DB_NAME" <<SQLEOF
 INSERT INTO company (id, state, name, vat_number, vat_registration_number, commercial_registration_number, name_ar, business_category, tenant_key)
 VALUES (1, 0, '${company_sql}', '300000000000003', '300000000000003', '1010000000', '${company_sql}', 'Supply activities', '${tenant_key_sql}')
 ON DUPLICATE KEY UPDATE name=VALUES(name), name_ar=VALUES(name_ar), tenant_key=VALUES(tenant_key);
@@ -386,6 +511,25 @@ INSERT INTO store (id, company_id, branch_id, name, status)
 VALUES (1, 1, 1, 'Main Store', 0)
 ON DUPLICATE KEY UPDATE company_id=VALUES(company_id), branch_id=VALUES(branch_id), status=VALUES(status);
 SQLEOF
+    then
+        error "Company/store seed failed in ${TENANT_DB_NAME}; initialization is incomplete."
+        return 1
+    fi
+
+    if ! verified_tenant_key="$(run_tenant_mysql "$TENANT_DB_NAME" -N -B -e \
+        "SELECT tenant_key FROM company ORDER BY id LIMIT 1;")"; then
+        error "Could not read back the company seed from ${TENANT_DB_NAME}; initialization is incomplete."
+        return 1
+    fi
+    if [ -z "$verified_tenant_key" ]; then
+        error "The company row or tenant_key is missing from ${TENANT_DB_NAME} after seeding; initialization is incomplete."
+        return 1
+    fi
+    if [ "$verified_tenant_key" != "$tenant_key" ]; then
+        error "The company tenant_key in ${TENANT_DB_NAME} does not match the master registry; initialization is incomplete."
+        return 1
+    fi
+    info "Company seed verified in ${TENANT_DB_NAME} against the master tenant identity."
 }
 
 http_post_register() {
@@ -514,7 +658,7 @@ register_seed_user() {
 }
 
 seed_users() {
-    seed_company_defaults
+    seed_company_defaults || return 1
 
     local admin_user admin_password manager_user manager_password company_name
     admin_user="$(env_value ADMIN_USER)"
@@ -529,11 +673,16 @@ seed_users() {
 }
 
 info "Tenant DB init target: $TENANT_NAME ($TENANT_DB_NAME)"
+verify_backend_database_target || exit 1
 if ! $SEED_ONLY; then
-    apply_schema
+    apply_schema || exit 1
 fi
 if ! $SCHEMA_ONLY; then
-    seed_users
+    seed_users || exit 1
 fi
 
-log "Tenant DB initialization complete: $TENANT_NAME"
+if $DRY_RUN; then
+    info "Dry run complete: tenant database changes and seed verification were not performed."
+else
+    log "Tenant DB initialization complete: $TENANT_NAME"
+fi

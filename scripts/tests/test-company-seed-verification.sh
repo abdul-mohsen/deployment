@@ -39,11 +39,15 @@ if [[ "$args $input" == *"SELECT tenant_key FROM company ORDER BY id LIMIT 1"* ]
             fi
             ;;
         wrong-after-seed)
-            [ "$count" -le 1 ] || printf '%s\n' "different-tenant-key"
+            if [ "$count" -gt 1 ] && [ -f "${STUB_SEED_WRITTEN:?}" ]; then
+                printf '%s\n' "different-tenant-key"
+            fi
             ;;
         existing-mismatch) printf '%s\n' "different-tenant-key" ;;
         valid)
-            [ "$count" -le 1 ] || printf '%s\n' "${STUB_REGISTRY_KEY:-anime-tenant-key}"
+            if [ "$count" -gt 1 ] && [ -f "${STUB_SEED_WRITTEN:?}" ]; then
+                printf '%s\n' "${STUB_REGISTRY_KEY:-anime-tenant-key}"
+            fi
             ;;
         *) echo "unknown company row fixture" >&2; exit 2 ;;
     esac
@@ -56,6 +60,7 @@ if [[ "$input" == *"INSERT INTO company"* ]]; then
         echo "simulated company seed write failure" >&2
         exit 1
     fi
+    : > "${STUB_SEED_WRITTEN:?}"
 fi
 
 exit 0
@@ -79,6 +84,7 @@ case "$*" in
         exit 0
         ;;
     *"exec -i dokku dokku config:get"*)
+        cat >/dev/null || true
         key="${@: -1}"
         case "$key" in
             HOST) printf '%s\n' "${STUB_BACKEND_HOST:-host.docker.internal:3306}" ;;
@@ -120,6 +126,7 @@ reset_logs() {
     : > "$TEST_DIR/mysql.log"
     : > "$TEST_DIR/docker.log"
     rm -f "$TEST_DIR/company-row-reads"
+    rm -f "$TEST_DIR/company-seed-written"
 }
 
 run_init() {
@@ -132,6 +139,7 @@ run_init() {
         STUB_MYSQL_LOG="$TEST_DIR/mysql.log" \
         STUB_DOCKER_LOG="$TEST_DIR/docker.log" \
         STUB_ROW_READ_COUNT="$TEST_DIR/company-row-reads" \
+        STUB_SEED_WRITTEN="$TEST_DIR/company-seed-written" \
         MYSQL_CLIENT_MODE="${STUB_MYSQL_CLIENT_MODE:-host}" \
         STUB_SEED_FAIL="${STUB_SEED_FAIL:-0}" \
         STUB_COMPANY_ROW_MODE="${STUB_COMPANY_ROW_MODE:-valid}" \

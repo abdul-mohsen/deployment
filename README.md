@@ -127,6 +127,8 @@ deploying the backend image. A conflicting existing tenant key, target
 mismatch, seed error, or failed read-back stops deployment without dropping
 the tenant database or restoring a backup. Initializer MySQL client
 connections use a five-second connect timeout; this does not limit query time.
+The `Company seed verified` log is required evidence; a successful migration
+and table check alone does not prove that the seed reached the database.
 
 For recovery, compare the non-secret backend `HOST`/`DBNAME` with the
 initializer's host/port and derived tenant database, then inspect the tenant

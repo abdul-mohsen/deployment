@@ -282,7 +282,8 @@ deploy_one() {
             break
         fi
         if [ "$attempt" -eq "$VERIFY_RETRIES" ]; then
-            error "${app}: /version identity verification failed"
+            local verification_error="${RUNTIME_IDENTITY_DIAGNOSTIC:-runtime identity verification failed}"
+            error "${app}: ${verification_error}"
             if [ "$migrations_attempted" = true ]; then
                 error "${app}: automatic rollback refused; image rollback cannot restore migrated DB schema/data."
                 error "Restore backup ${backup_id} (${backup_artifact}) explicitly before retry."
@@ -295,12 +296,12 @@ deploy_one() {
             elif ! restore_previous_state "$tenant" "$APP_TYPE" "$app" "$previous_image" "$previous_identity"; then
                 error "${app}: failed to restore prior image and identity after verification failure"
             fi
-            tenant_record_failure "$tenant" "$APP_TYPE" "post-deploy /version identity verification failed" 2>/dev/null || true
+            tenant_record_failure "$tenant" "$APP_TYPE" "$verification_error" 2>/dev/null || true
             tenant_record_audit "$tenant" "$APP_TYPE" "$image" "$resolved_ref" "$BUILD_DIGEST" \
                 "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
                 "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$previous_image" \
                 "$previous_digest" "failed" \
-                "post-deploy /version identity verification failed" \
+                "$verification_error" \
                 "$backup_id" "$backup_artifact" 2>/dev/null || true
             return 1
         fi

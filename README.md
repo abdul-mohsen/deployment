@@ -138,6 +138,36 @@ initializer and preserve the existing database and migration state. The
 reported `sudo` hostname, Dokku plugin, and PID-namespace warnings are separate
 host/container diagnostics, not evidence that explains a missing company row.
 
+## Runtime BuildIdentity verification
+
+Backend `/healthz` confirms readiness only; it is not proof that the requested
+build is running. During new tenant creation, after readiness succeeds,
+deployment verifies the running container image against the requested
+immutable identity and then compares the backend `/version` identity before
+reporting provisioning success. Tenant updates and fleet deployment also use
+the shared verifier and report its failure categories without changing their
+existing readiness/retry ordering. Failures distinguish a running-image
+identity problem, an unavailable `/version` response, and missing or
+mismatching identity fields. An image-check failure can occur before
+`/version` is requested, so an older generic
+`/version`-mismatch message does not identify the actual failure.
+A generic log that omits expected image identity and actual response values
+does not establish which field mismatched; do not guess.
+
+Field diagnostics name the missing or differing fields and show only
+field-validated values. Do not copy raw `/version` JSON, credentials, tokens,
+or credential-bearing URLs into logs or support reports. Hostname, Dokku
+plugin, and container warnings remain separate unless evidence connects them
+to the identity failure.
+
+If identity verification fails after tenant migrations have run, deployment
+refuses to roll back only the backend image and leaves tenant schema/data
+untouched. Correct the image or runtime configuration while preserving the
+tenant database and migration state. Before any manual image rollback, first
+verify that a matching database backup is available. In tenant creation,
+failure-state and audit write warnings are reported separately; they do not
+replace the primary deployment error.
+
 ## Deployment logging and observability
 
 The dashboard emits JSON `log/slog` events by default. Configure

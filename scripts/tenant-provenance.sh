@@ -143,6 +143,7 @@ verify_runtime_image_identity() {
     local expected_image_id="" ids="" container_id identity actual_image_id actual_digest
     local matched checked=0
 
+    RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC=""
     if [ -n "$expected_ref" ]; then
         expected_image_id="$(docker image inspect --format '{{.Id}}' "$expected_ref" \
             2>/dev/null || true)"
@@ -150,26 +151,46 @@ verify_runtime_image_identity() {
     fi
 
     ids="$(runtime_container_ids "$app")"
-    [ -n "$ids" ] || return 1
+    if [ -z "$ids" ]; then
+        RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="no running container identity is available"
+        return 1
+    fi
     while IFS= read -r container_id; do
         [ -n "$container_id" ] || continue
         checked=1
         identity="$(runtime_container_image_identity "$container_id" || true)"
-        [ -n "$identity" ] || return 1
+        if [ -z "$identity" ]; then
+            RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="running container image metadata is unavailable"
+            return 1
+        fi
         IFS=$'\t' read -r actual_image_id actual_digest <<< "$identity"
 
         if [ -n "$expected_digest" ]; then
-            [ "$actual_digest" = "$expected_digest" ] || return 1
+            if [ "$actual_digest" != "$expected_digest" ]; then
+                RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="digest expected=$(provenance_safe_identity_value digest "$expected_digest") actual=$(provenance_safe_identity_value digest "$actual_digest")"
+                return 1
+            fi
         else
+            if [ -z "$expected_image_id" ]; then
+                RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="expected image reference could not be inspected"
+                return 1
+            fi
             matched=1
-            if [ -n "$expected_image_id" ] && [ "$actual_image_id" = "$expected_image_id" ]; then
+            if [ "$actual_image_id" = "$expected_image_id" ]; then
                 matched=0
             fi
-            [ "$matched" -eq 0 ] || return 1
+            if [ "$matched" -ne 0 ]; then
+                RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="image_id expected=$(provenance_safe_identity_value image_id "$expected_image_id") actual=$(provenance_safe_identity_value image_id "$actual_image_id")"
+                return 1
+            fi
         fi
     done <<< "$ids"
 
-    [ "$checked" -eq 1 ]
+    if [ "$checked" -ne 1 ]; then
+        RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="no running container identity is available"
+        return 1
+    fi
+    return 0
 }
 
 verify_runtime_immutable_image() {
@@ -316,6 +337,59 @@ provenance_json_field() {
     printf '%s' "$value"
 }
 
+provenance_safe_identity_value() {
+    local field="$1" value="$2"
+    if [ -z "$value" ]; then
+        printf '<missing>'
+        return 0
+    fi
+
+    case "$field" in
+        version)
+            if [[ "$value" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                printf '%s' "$value"
+                return 0
+            fi
+            ;;
+        commit)
+            if [[ "$value" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+                printf '%s' "$value"
+                return 0
+            fi
+            ;;
+        digest|image_id)
+            if [[ "$value" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+                printf '%s' "$value"
+                return 0
+            fi
+            ;;
+        workflow_run_id)
+            if [[ "$value" =~ ^[0-9]{1,20}$ ]]; then
+                printf '%s' "$value"
+                return 0
+            fi
+            ;;
+        built_at)
+            if [[ "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$ ]]; then
+                printf '%s' "$value"
+                return 0
+            fi
+            ;;
+    esac
+
+    printf '<omitted>'
+}
+
+provenance_identity_field_mismatch() {
+    local field="$1" expected="$2" actual="$3"
+    if [ "$expected" = "$actual" ]; then
+        return 1
+    fi
+    printf '%s expected=%s actual=%s' "$field" \
+        "$(provenance_safe_identity_value "$field" "$expected")" \
+        "$(provenance_safe_identity_value "$field" "$actual")"
+}
+
 app_version_response() {
     local app="$1" container="${DOKKU_CONTAINER:-dokku}" port response
     port="$(dokku_app_port "$app")"
@@ -358,9 +432,14 @@ verify_runtime_identity() {
     local expected_digest="$4" expected_ref="$5" expected_channel="$6"
     local expected_workflow_id="$7" expected_workflow_url="$8" expected_built_at="$9" response
     local actual_version actual_commit actual_digest actual_ref actual_channel
-    local actual_workflow_id actual_workflow_url actual_built_at
+    local actual_workflow_id actual_workflow_url actual_built_at field_mismatch mismatch_summary=""
+    local -a field_mismatches=()
 
-    verify_runtime_image_identity "$app" "$expected_digest" "$expected_ref" || return 1
+    RUNTIME_IDENTITY_DIAGNOSTIC=""
+    if ! verify_runtime_image_identity "$app" "$expected_digest" "$expected_ref"; then
+        RUNTIME_IDENTITY_DIAGNOSTIC="runtime image identity verification failed: ${RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC:-image identity unavailable}"
+        return 1
+    fi
 
     if provenance_override_enabled; then
         echo "[!] Non-production provenance override enabled; skipping strict /version identity check." >&2
@@ -368,7 +447,10 @@ verify_runtime_identity() {
     fi
 
     response="$(app_version_response "$app" || true)"
-    [ -n "$response" ] || return 1
+    if [ -z "$response" ]; then
+        RUNTIME_IDENTITY_DIAGNOSTIC="application /version identity response unavailable"
+        return 1
+    fi
 
     actual_version="$(provenance_json_field "$response" version)"
     actual_commit="$(provenance_json_field "$response" commit)"
@@ -385,15 +467,40 @@ verify_runtime_identity() {
     actual_built_at="$(provenance_json_field "$response" built_at)"
     [ -n "$actual_built_at" ] || actual_built_at="$(provenance_json_field "$response" created)"
 
-    [ "$actual_version" = "$expected_version" ] &&
-        [ "$actual_commit" = "$expected_commit" ] &&
-        [ "$actual_digest" = "$expected_digest" ] &&
-        [ "$actual_ref" = "$expected_ref" ] &&
-        [ "$actual_channel" = "$expected_channel" ] &&
-        [ "$actual_workflow_id" = "$expected_workflow_id" ] &&
-        { [ -z "$expected_workflow_url" ] || [ -z "$actual_workflow_url" ] ||
-          [ "$actual_workflow_url" = "$expected_workflow_url" ]; } &&
-        [ "$actual_built_at" = "$expected_built_at" ]
+    if field_mismatch="$(provenance_identity_field_mismatch version "$expected_version" "$actual_version")"; then
+        field_mismatches+=("$field_mismatch")
+    fi
+    if field_mismatch="$(provenance_identity_field_mismatch commit "$expected_commit" "$actual_commit")"; then
+        field_mismatches+=("$field_mismatch")
+    fi
+    if field_mismatch="$(provenance_identity_field_mismatch digest "$expected_digest" "$actual_digest")"; then
+        field_mismatches+=("$field_mismatch")
+    fi
+    if field_mismatch="$(provenance_identity_field_mismatch image_ref "$expected_ref" "$actual_ref")"; then
+        field_mismatches+=("$field_mismatch")
+    fi
+    if field_mismatch="$(provenance_identity_field_mismatch channel "$expected_channel" "$actual_channel")"; then
+        field_mismatches+=("$field_mismatch")
+    fi
+    if field_mismatch="$(provenance_identity_field_mismatch workflow_run_id "$expected_workflow_id" "$actual_workflow_id")"; then
+        field_mismatches+=("$field_mismatch")
+    fi
+    if [ -n "$expected_workflow_url" ] && [ -n "$actual_workflow_url" ] &&
+       field_mismatch="$(provenance_identity_field_mismatch workflow_run_url "$expected_workflow_url" "$actual_workflow_url")"; then
+        field_mismatches+=("$field_mismatch")
+    fi
+    if field_mismatch="$(provenance_identity_field_mismatch built_at "$expected_built_at" "$actual_built_at")"; then
+        field_mismatches+=("$field_mismatch")
+    fi
+
+    if [ "${#field_mismatches[@]}" -gt 0 ]; then
+        for field_mismatch in "${field_mismatches[@]}"; do
+            mismatch_summary="${mismatch_summary:+$mismatch_summary; }$field_mismatch"
+        done
+        RUNTIME_IDENTITY_DIAGNOSTIC="application identity field mismatch: ${mismatch_summary}"
+        return 1
+    fi
+    return 0
 }
 
 provenance_sql_escape() {

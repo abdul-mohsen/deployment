@@ -214,11 +214,15 @@ tenant_clear_identity() {
 }
 tenant_record_failure() {
     ROLLBACK_CALLS+=("failure:$3")
-    return 0
+    return "${FAILURE_STATE_RC:-0}"
 }
 tenant_record_audit() {
     ROLLBACK_CALLS+=("audit:${13}:${14}:${16}")
-    return 0
+    return "${AUDIT_RC:-0}"
+}
+FAILURE_WARNINGS=()
+warn() {
+    FAILURE_WARNINGS+=("$*")
 }
 
 record_deployment_failure frontend "registry/web:new" "health check failed" ||
@@ -262,5 +266,60 @@ printf '%s\n' "${ROLLBACK_CALLS[@]}" |
     grep -Fq "audit:registry/api@${OLD_BACKEND_DIGEST}:${OLD_BACKEND_DIGEST}:version check failed; automatic image rollback refused" ||
     fail "unsafe failure did not preserve previous image recovery linkage"
 pass "unsafe failure restores metadata while preserving explicit recovery linkage"
+
+echo "=== failure-state and audit write failures are reported independently ==="
+MIGRATIONS_APPLIED=true
+IMAGE_SWAP_ATTEMPTED[backend]=true
+FAILURE_STATE_RC=1
+AUDIT_RC=0
+FAILURE_WARNINGS=()
+ROLLBACK_CALLS=()
+if record_deployment_failure backend "registry/api:new" "primary identity mismatch"; then
+    persistence_rc=0
+else
+    persistence_rc=$?
+fi
+[ "$persistence_rc" -eq 2 ] ||
+   fail "failure-state persistence error replaced the migration rollback refusal"
+printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -Fq 'failure:primary identity mismatch' ||
+    fail "failure-state write was not attempted"
+printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -Fq 'audit:' ||
+    fail "audit write was not attempted after failure-state write failed"
+printf '%s\n' "${FAILURE_WARNINGS[@]}" | grep -qi 'failure state' ||
+    fail "failure-state write failure was not reported"
+if printf '%s\n' "${FAILURE_WARNINGS[@]}" | grep -qi 'audit'; then
+    fail "successful audit write was incorrectly reported as failed"
+fi
+if printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -q '^image:'; then
+    fail "failure persistence test unexpectedly invoked an image rollback"
+fi
+pass "failure-state write failure is reported without hiding the audit attempt"
+
+FAILURE_STATE_RC=0
+AUDIT_RC=1
+MIGRATIONS_APPLIED=true
+IMAGE_SWAP_ATTEMPTED[backend]=true
+FAILURE_WARNINGS=()
+ROLLBACK_CALLS=()
+if record_deployment_failure backend "registry/api:new" "primary identity mismatch"; then
+    persistence_rc=0
+else
+    persistence_rc=$?
+fi
+[ "$persistence_rc" -eq 2 ] ||
+    fail "audit persistence error replaced the migration rollback refusal"
+printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -Fq 'failure:primary identity mismatch' ||
+    fail "failure-state write was not attempted before audit"
+printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -Fq 'audit:' ||
+    fail "audit write failure scenario did not attempt the audit write"
+printf '%s\n' "${FAILURE_WARNINGS[@]}" | grep -qi 'audit' ||
+    fail "audit write failure was not reported"
+if printf '%s\n' "${FAILURE_WARNINGS[@]}" | grep -qi 'failure state'; then
+    fail "successful failure-state write was incorrectly reported as failed"
+fi
+if printf '%s\n' "${ROLLBACK_CALLS[@]}" | grep -q '^image:'; then
+    fail "audit persistence test unexpectedly invoked an image rollback"
+fi
+pass "audit write failure is reported independently of failure-state persistence"
 
 echo "ALL CREATE-TENANT IMAGE ROLLBACK TESTS PASSED"

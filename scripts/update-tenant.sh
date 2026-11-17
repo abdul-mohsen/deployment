@@ -382,6 +382,7 @@ restore_previous_identity() {
 verify_component() {
     local component="$1" app="$2" values="$3"
     local channel version commit_sha commit_short workflow workflow_url image_ref digest built_at
+    local failure_reason=""
     split_tab_fields "$values"
     channel="${TAB_FIELDS[0]-}"
     version="${TAB_FIELDS[1]-}"
@@ -401,10 +402,13 @@ verify_component() {
             if wait_for_runtime_health "$app" "$health_path" 1 0; then
                 return 0
             fi
+            failure_reason="runtime health check failed"
+        else
+            failure_reason="${RUNTIME_IDENTITY_DIAGNOSTIC:-runtime identity verification failed}"
         fi
         [ "$attempt" -lt "$VERIFY_RETRIES" ] && sleep "$VERIFY_DELAY"
     done
-    error "${app}: /version did not report the expected BuildIdentity"
+    error "${app}: ${failure_reason:-runtime identity verification failed}"
     return 1
 }
 

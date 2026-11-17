@@ -69,6 +69,11 @@ for identity_field in \
         || fail "create-tenant does not configure $identity_field"
 done
 
+for verifier_caller in scripts/create-tenant.sh scripts/update-tenant.sh scripts/deploy-all.sh; do
+    grep -q 'RUNTIME_IDENTITY_DIAGNOSTIC' "$verifier_caller" \
+        || fail "${verifier_caller} does not surface the shared identity diagnostic"
+done
+
 backend_resolve_line="$(grep -n 'resolve_build_identity "\$BACKEND_IMAGE"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"
 backend_swap_line="$(grep -n 'dokku_git_from_image "\$BACKEND_APP" "\$BACKEND_IMAGE"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"
 backend_health_line="$(grep -n 'wait_for_runtime_health "\$BACKEND_APP" "/healthz"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"

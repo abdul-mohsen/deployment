@@ -367,7 +367,7 @@ record_deployment_failure() {
     local app_type="$1" image="$2" message="$3"
     local app="${TENANT_NAME}-${app_type}" resolved_ref="${image%@*}@${BUILD_DIGEST}"
     local previous_ref="" previous_digest="" previous_requested="" rollback_status=0 restore_status=0
-    local failure_message="$message"
+    local failure_message="$message" failure_state_status=0 audit_status=0
     split_tab_fields "${PREVIOUS_IDENTITY[$app_type]:-}"
     previous_requested="${TAB_FIELDS[0]-}"
     previous_digest="${TAB_FIELDS[1]-}"
@@ -389,11 +389,19 @@ record_deployment_failure() {
     if ! restore_previous_identity "$app_type"; then
         restore_status=1
     fi
-    tenant_record_failure "$TENANT_NAME" "$app_type" "$failure_message" 2>/dev/null || true
+    tenant_record_failure "$TENANT_NAME" "$app_type" "$failure_message" \
+        >/dev/null 2>&1 || failure_state_status=$?
     tenant_record_audit "$TENANT_NAME" "$app_type" "$image" "$resolved_ref" "$BUILD_DIGEST" \
         "$BUILD_CHANNEL" "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_COMMIT_SHORT" \
         "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" \
-        "$previous_ref" "$previous_digest" "failed" "$failure_message" 2>/dev/null || true
+        "$previous_ref" "$previous_digest" "failed" "$failure_message" \
+        >/dev/null 2>&1 || audit_status=$?
+    if [ "$failure_state_status" -ne 0 ]; then
+        warn "Failure state persistence failed for ${TENANT_NAME} (${app_type}) with status ${failure_state_status}; primary deployment failure remains unchanged."
+    fi
+    if [ "$audit_status" -ne 0 ]; then
+        warn "Deployment audit persistence failed for ${TENANT_NAME} (${app_type}) with status ${audit_status}; primary deployment failure remains unchanged."
+    fi
     [ "$rollback_status" -eq 0 ] || restore_status="$rollback_status"
     return "$restore_status"
 }
@@ -1035,9 +1043,10 @@ if ! $GIT_ONLY; then
         if ! verify_runtime_identity "$BACKEND_APP" "$BUILD_VERSION" "$BUILD_COMMIT" \
             "$BUILD_DIGEST" "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" \
             "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
-            error "Backend /version did not report the expected BuildIdentity for ${BACKEND_APP}; refusing to continue provisioning."
+            backend_identity_failure="${RUNTIME_IDENTITY_DIAGNOSTIC:-runtime identity verification failed}"
+            error "Backend runtime identity verification failed for ${BACKEND_APP}: ${backend_identity_failure}; refusing to continue provisioning."
             record_deployment_failure backend "$BACKEND_IMAGE" \
-                "post-deploy /version identity verification failed"
+                "$backend_identity_failure"
             exit 1
         fi
         if ! record_verified_image_identity backend "$BACKEND_IMAGE"; then
@@ -1108,9 +1117,10 @@ if ! $GIT_ONLY; then
         if ! verify_runtime_identity "$FRONTEND_APP" "$BUILD_VERSION" "$BUILD_COMMIT" \
             "$BUILD_DIGEST" "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" \
             "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
-            error "Frontend /version did not report the expected BuildIdentity for ${FRONTEND_APP}; refusing to continue provisioning."
+            frontend_identity_failure="${RUNTIME_IDENTITY_DIAGNOSTIC:-runtime identity verification failed}"
+            error "Frontend runtime identity verification failed for ${FRONTEND_APP}: ${frontend_identity_failure}; refusing to continue provisioning."
             record_deployment_failure frontend "$FRONTEND_IMAGE" \
-                "post-deploy /version identity verification failed"
+                "$frontend_identity_failure"
             exit 1
         fi
         if ! record_verified_image_identity frontend "$FRONTEND_IMAGE"; then

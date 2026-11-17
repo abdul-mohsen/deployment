@@ -73,6 +73,10 @@ for verifier_caller in scripts/create-tenant.sh scripts/update-tenant.sh scripts
     grep -q 'RUNTIME_IDENTITY_DIAGNOSTIC' "$verifier_caller" \
         || fail "${verifier_caller} does not surface the shared identity diagnostic"
 done
+grep -q 'BUILD_IMAGE_ID' scripts/create-tenant.sh \
+    || fail "create-tenant does not pass its captured image ID to runtime verification"
+grep -Fq '"$BUILD_BUILT_AT" "$BUILD_IMAGE_ID"' scripts/create-tenant.sh \
+    || fail "create-tenant verification call does not pass the captured image ID"
 
 backend_resolve_line="$(grep -n 'resolve_build_identity "\$BACKEND_IMAGE"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"
 backend_swap_line="$(grep -n 'dokku_git_from_image "\$BACKEND_APP" "\$BACKEND_IMAGE"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"

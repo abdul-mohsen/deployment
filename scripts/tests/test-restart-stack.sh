@@ -340,7 +340,7 @@ grep -q 'IMAGE_PULL_POLICY="${IMAGE_PULL_POLICY:-always}"' scripts/deploy-all.sh
     && PASS "deploy-all refreshes image and rebuilds same-ref deploys" \
     || FAIL "deploy-all must pull image and handle same-ref git:from-image deploys"
 grep -q 'init-tenant-db.sh" "\$TENANT_NAME"' scripts/create-tenant.sh \
-    && grep -q -- '--backend-image "\$BACKEND_IMAGE"' scripts/create-tenant.sh \
+    && grep -q -- '--backend-image "\$BUILD_RESOLVED_REF"' scripts/create-tenant.sh \
     && ! grep -q -- '--env "DB_USER=\$TENANT_DB_USER"' scripts/create-tenant.sh \
     && grep -q 'validate_tenant_env_overrides' scripts/init-tenant-db.sh \
     && grep -q 'init-tenant-db.sh" "\${seed_args\[@\]}"' scripts/create-tenant.sh \

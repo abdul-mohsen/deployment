@@ -33,13 +33,13 @@ echo
 echo "=== create and fleet deployment preserve the same migration order ==="
 CREATE=scripts/create-tenant.sh
 create_schema_line="$(grep -n 'init-tenant-db.sh" "\$TENANT_NAME" \\' "$CREATE" | head -1 | cut -d: -f1)"
-create_deploy_line="$(grep -n 'dokku_git_from_image "\$BACKEND_APP" "\$BACKEND_IMAGE"' "$CREATE" | head -1 | cut -d: -f1)"
+create_deploy_line="$(grep -n 'dokku_git_from_image "\$BACKEND_APP" "\$BUILD_RESOLVED_REF"' "$CREATE" | head -1 | cut -d: -f1)"
 [ -n "$create_schema_line" ] && [ -n "$create_deploy_line" ] \
     || fail "create-tenant is missing goose or backend swap"
 [ "$create_schema_line" -lt "$create_deploy_line" ] \
     || fail "create-tenant migration order is unsafe"
 sed -n "${create_schema_line},$((create_deploy_line - 1))p" "$CREATE" |
-    grep -q -- '--backend-image "$BACKEND_IMAGE"' \
+    grep -q -- '--backend-image "$BUILD_RESOLVED_REF"' \
     || fail "create-tenant migration does not use the target backend image"
 pass "create-tenant preserves verified backup, goose, image swap order"
 

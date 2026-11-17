@@ -94,13 +94,19 @@ EXPECTED_IMAGE_ID="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 STALE_IMAGE_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 RUNTIME_IMAGE_ID="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 RUNTIME_IMAGE_DIGEST="$IMAGE_DIGEST"
+CONTAINER_IDS="tenant-api-container"
+LABEL_INSPECT_LOG="${TMPDIR:-/tmp}/tenant-provenance-label-inspects.$$"
+: > "$LABEL_INSPECT_LOG"
+trap 'rm -f "$LABEL_INSPECT_LOG"' EXIT
 docker() {
     if [ "$1" = "ps" ]; then
-        printf 'tenant-api-container\n'
+        printf '%s\n' "$CONTAINER_IDS"
         return 0
     fi
     local format=""
     local format_next=0
+    local -a docker_args=("$@")
+    local image_ref="${docker_args[$((${#docker_args[@]} - 1))]}"
     for arg in "$@"; do
         if [ "$format_next" -eq 1 ]; then
             format="$arg"
@@ -112,6 +118,11 @@ docker() {
             --format|-f) format_next=1 ;;
         esac
     done
+    if [[ "$*" == *"image inspect"* ]] &&
+        [[ "$format" != *"RepoDigests"* ]] &&
+        [[ "$format" != *".Id"* ]]; then
+        printf '%s\n' "$image_ref" >> "$LABEL_INSPECT_LOG"
+    fi
     case "$*" in
         *"inspect -f"*|*"inspect --format"*)
             if [[ "$*" == *"image inspect"* && "$format" == *".Id"* ]]; then
@@ -145,8 +156,15 @@ docker() {
 resolve_build_identity example/api:v1.2.3 || fail "valid BuildIdentity was rejected"
 [ "${BUILD_IMAGE_ID:-}" = "$EXPECTED_IMAGE_ID" ] ||
     fail "resolved BuildIdentity did not capture the immutable image ID"
+[ -s "$LABEL_INSPECT_LOG" ] ||
+    fail "BuildIdentity labels were not inspected"
+while IFS= read -r label_ref; do
+    [ "$label_ref" = "$BUILD_RESOLVED_REF" ] ||
+        fail "BuildIdentity label was read from mutable ref '$label_ref'"
+done < "$LABEL_INSPECT_LOG"
 grep -q 'docker image inspect --format.*"\$BUILD_RESOLVED_REF"' scripts/tenant-provenance.sh ||
     fail "expected image ID is not captured from the resolved immutable ref"
+pass "BuildIdentity labels and image ID come from the resolved immutable ref"
 VERSION_RESPONSE_AVAILABLE=true
 VERSION_RESPONSE_JSON='{"version":"v1.2.3","commit":"0123456789abcdef0123456789abcdef01234567","digest":"'"$IMAGE_DIGEST"'","image_ref":"example/api:v1.2.3","channel":"release","workflow_run_id":"42","workflow_run_url":"https://github.com/example/api/actions/runs/42","built_at":"2026-09-07T10:00:00Z"}'
 app_version_response() {
@@ -184,8 +202,39 @@ fallback_failure="${RUNTIME_IDENTITY_DIAGNOSTIC:-}"
     fail "missing RepoDigest image-ID mismatch reached /version"
 pass "missing RepoDigest with a different image ID fails closed"
 
+echo "=== image mismatch identifies only a safe container ID ==="
+CONTAINER_IDS="0123456789ab"
+RUNTIME_IMAGE_ID="$STALE_IMAGE_DIGEST"
+RUNTIME_IMAGE_DIGEST=""
+VERSION_RESPONSE_AVAILABLE=false
+if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
+    "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$BUILD_IMAGE_ID"; then
+    fail "mismatching image from a running container was accepted"
+fi
+container_failure="${RUNTIME_IDENTITY_DIAGNOSTIC:-}"
+[[ "$container_failure" == *"container_id=0123456789ab"* ]] ||
+    fail "image mismatch omitted the affected container ID"
+[[ "$container_failure" == *"$EXPECTED_IMAGE_ID"* && "$container_failure" == *"$STALE_IMAGE_DIGEST"* ]] ||
+    fail "container mismatch omitted safe expected/actual image IDs"
+CONTAINER_IDS="container-secret-marker"
+if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
+    "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$BUILD_IMAGE_ID"; then
+    fail "mismatching image with an invalid container ID was accepted"
+fi
+container_failure="${RUNTIME_IDENTITY_DIAGNOSTIC:-}"
+[[ "$container_failure" == *"container_id=<unknown>"* ]] ||
+    fail "invalid container ID did not use a safe placeholder"
+[[ "$container_failure" != *"container-secret-marker"* ]] ||
+    fail "invalid container ID was exposed in diagnostics"
+pass "image mismatch names the affected container without leaking invalid IDs"
+CONTAINER_IDS="tenant-api-container"
+RUNTIME_IMAGE_ID="$EXPECTED_IMAGE_ID"
+RUNTIME_IMAGE_DIGEST="$IMAGE_DIGEST"
+VERSION_RESPONSE_AVAILABLE=true
+
 echo "=== missing RepoDigest fails when no expected image ID was captured ==="
 RUNTIME_IMAGE_ID="$EXPECTED_IMAGE_ID"
+RUNTIME_IMAGE_DIGEST=""
 VERSION_RESPONSE_AVAILABLE=false
 if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
     "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" ""; then

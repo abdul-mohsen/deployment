@@ -231,7 +231,10 @@ ensure_backend_image_available() {
 
 backend_config_value() {
     local key="$1"
-    dokku config:get "$BACKEND_APP" "$key" 2>/dev/null | awk 'NF { print; exit }' || true
+    # The Dokku wrapper uses docker exec -i; config reads must not drain a
+    # pending SQL here-document.
+    dokku config:get "$BACKEND_APP" "$key" </dev/null 2>/dev/null |
+        awk 'NF { print; exit }' || true
 }
 
 tenant_db_setting() {

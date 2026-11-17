@@ -95,6 +95,7 @@ STALE_IMAGE_DIGEST="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 RUNTIME_IMAGE_ID="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 RUNTIME_IMAGE_DIGEST="$IMAGE_DIGEST"
 CONTAINER_IDS="tenant-api-container"
+RUNTIME_WRAPPER_SOURCE_REF=""
 LABEL_INSPECT_LOG="${TMPDIR:-/tmp}/tenant-provenance-label-inspects.$$"
 : > "$LABEL_INSPECT_LOG"
 trap 'rm -f "$LABEL_INSPECT_LOG"' EXIT
@@ -135,6 +136,10 @@ docker() {
             fi
             if [[ "$format" == *"RepoDigests"* ]]; then
                 echo "example/api@${RUNTIME_IMAGE_DIGEST}"
+                return 0
+            fi
+            if [[ "$format" == *"alternate-tags"* ]]; then
+                printf '%s' "$RUNTIME_WRAPPER_SOURCE_REF"
                 return 0
             fi
             ;;
@@ -202,6 +207,40 @@ fallback_failure="${RUNTIME_IDENTITY_DIAGNOSTIC:-}"
     fail "missing RepoDigest image-ID mismatch reached /version"
 pass "missing RepoDigest with a different image ID fails closed"
 
+echo "=== Dokku wrapper source digest validates a different image ID ==="
+RUNTIME_IMAGE_ID="$STALE_IMAGE_DIGEST"
+RUNTIME_IMAGE_DIGEST=""
+RUNTIME_WRAPPER_SOURCE_REF="[\"example/api@${IMAGE_DIGEST}\"]"
+VERSION_RESPONSE_AVAILABLE=true
+if ! verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
+    "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$BUILD_IMAGE_ID"; then
+    fail "Dokku wrapper with the expected source digest was rejected: ${RUNTIME_IDENTITY_DIAGNOSTIC:-no diagnostic}"
+fi
+pass "Dokku wrapper with matching alternate-tags digest passes the image gate"
+
+echo "=== mismatching or absent Dokku wrapper source digest fails closed ==="
+RUNTIME_WRAPPER_SOURCE_REF="[\"example/api@${STALE_IMAGE_DIGEST}\",\"wrapper-secret-marker\"]"
+VERSION_RESPONSE_AVAILABLE=false
+if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
+    "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$BUILD_IMAGE_ID"; then
+    fail "Dokku wrapper with the wrong source digest was accepted"
+fi
+wrapper_failure="${RUNTIME_IDENTITY_DIAGNOSTIC:-}"
+[[ "$wrapper_failure" == *"wrapper_digest expected=$IMAGE_DIGEST actual=$STALE_IMAGE_DIGEST"* ]] ||
+    fail "wrapper source-digest mismatch was not reported safely"
+[[ "$wrapper_failure" != *"wrapper-secret-marker"* ]] ||
+    fail "raw alternate-tags label was exposed"
+[[ "$wrapper_failure" != *"response unavailable"* ]] ||
+    fail "wrapper source-digest mismatch reached /version"
+RUNTIME_WRAPPER_SOURCE_REF=""
+if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
+    "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$BUILD_IMAGE_ID"; then
+    fail "Dokku wrapper without alternate-tags metadata was accepted"
+fi
+[[ "${RUNTIME_IDENTITY_DIAGNOSTIC:-}" == *"wrapper_digest expected=$IMAGE_DIGEST actual=<missing>"* ]] ||
+    fail "missing wrapper source metadata was not reported safely"
+pass "missing or mismatching wrapper source metadata fails closed"
+
 echo "=== image mismatch identifies only a safe container ID ==="
 CONTAINER_IDS="0123456789ab"
 RUNTIME_IMAGE_ID="$STALE_IMAGE_DIGEST"
@@ -249,6 +288,7 @@ VERSION_RESPONSE_AVAILABLE=true
 echo "=== present digest mismatch is not bypassed by a matching image ID ==="
 RUNTIME_IMAGE_ID="$EXPECTED_IMAGE_ID"
 RUNTIME_IMAGE_DIGEST="$STALE_IMAGE_DIGEST"
+RUNTIME_WRAPPER_SOURCE_REF="[\"example/api@${IMAGE_DIGEST}\"]"
 VERSION_RESPONSE_AVAILABLE=false
 if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
     "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$BUILD_IMAGE_ID"; then
@@ -260,6 +300,7 @@ fi
     fail "present digest mismatch reached /version"
 VERSION_RESPONSE_AVAILABLE=true
 RUNTIME_IMAGE_DIGEST="$IMAGE_DIGEST"
+RUNTIME_WRAPPER_SOURCE_REF=""
 pass "present digest mismatch remains a hard failure"
 
 echo "=== moved tag cannot hide a digest mismatch ==="

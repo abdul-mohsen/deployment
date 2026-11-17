@@ -141,3 +141,19 @@ dokku_git_from_image frontend-app "$frontend_resolved_ref"
 [ "$DOKKU_FRONTEND_REF" = "$frontend_resolved_ref" ] ||
     fail "frontend Dokku deploy did not retain the resolved image after tag movement"
 pass "frontend Dokku stub retains its resolved digest after tag movement"
+
+echo "=== non-production override cannot produce an empty image reference ==="
+CURRENT_BACKEND_DIGEST=""
+TENANT_PROVENANCE_OVERRIDE=1
+DEPLOY_ENV=development
+if resolve_build_identity "$BACKEND_REQUESTED"; then
+    fail "non-production override accepted identity without an immutable reference"
+fi
+[ -z "$BUILD_RESOLVED_REF" ] ||
+    fail "failed resolution left an image reference for Goose/Dokku"
+unset TENANT_PROVENANCE_OVERRIDE DEPLOY_ENV
+contains "$CREATE" 'Backend image did not resolve to an immutable reference' \
+    "backend Goose/deploy path does not reject an empty resolved reference"
+contains "$CREATE" 'Frontend image did not resolve to an immutable reference' \
+    "frontend deploy path does not reject an empty resolved reference"
+pass "override still fails closed when no immutable reference is resolved"

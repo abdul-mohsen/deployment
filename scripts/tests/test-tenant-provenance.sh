@@ -143,6 +143,10 @@ docker() {
     esac
 }
 resolve_build_identity example/api:v1.2.3 || fail "valid BuildIdentity was rejected"
+[ "${BUILD_IMAGE_ID:-}" = "$EXPECTED_IMAGE_ID" ] ||
+    fail "resolved BuildIdentity did not capture the immutable image ID"
+grep -q 'docker image inspect --format.*"\$BUILD_RESOLVED_REF"' scripts/tenant-provenance.sh ||
+    fail "expected image ID is not captured from the resolved immutable ref"
 VERSION_RESPONSE_AVAILABLE=true
 VERSION_RESPONSE_JSON='{"version":"v1.2.3","commit":"0123456789abcdef0123456789abcdef01234567","digest":"'"$IMAGE_DIGEST"'","image_ref":"example/api:v1.2.3","channel":"release","workflow_run_id":"42","workflow_run_url":"https://github.com/example/api/actions/runs/42","built_at":"2026-09-07T10:00:00Z"}'
 app_version_response() {
@@ -156,6 +160,59 @@ verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST"
 [ -z "${RUNTIME_IDENTITY_DIAGNOSTIC:-}" ] ||
     fail "successful verification retained a stale failure diagnostic"
 pass "matching /version identity is accepted"
+
+echo "=== missing RepoDigest uses only the captured immutable image ID ==="
+RUNTIME_IMAGE_DIGEST=""
+RUNTIME_IMAGE_ID="$EXPECTED_IMAGE_ID"
+if ! verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
+    "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$BUILD_IMAGE_ID"; then
+    fail "matching captured image ID did not cover missing runtime RepoDigest: ${RUNTIME_IDENTITY_DIAGNOSTIC:-no diagnostic}"
+fi
+pass "missing runtime RepoDigest is accepted only with the captured image ID"
+
+echo "=== missing RepoDigest with a different image ID fails before /version ==="
+RUNTIME_IMAGE_ID="$STALE_IMAGE_DIGEST"
+VERSION_RESPONSE_AVAILABLE=false
+if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
+    "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$BUILD_IMAGE_ID"; then
+    fail "different runtime image ID was accepted without RepoDigest"
+fi
+fallback_failure="${RUNTIME_IDENTITY_DIAGNOSTIC:-}"
+[[ "$fallback_failure" == *"image_id"* && "$fallback_failure" == *"$EXPECTED_IMAGE_ID"* && "$fallback_failure" == *"$STALE_IMAGE_DIGEST"* ]] ||
+    fail "different image ID failure omitted safe expected/actual IDs"
+[[ "$fallback_failure" != *"response unavailable"* ]] ||
+    fail "missing RepoDigest image-ID mismatch reached /version"
+pass "missing RepoDigest with a different image ID fails closed"
+
+echo "=== missing RepoDigest fails when no expected image ID was captured ==="
+RUNTIME_IMAGE_ID="$EXPECTED_IMAGE_ID"
+VERSION_RESPONSE_AVAILABLE=false
+if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
+    "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" ""; then
+    fail "missing expected image ID was accepted when runtime RepoDigest was absent"
+fi
+[[ "${RUNTIME_IDENTITY_DIAGNOSTIC:-}" == *"image_id expected=<missing>"* ]] ||
+    fail "missing expected image ID was not reported safely"
+[[ "${RUNTIME_IDENTITY_DIAGNOSTIC:-}" != *"response unavailable"* ]] ||
+    fail "missing expected image ID reached /version"
+VERSION_RESPONSE_AVAILABLE=true
+
+echo "=== present digest mismatch is not bypassed by a matching image ID ==="
+RUNTIME_IMAGE_ID="$EXPECTED_IMAGE_ID"
+RUNTIME_IMAGE_DIGEST="$STALE_IMAGE_DIGEST"
+VERSION_RESPONSE_AVAILABLE=false
+if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
+    "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$BUILD_IMAGE_ID"; then
+    fail "image ID fallback bypassed a present digest mismatch"
+fi
+[[ "${RUNTIME_IDENTITY_DIAGNOSTIC:-}" == *"digest expected=$IMAGE_DIGEST actual=$STALE_IMAGE_DIGEST"* ]] ||
+    fail "present digest mismatch was not reported"
+[[ "${RUNTIME_IDENTITY_DIAGNOSTIC:-}" != *"response unavailable"* ]] ||
+    fail "present digest mismatch reached /version"
+VERSION_RESPONSE_AVAILABLE=true
+RUNTIME_IMAGE_DIGEST="$IMAGE_DIGEST"
+pass "present digest mismatch remains a hard failure"
+
 echo "=== moved tag cannot hide a digest mismatch ==="
 RUNTIME_IMAGE_ID="$EXPECTED_IMAGE_ID"
 RUNTIME_IMAGE_DIGEST="$STALE_IMAGE_DIGEST"

@@ -151,8 +151,15 @@ identity problem, an unavailable `/version` response, and missing or
 mismatching identity fields. An image-check failure can occur before
 `/version` is requested, so an older generic
 `/version`-mismatch message does not identify the actual failure.
-A generic log that omits expected image identity and actual response values
-does not establish which field mismatched; do not guess.
+The follow-up log proves that RepoDigest metadata is missing, but without the
+expected/actual Docker image IDs it does not prove that the image content is
+wrong; `/version` was not reached.
+
+For tenant creation, if Docker reports no RepoDigest for a running container,
+the image gate uses the Docker image ID captured from the resolved immutable
+image before the swap. It passes only on an exact ID match. A non-empty
+mismatching RepoDigest, missing expected ID, or different runtime ID still
+fails closed; verification never re-resolves a mutable tag for this fallback.
 
 Field diagnostics name the missing or differing fields and show only
 field-validated values. Do not copy raw `/version` JSON, credentials, tokens,

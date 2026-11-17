@@ -140,14 +140,17 @@ runtime_container_image_identity() {
 
 verify_runtime_image_identity() {
     local app="$1" expected_digest="$2" expected_ref="$3"
-    local expected_image_id="" ids="" container_id identity actual_image_id actual_digest
-    local matched checked=0
+    local expected_image_id="${4:-}" ids="" container_id identity actual_image_id actual_digest
+    local matched checked=0 image_id_fallback_used=0
 
     RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC=""
-    if [ -n "$expected_ref" ]; then
+    if [ -z "$expected_image_id" ] && [ -z "$expected_digest" ] && [ -n "$expected_ref" ]; then
         expected_image_id="$(docker image inspect --format '{{.Id}}' "$expected_ref" \
             2>/dev/null || true)"
         expected_image_id="${expected_image_id//$'\n'/}"
+    fi
+    if [[ ! "$expected_image_id" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+        expected_image_id=""
     fi
 
     ids="$(runtime_container_ids "$app")"
@@ -166,8 +169,16 @@ verify_runtime_image_identity() {
         IFS=$'\t' read -r actual_image_id actual_digest <<< "$identity"
 
         if [ -n "$expected_digest" ]; then
-            if [ "$actual_digest" != "$expected_digest" ]; then
+            if [ -n "$actual_digest" ] && [ "$actual_digest" != "$expected_digest" ]; then
                 RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="digest expected=$(provenance_safe_identity_value digest "$expected_digest") actual=$(provenance_safe_identity_value digest "$actual_digest")"
+                return 1
+            fi
+            if [ -z "$actual_digest" ]; then
+                if [ -n "$expected_image_id" ] && [ "$actual_image_id" = "$expected_image_id" ]; then
+                    image_id_fallback_used=1
+                    continue
+                fi
+                RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="digest expected=$(provenance_safe_identity_value digest "$expected_digest") actual=<missing>; image_id expected=$(provenance_safe_identity_value image_id "$expected_image_id") actual=$(provenance_safe_identity_value image_id "$actual_image_id")"
                 return 1
             fi
         else
@@ -189,6 +200,9 @@ verify_runtime_image_identity() {
     if [ "$checked" -ne 1 ]; then
         RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="no running container identity is available"
         return 1
+    fi
+    if [ "$image_id_fallback_used" -eq 1 ]; then
+        echo "[i] Runtime RepoDigest unavailable; matched captured image ID." >&2
     fi
     return 0
 }
@@ -228,6 +242,7 @@ provenance_identity_reset() {
     BUILD_SOURCE=""
     BUILD_DIGEST=""
     BUILD_RESOLVED_REF=""
+    BUILD_IMAGE_ID=""
     BUILD_BUILT_AT=""
 }
 
@@ -279,6 +294,14 @@ resolve_build_identity() {
     digest_info="$(provenance_repo_digest "$image" || true)"
     BUILD_RESOLVED_REF="${digest_info%%$'\t'*}"
     BUILD_DIGEST="${digest_info#*$'\t'}"
+    if [ -n "$BUILD_RESOLVED_REF" ]; then
+        BUILD_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$BUILD_RESOLVED_REF" \
+            2>/dev/null || true)"
+        BUILD_IMAGE_ID="${BUILD_IMAGE_ID//$'\n'/}"
+        if [[ ! "$BUILD_IMAGE_ID" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+            BUILD_IMAGE_ID=""
+        fi
+    fi
     digest_label="$(provenance_first_label "$image" \
         com.ifritah.build.digest org.ifritah.build.digest || true)"
 
@@ -431,12 +454,13 @@ verify_runtime_identity() {
     local app="$1" expected_version="$2" expected_commit="$3"
     local expected_digest="$4" expected_ref="$5" expected_channel="$6"
     local expected_workflow_id="$7" expected_workflow_url="$8" expected_built_at="$9" response
+    local expected_image_id="${10:-}"
     local actual_version actual_commit actual_digest actual_ref actual_channel
     local actual_workflow_id actual_workflow_url actual_built_at field_mismatch mismatch_summary=""
     local -a field_mismatches=()
 
     RUNTIME_IDENTITY_DIAGNOSTIC=""
-    if ! verify_runtime_image_identity "$app" "$expected_digest" "$expected_ref"; then
+    if ! verify_runtime_image_identity "$app" "$expected_digest" "$expected_ref" "$expected_image_id"; then
         RUNTIME_IDENTITY_DIAGNOSTIC="runtime image identity verification failed: ${RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC:-image identity unavailable}"
         return 1
     fi

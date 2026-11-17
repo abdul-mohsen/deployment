@@ -1042,7 +1042,7 @@ if ! $GIT_ONLY; then
         fi
         if ! verify_runtime_identity "$BACKEND_APP" "$BUILD_VERSION" "$BUILD_COMMIT" \
             "$BUILD_DIGEST" "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" \
-            "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
+            "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$BUILD_IMAGE_ID"; then
             backend_identity_failure="${RUNTIME_IDENTITY_DIAGNOSTIC:-runtime identity verification failed}"
             error "Backend runtime identity verification failed for ${BACKEND_APP}: ${backend_identity_failure}; refusing to continue provisioning."
             record_deployment_failure backend "$BACKEND_IMAGE" \
@@ -1116,7 +1116,7 @@ if ! $GIT_ONLY; then
         fi
         if ! verify_runtime_identity "$FRONTEND_APP" "$BUILD_VERSION" "$BUILD_COMMIT" \
             "$BUILD_DIGEST" "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" \
-            "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
+            "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" "$BUILD_IMAGE_ID"; then
             frontend_identity_failure="${RUNTIME_IDENTITY_DIAGNOSTIC:-runtime identity verification failed}"
             error "Frontend runtime identity verification failed for ${FRONTEND_APP}: ${frontend_identity_failure}; refusing to continue provisioning."
             record_deployment_failure frontend "$FRONTEND_IMAGE" \

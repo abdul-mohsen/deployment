@@ -151,17 +151,20 @@ identity problem, an unavailable `/version` response, and missing or
 mismatching identity fields. An image-check failure can occur before
 `/version` is requested, so an older generic
 `/version`-mismatch message does not identify the actual failure.
-The follow-up log proves that RepoDigest metadata is missing, but without the
-container-specific ID mapping it does not establish whether the new or a
-stale/extra container produced the reported image-ID mismatch. It also proves
-that `/version` was not reached. Repeated pulls of a mutable tag make tag
-drift plausible, but do not prove it.
+The follow-up log proves that RepoDigest metadata is missing and the expected
+and runtime image IDs differ, but `/version` was not reached. Dokku may wrap
+the source image in a new image ID; because the log has no container ID or
+wrapper source label, it cannot prove that explanation or rule out a
+stale/extra container. Repeated mutable-tag pulls make tag drift plausible,
+but do not prove it.
 
 For tenant creation, if Docker reports no RepoDigest for a running container,
-the image gate uses the Docker image ID captured from the resolved immutable
-image before the swap. It passes only on an exact ID match. A non-empty
-mismatching RepoDigest, missing expected ID, or different runtime ID still
-fails closed; verification never re-resolves a mutable tag for this fallback.
+the gate accepts an exact match with the Docker image ID captured from the
+resolved immutable image. If Dokku runs a generated wrapper with a different
+image ID, it accepts that wrapper only when its `alternate-tags` metadata
+contains the expected source digest. Missing or mismatching metadata fails
+closed, and raw label text is never logged. A non-empty mismatching RepoDigest
+always fails.
 Tenant creation now resolves each image to an immutable digest and reads its
 BuildIdentity labels from that reference. The backend digest is passed to both
 Goose and Dokku; the resolved frontend digest is passed to Dokku. The mutable
@@ -170,6 +173,8 @@ resolution, so it cannot select different content between backend migration
 and deployment stages. The historical `anime6` log still cannot distinguish
 tag drift from a stale or extra container; a new deployment is needed to
 verify that the runtime image IDs match.
+The non-production provenance override may relax incomplete labels but must
+not continue without an immutable resolved image reference.
 
 Field diagnostics name the missing or differing fields and show only
 field-validated values. Do not copy raw `/version` JSON, credentials, tokens,

@@ -147,10 +147,19 @@ provenance_safe_container_id() {
     fi
 }
 
+provenance_dokku_wrapper_source_digests() {
+    local image_id="$1" alternate_tags=""
+    alternate_tags="$(provenance_label "$image_id" \
+        com.dokku.docker-image-labeler/alternate-tags || true)"
+    [ -n "$alternate_tags" ] && [ "$alternate_tags" != "<no value>" ] || return 1
+    printf '%s' "$alternate_tags" | grep -oE 'sha256:[0-9a-fA-F]{64}' | sort -u
+}
+
 verify_runtime_image_identity() {
     local app="$1" expected_digest="$2" expected_ref="$3"
     local expected_image_id="${4:-}" ids="" container_id identity actual_image_id actual_digest
-    local safe_container_id matched checked=0 image_id_fallback_used=0
+    local safe_container_id actual_wrapper_digests actual_wrapper_digest
+    local matched checked=0 image_id_fallback_used=0 wrapper_digest_fallback_used=0
 
     RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC=""
     if [ -z "$expected_image_id" ] && [ -z "$expected_digest" ] && [ -n "$expected_ref" ]; then
@@ -188,7 +197,13 @@ verify_runtime_image_identity() {
                     image_id_fallback_used=1
                     continue
                 fi
-                RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="container_id=${safe_container_id} digest expected=$(provenance_safe_identity_value digest "$expected_digest") actual=<missing>; image_id expected=$(provenance_safe_identity_value image_id "$expected_image_id") actual=$(provenance_safe_identity_value image_id "$actual_image_id")"
+                actual_wrapper_digests="$(provenance_dokku_wrapper_source_digests "$actual_image_id" || true)"
+                if printf '%s\n' "$actual_wrapper_digests" | grep -Fqx "$expected_digest"; then
+                    wrapper_digest_fallback_used=1
+                    continue
+                fi
+                actual_wrapper_digest="${actual_wrapper_digests%%$'\n'*}"
+                RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="container_id=${safe_container_id} digest expected=$(provenance_safe_identity_value digest "$expected_digest") actual=<missing>; image_id expected=$(provenance_safe_identity_value image_id "$expected_image_id") actual=$(provenance_safe_identity_value image_id "$actual_image_id"); wrapper_digest expected=$(provenance_safe_identity_value digest "$expected_digest") actual=$(provenance_safe_identity_value digest "$actual_wrapper_digest")"
                 return 1
             fi
         else
@@ -213,6 +228,9 @@ verify_runtime_image_identity() {
     fi
     if [ "$image_id_fallback_used" -eq 1 ]; then
         echo "[i] Runtime RepoDigest unavailable; matched captured image ID." >&2
+    fi
+    if [ "$wrapper_digest_fallback_used" -eq 1 ]; then
+        echo "[i] Runtime RepoDigest unavailable; matched Dokku wrapper source digest." >&2
     fi
     return 0
 }
@@ -274,12 +292,10 @@ resolve_build_identity() {
             BUILD_IMAGE_ID=""
         fi
         identity_image="$BUILD_RESOLVED_REF"
-    elif provenance_override_enabled; then
+    else
         BUILD_RESOLVED_REF=""
         BUILD_DIGEST=""
         BUILD_IMAGE_ID=""
-        identity_image="$image"
-    else
         return 1
     fi
 

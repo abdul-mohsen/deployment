@@ -950,6 +950,10 @@ SQLEOF
                 error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
                 exit 1
             fi
+            if [ -z "$BUILD_RESOLVED_REF" ]; then
+                error "Backend image did not resolve to an immutable reference: $BACKEND_IMAGE"
+                exit 1
+            fi
             log "Running goose migrations from backend image..."
             bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
                 --schema-only \
@@ -992,6 +996,10 @@ dokku_shell "mkdir -p /home/dokku/${FRONTEND_APP} && echo '/' > /home/dokku/${FR
 # ---- 9. Deploy (if images provided) ----
 if ! $GIT_ONLY; then
     if [ -n "$BACKEND_IMAGE" ]; then
+        if [ -z "$BUILD_RESOLVED_REF" ]; then
+            error "Backend image did not resolve to an immutable reference before runtime deployment."
+            exit 1
+        fi
         log "Deploying backend from resolved image: $BUILD_RESOLVED_REF"
         if ! capture_runtime_config "$BACKEND_APP"; then
             error "Failed to capture current runtime identity for ${BACKEND_APP}."
@@ -1059,6 +1067,10 @@ if ! $GIT_ONLY; then
         ensure_tenant_image_available "$FRONTEND_IMAGE"
         if ! resolve_build_identity "$FRONTEND_IMAGE"; then
             error "Image is missing or inconsistent OCI BuildIdentity labels: $FRONTEND_IMAGE"
+            exit 1
+        fi
+        if [ -z "$BUILD_RESOLVED_REF" ]; then
+            error "Frontend image did not resolve to an immutable reference: $FRONTEND_IMAGE"
             exit 1
         fi
         if ! capture_runtime_config "$FRONTEND_APP"; then

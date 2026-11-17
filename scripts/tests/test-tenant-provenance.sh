@@ -143,12 +143,18 @@ docker() {
     esac
 }
 resolve_build_identity example/api:v1.2.3 || fail "valid BuildIdentity was rejected"
+VERSION_RESPONSE_AVAILABLE=true
+VERSION_RESPONSE_JSON='{"version":"v1.2.3","commit":"0123456789abcdef0123456789abcdef01234567","digest":"'"$IMAGE_DIGEST"'","image_ref":"example/api:v1.2.3","channel":"release","workflow_run_id":"42","workflow_run_url":"https://github.com/example/api/actions/runs/42","built_at":"2026-09-07T10:00:00Z"}'
 app_version_response() {
-    printf '%s' '{"version":"v1.2.3","commit":"0123456789abcdef0123456789abcdef01234567","digest":"'"$IMAGE_DIGEST"'","image_ref":"example/api:v1.2.3","channel":"release","workflow_run_id":"42","workflow_run_url":"https://github.com/example/api/actions/runs/42","built_at":"2026-09-07T10:00:00Z"}'
+    [ "$VERSION_RESPONSE_AVAILABLE" = true ] || return 1
+    printf '%s' "$VERSION_RESPONSE_JSON"
 }
+RUNTIME_IDENTITY_DIAGNOSTIC="stale verification failure"
 verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
     "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT" \
     || fail "matching /version identity was rejected"
+[ -z "${RUNTIME_IDENTITY_DIAGNOSTIC:-}" ] ||
+    fail "successful verification retained a stale failure diagnostic"
 pass "matching /version identity is accepted"
 echo "=== moved tag cannot hide a digest mismatch ==="
 RUNTIME_IMAGE_ID="$EXPECTED_IMAGE_ID"
@@ -159,17 +165,48 @@ else
     pass "moved tag is rejected when the running image digest mismatches"
 fi
 RUNTIME_IMAGE_DIGEST="$IMAGE_DIGEST"
+echo "=== running image mismatch is distinct and stops before /version ==="
+RUNTIME_IMAGE_DIGEST="$STALE_IMAGE_DIGEST"
+VERSION_RESPONSE_AVAILABLE=false
+if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
+    "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
+    fail "runtime image mismatch was accepted"
+fi
+image_failure="${RUNTIME_IDENTITY_DIAGNOSTIC:-}"
+[[ "$image_failure" == *"image identity"* ]] ||
+    fail "runtime image failure did not identify its failure category"
+[[ "$image_failure" != *"/version"* ]] ||
+    fail "runtime image failure was mislabeled as a /version failure"
+pass "running image mismatch is distinct and short-circuits /version"
+RUNTIME_IMAGE_DIGEST="$IMAGE_DIGEST"
+
+echo "=== unavailable /version response is distinct ==="
+VERSION_RESPONSE_AVAILABLE=false
+if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
+    "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
+    fail "unavailable /version response was accepted"
+fi
+response_failure="${RUNTIME_IDENTITY_DIAGNOSTIC:-}"
+[[ "$response_failure" == *"response"* && "$response_failure" == *"unavailable"* ]] ||
+    fail "missing /version response did not have a distinct diagnostic"
+VERSION_RESPONSE_AVAILABLE=true
+pass "unavailable /version response has its own failure category"
+
 echo "=== stale environment identity cannot hide the running image ==="
 RUNTIME_IMAGE_ID="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 RUNTIME_IMAGE_DIGEST="$STALE_IMAGE_DIGEST"
+VERSION_RESPONSE_AVAILABLE=false
 if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
     "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
     fail "stale running image was accepted when /version matched injected values"
 else
+    [[ "${RUNTIME_IDENTITY_DIAGNOSTIC:-}" == *"image identity"* ]] ||
+        fail "stale running image failure did not retain the image failure category"
     pass "stale running image is rejected independently of /version values"
 fi
 RUNTIME_IMAGE_ID="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 RUNTIME_IMAGE_DIGEST="$IMAGE_DIGEST"
+VERSION_RESPONSE_AVAILABLE=true
 app_version_response() {
     printf '%s' '{"version":"v1.2.3","commit":"ffffffffffffffffffffffffffffffffffffffff","digest":"'"$IMAGE_DIGEST"'","image_ref":"example/api:v1.2.3","channel":"release","workflow_run_id":"42","built_at":"2026-09-07T10:00:00Z"}'
 }
@@ -177,8 +214,41 @@ if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGE
     "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
     fail "mismatched /version commit was accepted"
 else
+    field_failure="${RUNTIME_IDENTITY_DIAGNOSTIC:-}"
+    [[ "$field_failure" == *"commit"* ]] ||
+        fail "field mismatch diagnostic omitted the commit field"
     pass "mismatched /version commit is rejected"
 fi
+
+echo "=== field diagnostics include only validated identity values ==="
+BUILD_WORKFLOW_RUN_URL="https://expected-user:expected-secret-sentinel@ci.example/actions/runs/42"
+app_version_response() {
+    printf '%s' '{"commit":"runtime-secret-sentinel","digest":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","image_ref":"https://runtime-user:runtime-secret-sentinel@example/api:v9","channel":"runtime-secret-sentinel","workflow_run_id":"43","workflow_run_url":"https://runtime-user:runtime-secret-sentinel@ci.example/actions/runs/43","built_at":"runtime-secret-sentinel"}'
+}
+if verify_runtime_identity api-app "$BUILD_VERSION" "$BUILD_COMMIT" "$BUILD_DIGEST" \
+    "$BUILD_IMAGE_REF" "$BUILD_CHANNEL" "$BUILD_WORKFLOW_RUN_ID" "$BUILD_WORKFLOW_RUN_URL" "$BUILD_BUILT_AT"; then
+    fail "multiple missing/mismatching identity fields were accepted"
+fi
+field_failure="${RUNTIME_IDENTITY_DIAGNOSTIC:-}"
+for field in version commit digest image_ref channel workflow_run_id workflow_run_url built_at; do
+    [[ "$field_failure" == *"$field"* ]] ||
+        fail "field mismatch diagnostic omitted $field"
+done
+[[ "$field_failure" == *"version expected=v1.2.3 actual=<missing>"* ]] ||
+    fail "missing version did not show safe expected/actual values"
+[[ "$field_failure" == *"digest expected=$IMAGE_DIGEST actual=sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"* ]] ||
+    fail "digest mismatch did not show safe expected/actual values"
+[[ "$field_failure" == *"workflow_run_id expected=42 actual=43"* ]] ||
+    fail "workflow ID mismatch did not show safe expected/actual values"
+[[ "$field_failure" == *"commit expected=0123456789abcdef0123456789abcdef01234567 actual=<omitted>"* ]] ||
+    fail "unsafe commit value was not omitted"
+[[ "$field_failure" == *"workflow_run_url expected=<omitted> actual=<omitted>"* ]] ||
+    fail "workflow URLs were not omitted"
+[[ "$field_failure" != *"secret-sentinel"* && "$field_failure" != *"runtime-secret-sentinel"* ]] ||
+    fail "identity diagnostic exposed a credential-bearing value"
+[[ "$field_failure" != *'"commit":"runtime-secret-sentinel"'* ]] ||
+    fail "identity diagnostic exposed raw /version JSON"
+pass "field names are explicit and untrusted values are filtered"
 
 echo "=== app probes use the container listening port ==="
 docker() {

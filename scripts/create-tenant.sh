@@ -953,7 +953,7 @@ SQLEOF
             log "Running goose migrations from backend image..."
             bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \
                 --schema-only \
-                --backend-image "$BACKEND_IMAGE" \
+                --backend-image "$BUILD_RESOLVED_REF" \
                 --config "$CONFIG_FILE"
             DB_PROVISIONED=true
             MIGRATIONS_APPLIED=true
@@ -992,12 +992,7 @@ dokku_shell "mkdir -p /home/dokku/${FRONTEND_APP} && echo '/' > /home/dokku/${FR
 # ---- 9. Deploy (if images provided) ----
 if ! $GIT_ONLY; then
     if [ -n "$BACKEND_IMAGE" ]; then
-        log "Deploying backend from image: $BACKEND_IMAGE"
-        ensure_tenant_image_available "$BACKEND_IMAGE"
-        if ! resolve_build_identity "$BACKEND_IMAGE"; then
-            error "Image is missing or inconsistent OCI BuildIdentity labels: $BACKEND_IMAGE"
-            exit 1
-        fi
+        log "Deploying backend from resolved image: $BUILD_RESOLVED_REF"
         if ! capture_runtime_config "$BACKEND_APP"; then
             error "Failed to capture current runtime identity for ${BACKEND_APP}."
             exit 1
@@ -1028,7 +1023,7 @@ if ! $GIT_ONLY; then
             exit 1
         fi
         IMAGE_SWAP_ATTEMPTED["backend"]=true
-        if ! dokku_git_from_image "$BACKEND_APP" "$BACKEND_IMAGE"; then
+        if ! dokku_git_from_image "$BACKEND_APP" "$BUILD_RESOLVED_REF"; then
             error "Backend image deployment failed for ${BACKEND_APP}."
             record_deployment_failure backend "$BACKEND_IMAGE" \
                 "image swap failed"
@@ -1102,7 +1097,7 @@ if ! $GIT_ONLY; then
             exit 1
         fi
         IMAGE_SWAP_ATTEMPTED["frontend"]=true
-        if ! dokku_git_from_image "$FRONTEND_APP" "$FRONTEND_IMAGE"; then
+        if ! dokku_git_from_image "$FRONTEND_APP" "$BUILD_RESOLVED_REF"; then
             error "Frontend image deployment failed for ${FRONTEND_APP}."
             record_deployment_failure frontend "$FRONTEND_IMAGE" \
                 "image swap failed"

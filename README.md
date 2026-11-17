@@ -152,14 +152,24 @@ mismatching identity fields. An image-check failure can occur before
 `/version` is requested, so an older generic
 `/version`-mismatch message does not identify the actual failure.
 The follow-up log proves that RepoDigest metadata is missing, but without the
-expected/actual Docker image IDs it does not prove that the image content is
-wrong; `/version` was not reached.
+container-specific ID mapping it does not establish whether the new or a
+stale/extra container produced the reported image-ID mismatch. It also proves
+that `/version` was not reached. Repeated pulls of a mutable tag make tag
+drift plausible, but do not prove it.
 
 For tenant creation, if Docker reports no RepoDigest for a running container,
 the image gate uses the Docker image ID captured from the resolved immutable
 image before the swap. It passes only on an exact ID match. A non-empty
 mismatching RepoDigest, missing expected ID, or different runtime ID still
 fails closed; verification never re-resolves a mutable tag for this fallback.
+Tenant creation now resolves each image to an immutable digest and reads its
+BuildIdentity labels from that reference. The backend digest is passed to both
+Goose and Dokku; the resolved frontend digest is passed to Dokku. The mutable
+requested tag is not re-resolved for image execution after identity
+resolution, so it cannot select different content between backend migration
+and deployment stages. The historical `anime6` log still cannot distinguish
+tag drift from a stale or extra container; a new deployment is needed to
+verify that the runtime image IDs match.
 
 Field diagnostics name the missing or differing fields and show only
 field-validated values. Do not copy raw `/version` JSON, credentials, tokens,

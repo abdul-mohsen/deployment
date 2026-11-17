@@ -79,7 +79,7 @@ grep -Fq '"$BUILD_BUILT_AT" "$BUILD_IMAGE_ID"' scripts/create-tenant.sh \
     || fail "create-tenant verification call does not pass the captured image ID"
 
 backend_resolve_line="$(grep -n 'resolve_build_identity "\$BACKEND_IMAGE"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"
-backend_swap_line="$(grep -n 'dokku_git_from_image "\$BACKEND_APP" "\$BACKEND_IMAGE"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"
+backend_swap_line="$(grep -n 'dokku_git_from_image "\$BACKEND_APP" "\$BUILD_RESOLVED_REF"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"
 backend_health_line="$(grep -n 'wait_for_runtime_health "\$BACKEND_APP" "/healthz"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"
 backend_verify_line="$(grep -n 'verify_runtime_identity "\$BACKEND_APP"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"
 [ -n "$backend_resolve_line" ] && [ -n "$backend_swap_line" ] &&
@@ -90,7 +90,7 @@ backend_verify_line="$(grep -n 'verify_runtime_identity "\$BACKEND_APP"' scripts
     || fail "backend image deployment does not verify provenance after health"
 
 frontend_resolve_line="$(grep -n 'resolve_build_identity "\$FRONTEND_IMAGE"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"
-frontend_swap_line="$(grep -n 'dokku_git_from_image "\$FRONTEND_APP" "\$FRONTEND_IMAGE"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"
+frontend_swap_line="$(grep -n 'dokku_git_from_image "\$FRONTEND_APP" "\$BUILD_RESOLVED_REF"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"
 frontend_health_line="$(grep -n 'wait_for_runtime_health "\$FRONTEND_APP" "/"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"
 frontend_verify_line="$(grep -n 'verify_runtime_identity "\$FRONTEND_APP"' scripts/create-tenant.sh | tail -1 | cut -d: -f1)"
 [ -n "$frontend_resolve_line" ] && [ -n "$frontend_swap_line" ] &&

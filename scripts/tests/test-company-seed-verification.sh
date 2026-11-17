@@ -363,7 +363,7 @@ pass "container loopback cannot masquerade as the host database"
 echo
 echo "=== create-tenant gates backend image swap on initializer success ==="
 init_line="$(grep -nF 'bash "$SCRIPT_DIR/init-tenant-db.sh" "$TENANT_NAME" \' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
-deploy_line="$(grep -nF 'dokku_git_from_image "$BACKEND_APP" "$BACKEND_IMAGE"' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
+deploy_line="$(grep -nF 'dokku_git_from_image "$BACKEND_APP" "$BUILD_RESOLVED_REF"' scripts/create-tenant.sh | head -1 | cut -d: -f1)"
 [ -n "$init_line" ] && [ -n "$deploy_line" ] && [ "$init_line" -lt "$deploy_line" ] ||
     fail "backend image swap is not ordered after the schema initializer"
 grep -q '^set -euo pipefail$' scripts/create-tenant.sh ||

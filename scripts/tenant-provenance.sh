@@ -138,10 +138,19 @@ runtime_container_image_identity() {
     printf '%s\t%s' "$image_id" "$actual_digest"
 }
 
+provenance_safe_container_id() {
+    local container_id="$1"
+    if [[ "$container_id" =~ ^[0-9a-fA-F]{12,64}$ ]]; then
+        printf '%s' "${container_id:0:12}"
+    else
+        printf '<unknown>'
+    fi
+}
+
 verify_runtime_image_identity() {
     local app="$1" expected_digest="$2" expected_ref="$3"
     local expected_image_id="${4:-}" ids="" container_id identity actual_image_id actual_digest
-    local matched checked=0 image_id_fallback_used=0
+    local safe_container_id matched checked=0 image_id_fallback_used=0
 
     RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC=""
     if [ -z "$expected_image_id" ] && [ -z "$expected_digest" ] && [ -n "$expected_ref" ]; then
@@ -161,16 +170,17 @@ verify_runtime_image_identity() {
     while IFS= read -r container_id; do
         [ -n "$container_id" ] || continue
         checked=1
+        safe_container_id="$(provenance_safe_container_id "$container_id")"
         identity="$(runtime_container_image_identity "$container_id" || true)"
         if [ -z "$identity" ]; then
-            RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="running container image metadata is unavailable"
+            RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="container_id=${safe_container_id} running container image metadata is unavailable"
             return 1
         fi
         IFS=$'\t' read -r actual_image_id actual_digest <<< "$identity"
 
         if [ -n "$expected_digest" ]; then
             if [ -n "$actual_digest" ] && [ "$actual_digest" != "$expected_digest" ]; then
-                RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="digest expected=$(provenance_safe_identity_value digest "$expected_digest") actual=$(provenance_safe_identity_value digest "$actual_digest")"
+                RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="container_id=${safe_container_id} digest expected=$(provenance_safe_identity_value digest "$expected_digest") actual=$(provenance_safe_identity_value digest "$actual_digest")"
                 return 1
             fi
             if [ -z "$actual_digest" ]; then
@@ -178,7 +188,7 @@ verify_runtime_image_identity() {
                     image_id_fallback_used=1
                     continue
                 fi
-                RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="digest expected=$(provenance_safe_identity_value digest "$expected_digest") actual=<missing>; image_id expected=$(provenance_safe_identity_value image_id "$expected_image_id") actual=$(provenance_safe_identity_value image_id "$actual_image_id")"
+                RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="container_id=${safe_container_id} digest expected=$(provenance_safe_identity_value digest "$expected_digest") actual=<missing>; image_id expected=$(provenance_safe_identity_value image_id "$expected_image_id") actual=$(provenance_safe_identity_value image_id "$actual_image_id")"
                 return 1
             fi
         else
@@ -191,7 +201,7 @@ verify_runtime_image_identity() {
                 matched=0
             fi
             if [ "$matched" -ne 0 ]; then
-                RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="image_id expected=$(provenance_safe_identity_value image_id "$expected_image_id") actual=$(provenance_safe_identity_value image_id "$actual_image_id")"
+                RUNTIME_IMAGE_IDENTITY_DIAGNOSTIC="container_id=${safe_container_id} image_id expected=$(provenance_safe_identity_value image_id "$expected_image_id") actual=$(provenance_safe_identity_value image_id "$actual_image_id")"
                 return 1
             fi
         fi
@@ -246,27 +256,47 @@ provenance_identity_reset() {
     BUILD_BUILT_AT=""
 }
 
-# Resolve a tag to a full digest and populate the approved BuildIdentity
-# fields. Output is intentionally quiet; callers can safely use this in an
-# `if` condition and record a useful failure themselves.
+# Resolve a tag to a digest first, then read BuildIdentity from that immutable
+# reference. Output is intentionally quiet; callers can record a useful failure.
 resolve_build_identity() {
-    local image="$1" digest_info digest_label
+    local image="$1" digest_info digest_label identity_image
     provenance_identity_reset
 
-    BUILD_CHANNEL="$(provenance_first_label "$image" \
+    digest_info="$(provenance_repo_digest "$image" || true)"
+    BUILD_RESOLVED_REF="${digest_info%%$'\t'*}"
+    BUILD_DIGEST="${digest_info#*$'\t'}"
+    if [[ "$BUILD_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] &&
+        [[ "$BUILD_RESOLVED_REF" == *@$BUILD_DIGEST ]]; then
+        BUILD_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$BUILD_RESOLVED_REF" \
+            2>/dev/null || true)"
+        BUILD_IMAGE_ID="${BUILD_IMAGE_ID//$'\n'/}"
+        if [[ ! "$BUILD_IMAGE_ID" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+            BUILD_IMAGE_ID=""
+        fi
+        identity_image="$BUILD_RESOLVED_REF"
+    elif provenance_override_enabled; then
+        BUILD_RESOLVED_REF=""
+        BUILD_DIGEST=""
+        BUILD_IMAGE_ID=""
+        identity_image="$image"
+    else
+        return 1
+    fi
+
+    BUILD_CHANNEL="$(provenance_first_label "$identity_image" \
         com.ifritah.build.channel org.ifritah.build.channel \
         org.opencontainers.image.channel || true)"
-    BUILD_VERSION="$(provenance_first_label "$image" \
+    BUILD_VERSION="$(provenance_first_label "$identity_image" \
         org.opencontainers.image.version || true)"
-    BUILD_COMMIT="$(provenance_first_label "$image" \
+    BUILD_COMMIT="$(provenance_first_label "$identity_image" \
         org.opencontainers.image.revision com.ifritah.build.commit || true)"
-    BUILD_WORKFLOW_RUN_ID="$(provenance_first_label "$image" \
+    BUILD_WORKFLOW_RUN_ID="$(provenance_first_label "$identity_image" \
         com.ifritah.build.workflow_run_id com.ifritah.build.workflow-run-id \
         com.ifritah.build.workflow_run com.ifritah.build.workflow-run \
         org.ifritah.build.workflow_run_id org.ifritah.build.workflow-run-id \
         org.ifritah.build.workflow_run org.ifritah.build.workflow-run \
         org.opencontainers.image.workflow.run || true)"
-    BUILD_WORKFLOW_RUN_URL="$(provenance_first_label "$image" \
+    BUILD_WORKFLOW_RUN_URL="$(provenance_first_label "$identity_image" \
         com.ifritah.build.workflow_run_url com.ifritah.build.workflow-run-url \
         org.ifritah.build.workflow_run_url org.ifritah.build.workflow-run-url || true)"
     if [[ "$BUILD_WORKFLOW_RUN_ID" == https://* || "$BUILD_WORKFLOW_RUN_ID" == http://* ]]; then
@@ -274,35 +304,24 @@ resolve_build_identity() {
         BUILD_WORKFLOW_RUN_ID="${BUILD_WORKFLOW_RUN_URL##*/}"
     fi
     BUILD_WORKFLOW_RUN="$BUILD_WORKFLOW_RUN_ID"
-    BUILD_IMAGE_REF="$(provenance_first_label "$image" \
+    BUILD_IMAGE_REF="$(provenance_first_label "$identity_image" \
         com.ifritah.build.image_ref com.ifritah.build.image-ref \
         org.ifritah.build.image_ref org.ifritah.build.image-ref \
         org.opencontainers.image.ref.name || true)"
-    BUILD_SOURCE="$(provenance_first_label "$image" \
+    BUILD_SOURCE="$(provenance_first_label "$identity_image" \
         org.opencontainers.image.source || true)"
-    BUILD_BUILT_AT="$(provenance_first_label "$image" \
+    BUILD_BUILT_AT="$(provenance_first_label "$identity_image" \
         org.opencontainers.image.created com.ifritah.build.built_at \
         com.ifritah.build.built-at org.ifritah.build.built_at || true)"
 
     if [ -n "$BUILD_COMMIT" ]; then
-        BUILD_COMMIT_SHORT="$(provenance_first_label "$image" \
+        BUILD_COMMIT_SHORT="$(provenance_first_label "$identity_image" \
             com.ifritah.build.commit_short com.ifritah.build.commit-short \
             org.ifritah.build.commit_short org.ifritah.build.commit-short || true)"
         BUILD_COMMIT_SHORT="${BUILD_COMMIT_SHORT:-${BUILD_COMMIT:0:7}}"
     fi
 
-    digest_info="$(provenance_repo_digest "$image" || true)"
-    BUILD_RESOLVED_REF="${digest_info%%$'\t'*}"
-    BUILD_DIGEST="${digest_info#*$'\t'}"
-    if [ -n "$BUILD_RESOLVED_REF" ]; then
-        BUILD_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$BUILD_RESOLVED_REF" \
-            2>/dev/null || true)"
-        BUILD_IMAGE_ID="${BUILD_IMAGE_ID//$'\n'/}"
-        if [[ ! "$BUILD_IMAGE_ID" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
-            BUILD_IMAGE_ID=""
-        fi
-    fi
-    digest_label="$(provenance_first_label "$image" \
+    digest_label="$(provenance_first_label "$identity_image" \
         com.ifritah.build.digest org.ifritah.build.digest || true)"
 
     if [ -z "$BUILD_CHANNEL" ] || [ -z "$BUILD_VERSION" ] ||

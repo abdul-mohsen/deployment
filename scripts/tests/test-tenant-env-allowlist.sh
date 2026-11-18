@@ -69,7 +69,12 @@ for assignment in \
     "METRICS_TOKEN=telemetry-secret" \
     "NATS_USER=tenant-overridden-user" \
     "NATS_PASSWORD=tenant-overridden-password" \
+    "NATS_PORT=9999" \
     "NATS_PRIVATE_NETWORK_ONLY=true" \
+    "NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED=true" \
+    "NATS_SHARED_CREDENTIALS_ACKNOWLEDGED=true" \
+    "NATS_SHARED_CREDENTIALS_APPROVAL_ID=approval-123" \
+    "NATS_SHARED_CREDENTIALS_EXPIRES=2099-12-31" \
     "ZATCA_NATS_USER=tenant-overridden-user" \
     "NATS_URL=nats://unapproved-host:4222"; do
     assert_rejected "$assignment"

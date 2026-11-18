@@ -59,11 +59,15 @@ deployment_init_logging
 
 validate_database_identifier "${MYSQL_MASTER_DB:-zatca_master}" || exit 1
 validate_database_identifier "${DEPLOY_STATE_DB:-deployment_state}" || exit 1
-validate_nats_url "${NATS_URL:-nats://host.docker.internal:${ZATCA_NATS_PORT:-4222}}" || exit 1
 
 if [ -z "$IMAGE" ]; then
     echo "Usage: $0 <image> [--type backend|frontend] [--tenant <name>] [--skip-canary]"
     exit 1
+fi
+
+if [ "$APP_TYPE" = "backend" ]; then
+    prepare_backend_nats_url || exit 1
+    prepare_backend_nats_credentials || exit 1
 fi
 
 SUFFIX="-${APP_TYPE}"
@@ -148,6 +152,10 @@ deploy_one() {
         return 0
     fi
 
+    if [ "$APP_TYPE" = "backend" ]; then
+        ensure_dokku_host_gateway "$app" || return 1
+    fi
+
     previous_observed_image="$(dokku git:report "$app" 2>/dev/null |
         awk -F': ' 'tolower($1) ~ /source-image/ {print $2; exit}' || true)"
     if ! capture_runtime_config "$app"; then
@@ -219,9 +227,8 @@ deploy_one() {
     local -a nats_env=()
     if [ "$APP_TYPE" = "backend" ]; then
         nats_env=(
-            "NATS_URL=${NATS_URL:-nats://host.docker.internal:${ZATCA_NATS_PORT:-4222}}"
-            "NATS_USER=${NATS_USER:-}"
-            "NATS_PASSWORD=${NATS_PASSWORD:-}"
+            "NATS_URL=${BACKEND_NATS_URL}"
+            "${BACKEND_NATS_CREDENTIALS[@]}"
         )
     fi
     if ! dokku config:set --no-restart "$app" "${nats_env[@]}" \

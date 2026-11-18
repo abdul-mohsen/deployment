@@ -214,8 +214,8 @@ validate_tenant_env_override() {
         APP_*|AUTO_BACKUP_BEFORE_REDEPLOY|AUTO_REDEPLOY_DISABLED|\
         BACKEND_IMAGE|BASE_DOMAIN|BASEURL|BACKUP_DIR|DASHBOARD_*|\
         DEPLOY_*|DEPLOY_ENV|DEV_TAG|DEV_TENANT|DOCKERHUB_*|\
-        IMAGE_PULL_POLICY|LOG_DIR|MSG_HOST|MSG_PORT|NATS_PASSWORD|NATS_PRIVATE_NETWORK_ONLY|\
-        NATS_URL|NATS_USER|NGINX_*|\
+        IMAGE_PULL_POLICY|LOG_DIR|MSG_HOST|MSG_PORT|NATS_PASSWORD|NATS_PORT|NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED|\
+        NATS_PRIVATE_NETWORK_ONLY|NATS_SHARED_CREDENTIALS_*|NATS_URL|NATS_USER|NGINX_*|\
         PORT|PUBLIC_PROTOCOL|PULL_TAG|SERVER_PORT|STORAGE_ROOT|\
         TENANT_APP_NETWORK|TENANT_ID|\
         TENANT_IMAGE_PULL_POLICY|TENANT_NAME_PREFIX|TENANT_NETWORK|\
@@ -231,8 +231,8 @@ validate_tenant_env_override() {
         # Migrations, tenant identity, and daemon transport are owned by deployment.
         MIGRATE_CMD|MIGRATION_*)
             reason="migration-control key" ;;
-        TENANT_KEY|TENANT_KEY_*|NATS_MODE|NATS_PASSWORD|NATS_PRIVATE_NETWORK_ONLY|\
-        NATS_URL|NATS_USER|ZATCA_NATS_*|MSG_HOST|MSG_PORT)
+        TENANT_KEY|TENANT_KEY_*|NATS_MODE|NATS_PASSWORD|NATS_PORT|NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED|\
+        NATS_PRIVATE_NETWORK_ONLY|NATS_SHARED_CREDENTIALS_*|NATS_URL|NATS_USER|ZATCA_NATS_*|MSG_HOST|MSG_PORT)
             reason="tenant identity or daemon transport key" ;;
 
         # Prevent a tenant override from changing Docker/Dokku execution.
@@ -300,6 +300,157 @@ validate_nats_url() {
         printf 'Invalid NATS URL %q; host is required.\n' "$url" >&2
         return 1
     }
+}
+
+nats_url_port() {
+    local url="${1:-}" authority
+    authority="${url#*://}"
+    authority="${authority%%/*}"
+    if [[ "$authority" == *:* ]]; then
+        printf '%s\n' "${authority##*:}"
+    else
+        printf '%s\n' "4222"
+    fi
+}
+
+prepare_backend_nats_url() {
+    local default_port="${NATS_PORT:-4222}"
+    case "${ZATCA_DAEMON_ENABLED:-0}" in
+        1|true|yes) default_port="${ZATCA_NATS_PORT:-4222}" ;;
+    esac
+    local url="${NATS_URL:-nats://host.docker.internal:${default_port}}"
+    BACKEND_NATS_URL=""
+    validate_nats_url "$url" || return 1
+
+    case "${ZATCA_DAEMON_ENABLED:-0}" in
+        1|true|yes)
+            local published_port="${ZATCA_NATS_PORT:-4222}"
+            local url_port url_port_number published_port_number
+            if ! [[ "$published_port" =~ ^[0-9]+$ ]]; then
+                printf '%s\n' "ZATCA_NATS_PORT must be an integer from 1 to 65535." >&2
+                return 1
+            fi
+            published_port_number=$((10#$published_port))
+            if [ "$published_port_number" -lt 1 ] || [ "$published_port_number" -gt 65535 ]; then
+                printf '%s\n' "ZATCA_NATS_PORT must be an integer from 1 to 65535." >&2
+                return 1
+            fi
+            url_port="$(nats_url_port "$url")"
+            url_port_number=$((10#$url_port))
+            if [ "$url_port_number" -ne "$published_port_number" ]; then
+                printf 'NATS_URL port %s must match ZATCA_NATS_PORT %s when the daemon is enabled.\n' \
+                    "$url_port_number" "$published_port_number" >&2
+                return 1
+            fi
+            ;;
+    esac
+
+    BACKEND_NATS_URL="$url"
+}
+
+validate_zatca_daemon_security_gates() {
+    case "${NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED:-false}" in
+        1|true|yes) ;;
+        *)
+            printf '%s\n' \
+                "Set NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED=true only after verifying the host firewall restricts the NATS port to authorized private clients." >&2
+            return 1
+            ;;
+    esac
+    case "${NATS_SHARED_CREDENTIALS_ACKNOWLEDGED:-false}" in
+        1|true|yes) ;;
+        *)
+            printf '%s\n' \
+                "NATS_SHARED_CREDENTIALS_ACKNOWLEDGED=true is required because backend tenants share one NATS credential boundary." >&2
+            return 1
+            ;;
+    esac
+    if [ -z "${NATS_SHARED_CREDENTIALS_APPROVAL_ID:-}" ]; then
+        printf '%s\n' "NATS_SHARED_CREDENTIALS_APPROVAL_ID is required." >&2
+        return 1
+    fi
+
+    local expires="${NATS_SHARED_CREDENTIALS_EXPIRES:-}"
+    local normalized today
+    if ! [[ "$expires" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        printf '%s\n' "NATS_SHARED_CREDENTIALS_EXPIRES must use YYYY-MM-DD." >&2
+        return 1
+    fi
+    if ! normalized="$(date -u -d "$expires" +%F 2>/dev/null)" || [ "$normalized" != "$expires" ]; then
+        printf '%s\n' "NATS_SHARED_CREDENTIALS_EXPIRES must be a valid calendar date." >&2
+        return 1
+    fi
+    today="$(date -u +%F)" || return 1
+    if [[ "$expires" < "$today" || "$expires" == "$today" ]]; then
+        printf '%s\n' "NATS shared-credential approval is expired; set a future expiry date." >&2
+        return 1
+    fi
+}
+
+prepare_backend_nats_credentials() {
+    local nats_user="${NATS_USER:-}"
+    local nats_password="${NATS_PASSWORD:-}"
+    BACKEND_NATS_CREDENTIALS=()
+
+    if { [ -n "$nats_user" ] && [ -z "$nats_password" ]; } ||
+        { [ -z "$nats_user" ] && [ -n "$nats_password" ]; }; then
+        printf '%s\n' "NATS_USER and NATS_PASSWORD must be configured together." >&2
+        return 1
+    fi
+
+    case "${ZATCA_DAEMON_ENABLED:-0}" in
+        1|true|yes)
+            if [ -z "$nats_user" ]; then
+                printf '%s\n' \
+                    "NATS_USER and NATS_PASSWORD are required when ZATCA_DAEMON_ENABLED is enabled." >&2
+                return 1
+            fi
+            validate_zatca_daemon_security_gates || return 1
+            ;;
+    esac
+
+    BACKEND_NATS_CREDENTIALS=(
+        "NATS_USER=${nats_user}"
+        "NATS_PASSWORD=${nats_password}"
+    )
+}
+
+ensure_dokku_host_gateway() {
+    local app="${1:-}"
+    local option="--add-host=host.docker.internal:host-gateway"
+    local phase options
+    DOKKU_HOST_GATEWAY_ADDED=false
+    if [ -z "$app" ]; then
+        printf '%s\n' "A Dokku app name is required to ensure the host-gateway route." >&2
+        return 1
+    fi
+
+    for phase in deploy run; do
+        if ! options="$(dokku docker-options:list "$app" --phase "$phase" 2>/dev/null)"; then
+            printf 'Unable to inspect Dokku %s docker options for %s.\n' "$phase" "$app" >&2
+            return 1
+        fi
+        if grep -Fq -- "$option" <<< "$options"; then
+            continue
+        fi
+        if ! dokku docker-options:add "$app" "$phase" "$option" >/dev/null 2>&1; then
+            printf 'Unable to add the host-gateway route to Dokku %s options for %s.\n' \
+                "$phase" "$app" >&2
+            return 1
+        fi
+        DOKKU_HOST_GATEWAY_ADDED=true
+        if ! options="$(dokku docker-options:list "$app" --phase "$phase" 2>/dev/null)"; then
+            printf 'Unable to verify Dokku %s docker options for %s after adding the host-gateway route.\n' \
+                "$phase" "$app" >&2
+            return 1
+        fi
+        if ! grep -Fq -- "$option" <<< "$options"; then
+            printf 'The host-gateway route was not retained in Dokku %s options for %s.\n' \
+                "$phase" "$app" >&2
+            return 1
+        fi
+    done
+    return 0
 }
 
 # Detect whether this shell should use a local mysql client or a mysql helper

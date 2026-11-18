@@ -516,7 +516,8 @@ if ! validate_tenant_env_overrides "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; then
 fi
 validate_database_identifier "${MYSQL_MASTER_DB:-zatca_master}" || exit 1
 validate_database_identifier "${DEPLOY_STATE_DB:-deployment_state}" || exit 1
-validate_nats_url "${NATS_URL:-nats://host.docker.internal:${ZATCA_NATS_PORT:-4222}}" || exit 1
+prepare_backend_nats_url || exit 1
+prepare_backend_nats_credentials || exit 1
 
 # ---- Validate ----
 if [ -z "$TENANT_NAME" ]; then
@@ -820,9 +821,8 @@ dokku config:set --no-restart "$BACKEND_APP" \
     TENANT_ID="$TENANT_NAME" \
     PORT="$BACKEND_PORT" \
     SERVER_PORT="$BACKEND_PORT" \
-    NATS_URL="${NATS_URL:-nats://host.docker.internal:${ZATCA_NATS_PORT:-4222}}" \
-    NATS_USER="${NATS_USER:-}" \
-    NATS_PASSWORD="${NATS_PASSWORD:-}" \
+    NATS_URL="$BACKEND_NATS_URL" \
+    "${BACKEND_NATS_CREDENTIALS[@]}" \
     BASEURL="${BASEURL:-/api/v2}" \
     JWT_SECERT_KEY="${JWT_SECERT_KEY:-$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48)}"
 
@@ -850,7 +850,7 @@ if [ -n "$MSG_HOST" ]; then
 fi
 
 # Docker host access â€” ensure containers can reach host services
-dokku docker-options:add "$BACKEND_APP" deploy,run "--add-host=host.docker.internal:host-gateway" 2>/dev/null || true
+ensure_dokku_host_gateway "$BACKEND_APP" || exit 1
 
 # User-provided env vars
 for ev in "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; do

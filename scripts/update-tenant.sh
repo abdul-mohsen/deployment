@@ -76,6 +76,8 @@ RESTART=false
 SCALE=""
 SKIP_DRIFT_CHECK=false
 ROUTING_ONLY=false
+DOKKU_HOST_GATEWAY_ADDED=false
+HOST_GATEWAY_REBUILT=false
 MIGRATIONS_APPLIED=false
 DB_BACKUP_ID=""
 DB_BACKUP_ARTIFACT=""
@@ -538,7 +540,6 @@ if ! validate_tenant_env_overrides "${ENV_VARS[@]}"; then
 fi
 validate_database_identifier "${MYSQL_MASTER_DB:-zatca_master}" || exit 1
 validate_database_identifier "${DEPLOY_STATE_DB:-deployment_state}" || exit 1
-validate_nats_url "${NATS_URL:-nats://host.docker.internal:${ZATCA_NATS_PORT:-4222}}" || exit 1
 
 if [ -z "$TENANT_NAME" ]; then
     echo "Usage: $0 <tenant-name> [--backend-image <image>] [--frontend-image <image>]"
@@ -551,6 +552,14 @@ PUBLIC_TENANT_URL="$(public_tenant_url "$TENANT_NAME")" || exit 1
 
 BACKEND_APP="${TENANT_NAME}-backend"
 FRONTEND_APP="${TENANT_NAME}-frontend"
+
+if ! $ROUTING_ONLY; then
+    prepare_backend_nats_url || exit 1
+    prepare_backend_nats_credentials || exit 1
+    if [ -n "$BACKEND_IMAGE" ] || $RESTART || [ -n "$SCALE" ]; then
+        ensure_dokku_host_gateway "$BACKEND_APP" || exit 1
+    fi
+fi
 
 # Reconcile persisted routing before any image pull, migration, or deploy.
 # This makes the configured BASE_DOMAIN authoritative even when a later
@@ -568,17 +577,9 @@ fi
 # Keep the existing backend pointed at the daemon broker configured in the
 # same deployment config.env. The password is passed as a separate variable,
 # not embedded in NATS_URL.
-NATS_URL="${NATS_URL:-nats://host.docker.internal:${ZATCA_NATS_PORT:-4222}}"
-if [ "${ZATCA_DAEMON_ENABLED:-0}" = "1" ] ||
-   [ "${ZATCA_DAEMON_ENABLED:-0}" = "true" ] ||
-   [ "${ZATCA_DAEMON_ENABLED:-0}" = "yes" ]; then
-    : "${NATS_USER:?NATS_USER must be set in config.env}"
-    : "${NATS_PASSWORD:?NATS_PASSWORD must be set in config.env}"
-fi
 dokku config:set --no-restart "$BACKEND_APP" \
-    NATS_URL="$NATS_URL" \
-    NATS_USER="${NATS_USER:-}" \
-    NATS_PASSWORD="${NATS_PASSWORD:-}"
+    NATS_URL="$BACKEND_NATS_URL" \
+    "${BACKEND_NATS_CREDENTIALS[@]}"
 
 # ---- Set env vars ----
 
@@ -696,6 +697,16 @@ if [ -n "$FRONTEND_IMAGE" ]; then
     fi
 fi
 
+if [ "$DOKKU_HOST_GATEWAY_ADDED" = "true" ] && [ -z "$BACKEND_IMAGE" ] &&
+    { $RESTART || [ -n "$SCALE" ]; }; then
+    log "Rebuilding backend to apply the newly installed host-gateway option"
+    if ! dokku ps:rebuild "$BACKEND_APP"; then
+        error "Backend rebuild failed while applying the host-gateway option."
+        exit 1
+    fi
+    HOST_GATEWAY_REBUILT=true
+fi
+
 if [ -n "$SCALE" ]; then
     log "Scaling backend to $SCALE instances"
     dokku ps:scale "$BACKEND_APP" web="$SCALE"
@@ -703,7 +714,9 @@ fi
 
 if $RESTART; then
     log "Restarting tenant..."
-    dokku ps:restart "$BACKEND_APP"
+    if [ "$HOST_GATEWAY_REBUILT" != "true" ]; then
+        dokku ps:restart "$BACKEND_APP"
+    fi
     dokku ps:restart "$FRONTEND_APP"
 else
     # APP_DOMAIN/API_URL are runtime config, so apply them even when no

@@ -27,6 +27,16 @@ case "$1" in
             *"domains:report old-backend"*) echo old.example.com ;;
             *"config:get old-frontend APP_DOMAIN"*) echo old.example.com ;;
             *"config:get old-frontend API_URL"*) echo https://old.example.com/api ;;
+            *"docker-options:list old-backend --phase deploy"*)
+                if grep -Fq 'docker-options:add old-backend deploy' "$DOCKER_LOG"; then
+                    echo "--add-host=host.docker.internal:host-gateway"
+                fi
+                ;;
+            *"docker-options:list old-backend --phase run"*)
+                if grep -Fq 'docker-options:add old-backend run' "$DOCKER_LOG"; then
+                    echo "--add-host=host.docker.internal:host-gateway"
+                fi
+                ;;
             *" grep -q"*) exit 1 ;;
         esac
         ;;
@@ -73,4 +83,18 @@ pull_line="$(grep -n '^pull repo/ifritah-web:broken$' "$DOCKER_LOG" | head -1 | 
 [ "$routing_line" -lt "$pull_line" ] \
     || fail "routing repair ran after image pull"
 
-pass "tenant update repairs persisted routing"
+{
+    : > "$DOCKER_LOG"
+    bash scripts/update-tenant.sh old --restart --config "$tmpdir/config.env" >/dev/null
+}
+gateway_add_line="$(grep -n 'docker-options:add old-backend deploy' "$DOCKER_LOG" | head -1 | cut -d: -f1)"
+gateway_rebuild_line="$(grep -n 'dokku ps:rebuild old-backend' "$DOCKER_LOG" | head -1 | cut -d: -f1)"
+[ -n "$gateway_add_line" ] && [ -n "$gateway_rebuild_line" ] ||
+    fail "restart-only update did not install and apply a newly added host-gateway route"
+[ "$gateway_add_line" -lt "$gateway_rebuild_line" ] ||
+    fail "backend rebuild ran before host-gateway option installation"
+if grep -Fq 'dokku ps:restart old-backend' "$DOCKER_LOG"; then
+    fail "restart-only update restarted instead of rebuilding after adding a new Docker option"
+fi
+
+pass "tenant update repairs routing and rebuilds an existing backend to apply new host options"

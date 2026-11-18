@@ -102,14 +102,33 @@ Dokku host, not part of the Dokku web app. `config.env` is the shared source for
 the backend NATS client and daemon credentials: `NATS_URL`, `NATS_USER`, and
 `NATS_PASSWORD`. The deployment scripts apply these values to new and updated
 backend apps; the ZATCA Compose overlay passes the same credentials to the
-daemon.
+daemon. The documented defaults leave the daemon disabled and both credentials
+empty. Set both credentials when enabling the daemon; partial pairs are
+rejected before tenant changes. Leave `NATS_URL` empty to derive it from
+`NATS_PORT` in legacy mode or `ZATCA_NATS_PORT` when the daemon is enabled; if
+setting it explicitly with the daemon enabled, use the same published port.
 
-This deployment uses plaintext NATS only when
-`NATS_PRIVATE_NETWORK_ONLY=true`. Keep the daemon host port (default `4222`)
-reachable only from trusted private-network clients. After changing `config.env`,
-run the tenant update/restart and stack restart scripts so both the Dokku app
-and daemon receive the new values. The daemon retries tenant discovery; a
-schema failure in one tenant is reported without stopping other ready tenants.
+The Compose mapping publishes the NATS client port on all host addresses when
+no host IP is specified. `NATS_PRIVATE_NETWORK_ONLY=true` does not configure
+the host firewall. Before enabling the daemon, restrict the published port to
+authorized private clients, then set
+`NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED=true`. All backend tenants currently
+share one NATS user without subject-level tenant permissions; do not treat this
+as tenant isolation. Enabling the daemon also requires
+`NATS_SHARED_CREDENTIALS_ACKNOWLEDGED=true`, a non-empty
+`NATS_SHARED_CREDENTIALS_APPROVAL_ID`, and a future
+`NATS_SHARED_CREDENTIALS_EXPIRES=YYYY-MM-DD`. These settings gate startup; they
+do not verify the actual firewall configuration.
+
+Tenant create, backend update/restart/scale, and backend fleet deployment
+ensure and verify the host-gateway route before starting a backend container.
+If a restart/scale-only update adds the missing option, it rebuilds the backend
+so the new Docker option takes effect; a rebuild failure stops the update. The
+rollout also stops if Dokku cannot install or report the route. After changing
+`config.env`, use the tenant update/restart and daemon restart scripts so both
+the Dokku app and daemon receive the new values. The daemon retries tenant
+discovery; a schema failure in one tenant is reported without stopping other
+ready tenants.
 
 ## Server prerequisites
 

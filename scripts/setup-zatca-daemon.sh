@@ -72,6 +72,12 @@ esac
 : "${ZATCA_DB_PASSWORD:?ZATCA_DB_PASSWORD must be set in ${CONFIG_FILE}}"
 : "${ZATCA_ENCRYPT_KEY:?ZATCA_ENCRYPT_KEY must be set in ${CONFIG_FILE}}"
 : "${ZATCA_MONITOR_PASSWORD:?ZATCA_MONITOR_PASSWORD must be set in ${CONFIG_FILE}}"
+: "${NATS_USER:?NATS_USER must be set in ${CONFIG_FILE}}"
+: "${NATS_PASSWORD:?NATS_PASSWORD must be set in ${CONFIG_FILE}}"
+case "${NATS_PRIVATE_NETWORK_ONLY:-false}" in
+    1|true|yes) ;;
+    *) fail "NATS_PRIVATE_NETWORK_ONLY=true is required because this overlay runs NATS without TLS" ;;
+esac
 
 [[ "$HEALTH_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] && [ "$HEALTH_TIMEOUT_SECONDS" -gt 0 ] \
     || fail "--health-timeout must be a positive integer"

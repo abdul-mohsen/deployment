@@ -59,7 +59,7 @@ deployment_init_logging
 
 validate_database_identifier "${MYSQL_MASTER_DB:-zatca_master}" || exit 1
 validate_database_identifier "${DEPLOY_STATE_DB:-deployment_state}" || exit 1
-validate_nats_url "${NATS_URL:-nats://host.docker.internal:4222}" || exit 1
+validate_nats_url "${NATS_URL:-nats://host.docker.internal:${ZATCA_NATS_PORT:-4222}}" || exit 1
 
 if [ -z "$IMAGE" ]; then
     echo "Usage: $0 <image> [--type backend|frontend] [--tenant <name>] [--skip-canary]"
@@ -216,7 +216,15 @@ deploy_one() {
     fi
 
     local resolved_ref="${image%@*}@${BUILD_DIGEST}"
-    if ! dokku config:set --no-restart "$app" \
+    local -a nats_env=()
+    if [ "$APP_TYPE" = "backend" ]; then
+        nats_env=(
+            "NATS_URL=${NATS_URL:-nats://host.docker.internal:${ZATCA_NATS_PORT:-4222}}"
+            "NATS_USER=${NATS_USER:-}"
+            "NATS_PASSWORD=${NATS_PASSWORD:-}"
+        )
+    fi
+    if ! dokku config:set --no-restart "$app" "${nats_env[@]}" \
             APP_VERSION="$BUILD_VERSION" \
             APP_COMMIT="$BUILD_COMMIT" \
             APP_COMMIT_SHORT="$BUILD_COMMIT_SHORT" \

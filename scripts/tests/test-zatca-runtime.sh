@@ -17,6 +17,7 @@ echo "=== ZATCA runtime shell syntax ==="
 bash -n "$SETUP_SCRIPT" "$HEALTH_SCRIPT" "$RELOAD_SCRIPT" \
     scripts/create-tenant.sh scripts/remove-tenant.sh scripts/cleanup-broken-tenant.sh \
     scripts/restart-stack.sh scripts/setup-nats.sh scripts/deployctl.sh \
+    scripts/update-tenant.sh scripts/deploy-all.sh \
     || fail "changed deployment scripts do not pass shell syntax"
 pass "shell syntax"
 
@@ -41,6 +42,20 @@ grep -qF 'ENCRYPT_KEY: ${ZATCA_ENCRYPT_KEY:?ZATCA_ENCRYPT_KEY must be set}' "$CO
     || fail "daemon encryption key is not required"
 grep -qF 'MONITOR_PASS: ${ZATCA_MONITOR_PASSWORD:?ZATCA_MONITOR_PASSWORD must be set}' "$COMPOSE_FILE" \
     || fail "daemon monitor password is not required"
+grep -qF 'NATS_USER: "${NATS_USER:?NATS_USER must be set}"' "$COMPOSE_FILE" \
+    || fail "daemon NATS user is not required"
+grep -qF 'NATS_PASSWORD: "${NATS_PASSWORD:?NATS_PASSWORD must be set}"' "$COMPOSE_FILE" \
+    || fail "daemon NATS password is not required"
+grep -qF 'NATS_PRIVATE_NETWORK_ONLY: "${NATS_PRIVATE_NETWORK_ONLY:?NATS_PRIVATE_NETWORK_ONLY must be set}"' "$COMPOSE_FILE" \
+    || fail "daemon private-network mode is not configurable"
+grep -qF 'NATS_MONITOR_PRIVATE_NETWORK_ONLY: "${NATS_PRIVATE_NETWORK_ONLY:?NATS_PRIVATE_NETWORK_ONLY must be set}"' "$COMPOSE_FILE" \
+    || fail "monitor private-network mode is not configured"
+grep -qF ': "${NATS_USER:?NATS_USER must be set in ${CONFIG_FILE}}"' "$SETUP_SCRIPT" \
+    || fail "daemon setup does not require the shared NATS user"
+grep -qF ': "${NATS_PASSWORD:?NATS_PASSWORD must be set in ${CONFIG_FILE}}"' "$SETUP_SCRIPT" \
+    || fail "daemon setup does not require the shared NATS password"
+grep -qF 'NATS_PRIVATE_NETWORK_ONLY=true' "$SETUP_SCRIPT" \
+    || fail "daemon setup does not require private-network mode for plaintext NATS"
 grep -qF '"--nats-mode=embedded"' "$COMPOSE_FILE" \
     || fail "daemon NATS ownership mode is not explicit"
 grep -qF '"--nats-monitor=8222"' "$COMPOSE_FILE" || fail "daemon monitor flag is not consumed"
@@ -110,6 +125,22 @@ echo
 echo "=== configuration contract ==="
 grep -qF 'ZATCA_DAEMON_ENABLED=0' config.env.example \
     || fail "daemon opt-in is not documented in config example"
+grep -qF 'NATS_USER=zatca_daemon' config.env.example \
+    || fail "NATS user is not documented in config example"
+grep -qF 'NATS_PASSWORD=' config.env.example \
+    || fail "NATS password is not documented in config example"
+grep -qF 'NATS_PRIVATE_NETWORK_ONLY=true' config.env.example \
+    || fail "private NATS mode is not documented in config example"
+grep -qF 'NATS_URL=nats://host.docker.internal:4222' config.env.example \
+    || fail "backend NATS URL is not documented in config example"
+grep -qF 'NATS_USER="${NATS_USER:-}"' scripts/create-tenant.sh \
+    || fail "tenant creation does not pass NATS user to Dokku"
+grep -qF 'NATS_PASSWORD="${NATS_PASSWORD:-}"' scripts/create-tenant.sh \
+    || fail "tenant creation does not pass NATS password to Dokku"
+grep -qF 'NATS_USER="${NATS_USER:-}"' scripts/update-tenant.sh \
+    || fail "tenant updates do not pass NATS user to Dokku"
+grep -qF 'NATS_PASSWORD="${NATS_PASSWORD:-}"' scripts/update-tenant.sh \
+    || fail "tenant updates do not pass NATS password to Dokku"
 if grep -qF 'ZATCA_XML_ROOT' config.env.example; then
     fail "config example documents removed XML storage wiring"
 fi

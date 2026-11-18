@@ -538,7 +538,7 @@ if ! validate_tenant_env_overrides "${ENV_VARS[@]}"; then
 fi
 validate_database_identifier "${MYSQL_MASTER_DB:-zatca_master}" || exit 1
 validate_database_identifier "${DEPLOY_STATE_DB:-deployment_state}" || exit 1
-validate_nats_url "${NATS_URL:-nats://host.docker.internal:4222}" || exit 1
+validate_nats_url "${NATS_URL:-nats://host.docker.internal:${ZATCA_NATS_PORT:-4222}}" || exit 1
 
 if [ -z "$TENANT_NAME" ]; then
     echo "Usage: $0 <tenant-name> [--backend-image <image>] [--frontend-image <image>]"
@@ -564,6 +564,21 @@ if $ROUTING_ONLY; then
     log "Routing synchronized. No image deployment requested."
     exit 0
 fi
+
+# Keep the existing backend pointed at the daemon broker configured in the
+# same deployment config.env. The password is passed as a separate variable,
+# not embedded in NATS_URL.
+NATS_URL="${NATS_URL:-nats://host.docker.internal:${ZATCA_NATS_PORT:-4222}}"
+if [ "${ZATCA_DAEMON_ENABLED:-0}" = "1" ] ||
+   [ "${ZATCA_DAEMON_ENABLED:-0}" = "true" ] ||
+   [ "${ZATCA_DAEMON_ENABLED:-0}" = "yes" ]; then
+    : "${NATS_USER:?NATS_USER must be set in config.env}"
+    : "${NATS_PASSWORD:?NATS_PASSWORD must be set in config.env}"
+fi
+dokku config:set --no-restart "$BACKEND_APP" \
+    NATS_URL="$NATS_URL" \
+    NATS_USER="${NATS_USER:-}" \
+    NATS_PASSWORD="${NATS_PASSWORD:-}"
 
 # ---- Set env vars ----
 

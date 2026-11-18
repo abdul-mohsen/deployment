@@ -67,6 +67,10 @@ for assignment in \
     "OPENOBSERVE_TENANT_OTLP_TOKEN=telemetry-secret" \
     "OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic%20attacker" \
     "METRICS_TOKEN=telemetry-secret" \
+    "NATS_USER=tenant-overridden-user" \
+    "NATS_PASSWORD=tenant-overridden-password" \
+    "NATS_PRIVATE_NETWORK_ONLY=true" \
+    "ZATCA_NATS_USER=tenant-overridden-user" \
     "NATS_URL=nats://unapproved-host:4222"; do
     assert_rejected "$assignment"
 done

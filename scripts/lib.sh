@@ -214,7 +214,8 @@ validate_tenant_env_override() {
         APP_*|AUTO_BACKUP_BEFORE_REDEPLOY|AUTO_REDEPLOY_DISABLED|\
         BACKEND_IMAGE|BASE_DOMAIN|BASEURL|BACKUP_DIR|DASHBOARD_*|\
         DEPLOY_*|DEPLOY_ENV|DEV_TAG|DEV_TENANT|DOCKERHUB_*|\
-        IMAGE_PULL_POLICY|LOG_DIR|MSG_HOST|MSG_PORT|NATS_URL|NGINX_*|\
+        IMAGE_PULL_POLICY|LOG_DIR|MSG_HOST|MSG_PORT|NATS_PASSWORD|NATS_PRIVATE_NETWORK_ONLY|\
+        NATS_URL|NATS_USER|NGINX_*|\
         PORT|PUBLIC_PROTOCOL|PULL_TAG|SERVER_PORT|STORAGE_ROOT|\
         TENANT_APP_NETWORK|TENANT_ID|\
         TENANT_IMAGE_PULL_POLICY|TENANT_NAME_PREFIX|TENANT_NETWORK|\
@@ -230,7 +231,8 @@ validate_tenant_env_override() {
         # Migrations, tenant identity, and daemon transport are owned by deployment.
         MIGRATE_CMD|MIGRATION_*)
             reason="migration-control key" ;;
-        TENANT_KEY|TENANT_KEY_*|NATS_MODE|NATS_URL|MSG_HOST|MSG_PORT)
+        TENANT_KEY|TENANT_KEY_*|NATS_MODE|NATS_PASSWORD|NATS_PRIVATE_NETWORK_ONLY|\
+        NATS_URL|NATS_USER|ZATCA_NATS_*|MSG_HOST|MSG_PORT)
             reason="tenant identity or daemon transport key" ;;
 
         # Prevent a tenant override from changing Docker/Dokku execution.

@@ -516,7 +516,7 @@ if ! validate_tenant_env_overrides "${ENV_VARS[@]+"${ENV_VARS[@]}"}"; then
 fi
 validate_database_identifier "${MYSQL_MASTER_DB:-zatca_master}" || exit 1
 validate_database_identifier "${DEPLOY_STATE_DB:-deployment_state}" || exit 1
-validate_nats_url "${NATS_URL:-nats://host.docker.internal:4222}" || exit 1
+validate_nats_url "${NATS_URL:-nats://host.docker.internal:${ZATCA_NATS_PORT:-4222}}" || exit 1
 
 # ---- Validate ----
 if [ -z "$TENANT_NAME" ]; then
@@ -820,7 +820,9 @@ dokku config:set --no-restart "$BACKEND_APP" \
     TENANT_ID="$TENANT_NAME" \
     PORT="$BACKEND_PORT" \
     SERVER_PORT="$BACKEND_PORT" \
-    NATS_URL="${NATS_URL:-nats://host.docker.internal:4222}" \
+    NATS_URL="${NATS_URL:-nats://host.docker.internal:${ZATCA_NATS_PORT:-4222}}" \
+    NATS_USER="${NATS_USER:-}" \
+    NATS_PASSWORD="${NATS_PASSWORD:-}" \
     BASEURL="${BASEURL:-/api/v2}" \
     JWT_SECERT_KEY="${JWT_SECERT_KEY:-$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 48)}"
 

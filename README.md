@@ -95,6 +95,22 @@ templates/                  # COPY these into your backend / frontend repos
     .github/workflows/deploy.yml
 ```
 
+## ZATCA daemon and NATS
+
+The optional ZATCA daemon is a separate, long-running Compose container on the
+Dokku host, not part of the Dokku web app. `config.env` is the shared source for
+the backend NATS client and daemon credentials: `NATS_URL`, `NATS_USER`, and
+`NATS_PASSWORD`. The deployment scripts apply these values to new and updated
+backend apps; the ZATCA Compose overlay passes the same credentials to the
+daemon.
+
+This deployment uses plaintext NATS only when
+`NATS_PRIVATE_NETWORK_ONLY=true`. Keep the daemon host port (default `4222`)
+reachable only from trusted private-network clients. After changing `config.env`,
+run the tenant update/restart and stack restart scripts so both the Dokku app
+and daemon receive the new values. The daemon retries tenant discovery; a
+schema failure in one tenant is reported without stopping other ready tenants.
+
 ## Server prerequisites
 
 - Linux + Docker Engine

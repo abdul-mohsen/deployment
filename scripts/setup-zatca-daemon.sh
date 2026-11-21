@@ -15,6 +15,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/lib.sh"
 
 CONFIG_FILE="${CONFIG_FILE:-${REPO_DIR}/config.env}"
 HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-60}"
@@ -78,6 +79,7 @@ case "${NATS_PRIVATE_NETWORK_ONLY:-false}" in
     1|true|yes) ;;
     *) fail "NATS_PRIVATE_NETWORK_ONLY=true is required because this overlay runs NATS without TLS" ;;
 esac
+validate_zatca_daemon_security_gates || exit 1
 
 [[ "$HEALTH_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] && [ "$HEALTH_TIMEOUT_SECONDS" -gt 0 ] \
     || fail "--health-timeout must be a positive integer"

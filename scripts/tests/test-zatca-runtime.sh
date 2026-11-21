@@ -17,7 +17,7 @@ echo "=== ZATCA runtime shell syntax ==="
 bash -n "$SETUP_SCRIPT" "$HEALTH_SCRIPT" "$RELOAD_SCRIPT" \
     scripts/create-tenant.sh scripts/remove-tenant.sh scripts/cleanup-broken-tenant.sh \
     scripts/restart-stack.sh scripts/setup-nats.sh scripts/deployctl.sh \
-    scripts/update-tenant.sh scripts/deploy-all.sh \
+    scripts/update-tenant.sh scripts/deploy-all.sh scripts/tests/test-dokku-host-gateway.sh \
     || fail "changed deployment scripts do not pass shell syntax"
 pass "shell syntax"
 
@@ -48,6 +48,14 @@ grep -qF 'NATS_PASSWORD: "${NATS_PASSWORD:?NATS_PASSWORD must be set}"' "$COMPOS
     || fail "daemon NATS password is not required"
 grep -qF 'NATS_PRIVATE_NETWORK_ONLY: "${NATS_PRIVATE_NETWORK_ONLY:?NATS_PRIVATE_NETWORK_ONLY must be set}"' "$COMPOSE_FILE" \
     || fail "daemon private-network mode is not configurable"
+grep -qF 'NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED: "${NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED:-false}"' "$COMPOSE_FILE" \
+    || fail "daemon does not receive the private-firewall confirmation"
+grep -qF 'NATS_SHARED_CREDENTIALS_ACKNOWLEDGED: "${NATS_SHARED_CREDENTIALS_ACKNOWLEDGED:-false}"' "$COMPOSE_FILE" \
+    || fail "daemon does not receive the shared-credential acknowledgment"
+grep -qF 'NATS_SHARED_CREDENTIALS_APPROVAL_ID: "${NATS_SHARED_CREDENTIALS_APPROVAL_ID:-}"' "$COMPOSE_FILE" \
+    || fail "daemon does not receive the shared-credential approval reference"
+grep -qF 'NATS_SHARED_CREDENTIALS_EXPIRES: "${NATS_SHARED_CREDENTIALS_EXPIRES:-}"' "$COMPOSE_FILE" \
+    || fail "daemon does not receive the shared-credential approval expiry"
 grep -qF 'NATS_MONITOR_PRIVATE_NETWORK_ONLY: "${NATS_PRIVATE_NETWORK_ONLY:?NATS_PRIVATE_NETWORK_ONLY must be set}"' "$COMPOSE_FILE" \
     || fail "monitor private-network mode is not configured"
 grep -qF ': "${NATS_USER:?NATS_USER must be set in ${CONFIG_FILE}}"' "$SETUP_SCRIPT" \
@@ -56,6 +64,8 @@ grep -qF ': "${NATS_PASSWORD:?NATS_PASSWORD must be set in ${CONFIG_FILE}}"' "$S
     || fail "daemon setup does not require the shared NATS password"
 grep -qF 'NATS_PRIVATE_NETWORK_ONLY=true' "$SETUP_SCRIPT" \
     || fail "daemon setup does not require private-network mode for plaintext NATS"
+grep -qF 'validate_zatca_daemon_security_gates' "$SETUP_SCRIPT" \
+    || fail "daemon setup does not enforce the trust/firewall approval gates"
 grep -qF '"--nats-mode=embedded"' "$COMPOSE_FILE" \
     || fail "daemon NATS ownership mode is not explicit"
 grep -qF '"--nats-monitor=8222"' "$COMPOSE_FILE" || fail "daemon monitor flag is not consumed"
@@ -125,22 +135,143 @@ echo
 echo "=== configuration contract ==="
 grep -qF 'ZATCA_DAEMON_ENABLED=0' config.env.example \
     || fail "daemon opt-in is not documented in config example"
-grep -qF 'NATS_USER=zatca_daemon' config.env.example \
-    || fail "NATS user is not documented in config example"
-grep -qF 'NATS_PASSWORD=' config.env.example \
-    || fail "NATS password is not documented in config example"
+(
+    set -a
+    # shellcheck disable=SC1091
+    source config.env.example
+    set +a
+    [ "${ZATCA_DAEMON_ENABLED:-}" = "0" ] \
+        || fail "documented configuration does not keep the daemon disabled"
+    [ -z "${NATS_USER:-}" ] && [ -z "${NATS_PASSWORD:-}" ] \
+        || fail "documented defaults must not pass a partial NATS credential pair"
+)
+pass "documented defaults keep both NATS credentials empty while the daemon is disabled"
 grep -qF 'NATS_PRIVATE_NETWORK_ONLY=true' config.env.example \
     || fail "private NATS mode is not documented in config example"
-grep -qF 'NATS_URL=nats://host.docker.internal:4222' config.env.example \
-    || fail "backend NATS URL is not documented in config example"
-grep -qF 'NATS_USER="${NATS_USER:-}"' scripts/create-tenant.sh \
-    || fail "tenant creation does not pass NATS user to Dokku"
-grep -qF 'NATS_PASSWORD="${NATS_PASSWORD:-}"' scripts/create-tenant.sh \
-    || fail "tenant creation does not pass NATS password to Dokku"
-grep -qF 'NATS_USER="${NATS_USER:-}"' scripts/update-tenant.sh \
-    || fail "tenant updates do not pass NATS user to Dokku"
-grep -qF 'NATS_PASSWORD="${NATS_PASSWORD:-}"' scripts/update-tenant.sh \
-    || fail "tenant updates do not pass NATS password to Dokku"
+grep -qF 'NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED=false' config.env.example \
+    || fail "private-network firewall gate is not closed by default"
+grep -qF 'NATS_SHARED_CREDENTIALS_ACKNOWLEDGED=false' config.env.example \
+    || fail "shared-credential approval gate is not closed by default"
+grep -qF 'NATS_SHARED_CREDENTIALS_APPROVAL_ID=' config.env.example \
+    || fail "shared-credential approval reference is not documented"
+grep -qF 'NATS_SHARED_CREDENTIALS_EXPIRES=' config.env.example \
+    || fail "shared-credential approval expiry is not documented"
+grep -qFx 'NATS_URL=' config.env.example \
+    || fail "backend NATS URL should be derived from the published port by default"
+grep -qF 'NATS_PORT=4222' config.env.example \
+    || fail "legacy NATS port is not documented"
+for script in scripts/create-tenant.sh scripts/update-tenant.sh scripts/deploy-all.sh; do
+    grep -qF 'prepare_backend_nats_credentials' "$script" \
+        || fail "$script does not validate NATS credentials before rollout"
+    grep -qF 'BACKEND_NATS_CREDENTIALS' "$script" \
+        || fail "$script does not use the prepared NATS credential pair"
+    grep -qF 'ensure_dokku_host_gateway' "$script" \
+        || fail "$script does not ensure the backend host-gateway route"
+done
+echo
+echo "=== backend NATS credential pair validation ==="
+source scripts/lib.sh
+NATS_USER=""
+NATS_PASSWORD=""
+ZATCA_DAEMON_ENABLED=0
+if ! prepare_backend_nats_credentials; then
+    fail "empty credentials should be accepted while the daemon is disabled"
+fi
+[ "${BACKEND_NATS_CREDENTIALS[0]}" = "NATS_USER=" ] &&
+    [ "${BACKEND_NATS_CREDENTIALS[1]}" = "NATS_PASSWORD=" ] \
+    || fail "disabled daemon did not prepare an empty credential pair"
+
+NATS_USER=zatca_daemon
+NATS_PASSWORD=""
+if prepare_backend_nats_credentials; then
+    fail "partial credentials should be rejected while the daemon is disabled"
+fi
+
+NATS_USER=""
+NATS_PASSWORD=contract-password
+ZATCA_DAEMON_ENABLED=1
+if prepare_backend_nats_credentials; then
+    fail "partial credentials should be rejected while the daemon is enabled"
+fi
+
+NATS_USER=""
+NATS_PASSWORD=""
+ZATCA_DAEMON_ENABLED=1
+if prepare_backend_nats_credentials; then
+    fail "enabled daemon should require a complete credential pair"
+fi
+
+NATS_USER=zatca_daemon
+NATS_PASSWORD=contract-password
+NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED=false
+NATS_SHARED_CREDENTIALS_ACKNOWLEDGED=true
+NATS_SHARED_CREDENTIALS_APPROVAL_ID=TEST-123
+NATS_SHARED_CREDENTIALS_EXPIRES=2099-12-31
+if prepare_backend_nats_credentials; then
+    fail "daemon-enabled configuration without firewall confirmation was accepted"
+fi
+
+NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED=true
+NATS_SHARED_CREDENTIALS_ACKNOWLEDGED=false
+if prepare_backend_nats_credentials; then
+    fail "daemon-enabled configuration without trust acknowledgment was accepted"
+fi
+
+NATS_SHARED_CREDENTIALS_ACKNOWLEDGED=true
+NATS_SHARED_CREDENTIALS_APPROVAL_ID=""
+if prepare_backend_nats_credentials; then
+    fail "daemon-enabled configuration without approval reference was accepted"
+fi
+
+NATS_SHARED_CREDENTIALS_APPROVAL_ID=TEST-123
+NATS_SHARED_CREDENTIALS_EXPIRES=2000-01-01
+if prepare_backend_nats_credentials; then
+    fail "daemon-enabled configuration with expired approval was accepted"
+fi
+
+NATS_SHARED_CREDENTIALS_EXPIRES=2099-12-31
+if ! prepare_backend_nats_credentials; then
+    fail "complete credentials and approved security gates should be accepted when the daemon is enabled"
+fi
+[ "${BACKEND_NATS_CREDENTIALS[0]}" = "NATS_USER=zatca_daemon" ] &&
+    [ "${BACKEND_NATS_CREDENTIALS[1]}" = "NATS_PASSWORD=contract-password" ] \
+    || fail "complete credentials were not prepared as a pair"
+pass "credential pairing is validated without logging values"
+
+echo
+echo "=== backend NATS URL and published-port contract ==="
+NATS_URL=""
+ZATCA_NATS_PORT=4333
+ZATCA_DAEMON_ENABLED=1
+if ! prepare_backend_nats_url; then
+    fail "an omitted NATS_URL should derive from ZATCA_NATS_PORT"
+fi
+[ "$BACKEND_NATS_URL" = "nats://host.docker.internal:4333" ] \
+    || fail "derived backend NATS URL does not use the published port"
+
+NATS_URL=nats://host.docker.internal:4222
+if prepare_backend_nats_url; then
+    fail "explicit NATS_URL port mismatch was accepted with the daemon enabled"
+fi
+
+NATS_URL=nats://external-nats:5222
+ZATCA_DAEMON_ENABLED=0
+if ! prepare_backend_nats_url; then
+    fail "explicit external NATS URL should remain valid while the daemon is disabled"
+fi
+[ "$BACKEND_NATS_URL" = "nats://external-nats:5222" ] \
+    || fail "explicit external NATS URL was changed"
+
+NATS_URL=""
+NATS_PORT=4555
+ZATCA_NATS_PORT=4333
+if ! prepare_backend_nats_url; then
+    fail "legacy NATS mode should derive the URL from NATS_PORT"
+fi
+[ "$BACKEND_NATS_URL" = "nats://host.docker.internal:4555" ] \
+    || fail "legacy NATS URL did not use NATS_PORT"
+pass "backend NATS URL stays consistent with the daemon's published port"
+
 if grep -qF 'ZATCA_XML_ROOT' config.env.example; then
     fail "config example documents removed XML storage wiring"
 fi

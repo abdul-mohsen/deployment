@@ -3,15 +3,15 @@ set -euo pipefail
 umask 077
 
 usage() {
-    echo "Usage: bash scripts/generate-zatca-secrets.sh [env-file]" >&2
+    echo "Usage: bash scripts/generate-zatca-secrets.sh" >&2
     exit 2
 }
 
-if (($# > 1)); then
+if (($# > 0)); then
     usage
 fi
 
-env_file="${1:-.env}"
+env_file=".env"
 
 if ! command -v openssl >/dev/null 2>&1; then
     echo "ERROR: openssl is required to generate secrets." >&2

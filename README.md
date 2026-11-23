@@ -270,10 +270,9 @@ sudo ./scripts/deployctl.sh setup dev-tenant        # creates the one dev tenant
 
 ## ZATCA secret generation
 
-For a local `.env`, run `bash scripts/generate-zatca-secrets.sh` from the
-repository root. The helper also accepts a target path; the server's deployment
-configuration is `config.env`, so use
-`sudo bash scripts/generate-zatca-secrets.sh config.env` there.
+From the repository root, run `bash scripts/generate-zatca-secrets.sh` to
+create or fill `.env`. The script only operates on `.env` in the current
+directory, rejects target-path arguments, and never modifies `config.env`.
 
 The script generates `ZATCA_DB_PASSWORD`, `NATS_PASSWORD`,
 `ZATCA_ENCRYPT_KEY`, and `ZATCA_MONITOR_PASSWORD` without printing their

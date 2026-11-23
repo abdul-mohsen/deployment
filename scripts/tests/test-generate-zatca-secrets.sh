@@ -42,7 +42,9 @@ pass "generated all four secrets without printing their values"
 
 echo
 echo "=== existing values and unrelated entries ==="
-existing_env="$tmpdir/existing.env"
+existing_dir="$tmpdir/existing"
+mkdir -p "$existing_dir"
+existing_env="$existing_dir/.env"
 cat > "$existing_env" <<'EOF'
 # keep this comment
 KEEP_ME=retain-this-line
@@ -52,7 +54,10 @@ ZATCA_ENCRYPT_KEY=existing-key-placeholder
 ZATCA_MONITOR_PASSWORD=""
 EOF
 chmod 644 "$existing_env"
-bash "$script" "$existing_env" >"$output"
+(
+    cd "$existing_dir"
+    bash "$REPO_DIR/$script" >"$output"
+)
 
 grep -qxF '# keep this comment' "$existing_env" || fail "comment was not preserved"
 grep -qxF 'KEEP_ME=retain-this-line' "$existing_env" || fail "unrelated setting was not preserved"
@@ -68,17 +73,31 @@ grep -Eq '^ZATCA_MONITOR_PASSWORD=[[:xdigit:]]{64}$' "$existing_env" \
     || fail "existing env file permissions were not tightened to 600"
 
 cp "$existing_env" "$tmpdir/before-rerun"
-bash "$script" "$existing_env" >"$output"
+(
+    cd "$existing_dir"
+    bash "$REPO_DIR/$script" >"$output"
+)
 cmp -s "$tmpdir/before-rerun" "$existing_env" \
     || fail "rerunning changed already-set values or file contents"
 pass "empty values filled, configured values preserved, reruns do not rotate"
 
 echo
+echo "=== alternate target rejection ==="
+config_target="$tmpdir/config.env"
+if bash "$script" "$config_target" >"$output" 2>&1; then
+    fail "alternate target path was accepted"
+fi
+[[ ! -e "$config_target" ]] || fail "config.env target was created"
+pass "alternate target paths are rejected without creating config.env"
+
+echo
 echo "=== ambiguous input rejection ==="
-duplicate_env="$tmpdir/duplicate.env"
+duplicate_dir="$tmpdir/duplicate"
+mkdir -p "$duplicate_dir"
+duplicate_env="$duplicate_dir/.env"
 printf 'ZATCA_DB_PASSWORD=first-sentinel\nZATCA_DB_PASSWORD=second-sentinel\n' > "$duplicate_env"
 cp "$duplicate_env" "$tmpdir/duplicate-before"
-if bash "$script" "$duplicate_env" >"$output" 2>&1; then
+if (cd "$duplicate_dir" && bash "$REPO_DIR/$script" >"$output" 2>&1); then
     fail "duplicate secret assignments were accepted"
 fi
 cmp -s "$tmpdir/duplicate-before" "$duplicate_env" \
@@ -90,11 +109,13 @@ pass "duplicate secret assignments are rejected without modifying the file"
 
 echo
 echo "=== symlink rejection ==="
+symlink_dir="$tmpdir/symlink"
+mkdir -p "$symlink_dir"
 target_env="$tmpdir/target.env"
-link_env="$tmpdir/link.env"
+link_env="$symlink_dir/.env"
 printf 'KEEP_ME=unchanged\n' > "$target_env"
 ln -s "$target_env" "$link_env"
-if bash "$script" "$link_env" >"$output" 2>&1; then
+if (cd "$symlink_dir" && bash "$REPO_DIR/$script" >"$output" 2>&1); then
     fail "symlink env target was accepted"
 fi
 grep -qxF 'KEEP_ME=unchanged' "$target_env" || fail "symlink target was changed"

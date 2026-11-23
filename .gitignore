@@ -17,3 +17,4 @@ dashboard/observability/.env
 dashboard/observability/openobserve.env
 dashboard/observability/grafana/provisioning/alerting/contact-points.yml
 dashboard/observability/grafana/provisioning/alerting/policies.yml
+.env

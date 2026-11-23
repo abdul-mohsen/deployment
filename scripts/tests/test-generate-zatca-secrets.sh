@@ -83,12 +83,12 @@ pass "empty values filled, configured values preserved, reruns do not rotate"
 
 echo
 echo "=== alternate target rejection ==="
-config_target="$tmpdir/config.env"
-if bash "$script" "$config_target" >"$output" 2>&1; then
+alternate_target="$tmpdir/alternate.env"
+if bash "$script" "$alternate_target" >"$output" 2>&1; then
     fail "alternate target path was accepted"
 fi
-[[ ! -e "$config_target" ]] || fail "config.env target was created"
-pass "alternate target paths are rejected without creating config.env"
+[[ ! -e "$alternate_target" ]] || fail "alternate target was created"
+pass "alternate target paths are rejected without creating the target file"
 
 echo
 echo "=== ambiguous input rejection ==="

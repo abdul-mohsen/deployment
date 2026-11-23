@@ -1,6 +1,7 @@
 config.env
 config.*.env
 !config.env.example
+.env
 install.env
 !install.env.example
 swarm/config.env

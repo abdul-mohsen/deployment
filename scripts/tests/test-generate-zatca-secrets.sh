@@ -48,7 +48,7 @@ existing_env="$existing_dir/.env"
 cat > "$existing_env" <<'EOF'
 # keep this comment
 KEEP_ME=retain-this-line
-export ZATCA_DB_PASSWORD=
+export ZATCA_DB_PASSWORD= # intentionally empty
 NATS_PASSWORD=already-configured-sentinel
 ZATCA_ENCRYPT_KEY=existing-key-placeholder
 ZATCA_MONITOR_PASSWORD=""
@@ -80,6 +80,20 @@ cp "$existing_env" "$tmpdir/before-rerun"
 cmp -s "$tmpdir/before-rerun" "$existing_env" \
     || fail "rerunning changed already-set values or file contents"
 pass "empty values filled, configured values preserved, reruns do not rotate"
+
+echo
+echo "=== hash-prefixed non-empty value ==="
+hash_dir="$tmpdir/hash-value"
+mkdir -p "$hash_dir"
+hash_env="$hash_dir/.env"
+printf 'ZATCA_DB_PASSWORD=#preserve-this-sentinel\n' > "$hash_env"
+(
+    cd "$hash_dir"
+    bash "$REPO_DIR/$script" >"$output"
+)
+grep -qxF 'ZATCA_DB_PASSWORD=#preserve-this-sentinel' "$hash_env" \
+    || fail "hash-prefixed non-empty value was changed"
+pass "hash-prefixed non-empty assignments are preserved"
 
 echo
 echo "=== alternate target rejection ==="

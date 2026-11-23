@@ -61,16 +61,19 @@ for key in "${keys[@]}"; do
 done
 
 is_empty_value() {
-    local value=$1
+    local raw_value=$1
+    local value=$raw_value
 
     value="${value#"${value%%[![:space:]]*}"}"
     value="${value%"${value##*[![:space:]]}"}"
 
-    if [[ -z "$value" || "$value" == \#* || "$value" == '""' || "$value" == "''" ]]; then
+    if [[ -z "$value" || "$value" == '""' || "$value" == "''" ]]; then
         return 0
     fi
 
-    [[ "$value" =~ ^\"\"[[:space:]]+\#.*$ || "$value" =~ ^\'\'[[:space:]]+\#.*$ ]]
+    [[ "$raw_value" =~ ^[[:space:]]+\#.*$ \
+        || "$value" =~ ^\"\"[[:space:]]+\#.*$ \
+        || "$value" =~ ^\'\'[[:space:]]+\#.*$ ]]
 }
 
 generate_value() {

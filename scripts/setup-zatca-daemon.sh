@@ -9,6 +9,8 @@
 #
 # Usage:
 #   bash scripts/setup-zatca-daemon.sh --config /opt/deployment/config.env
+#   bash scripts/setup-zatca-daemon.sh --config /opt/deployment/config.env --image zatca-daemon:refresh --recreate
+#   bash scripts/setup-zatca-daemon.sh --config /opt/deployment/config.env --validate-only
 # =============================================================================
 
 set -euo pipefail
@@ -20,6 +22,8 @@ source "${SCRIPT_DIR}/lib.sh"
 CONFIG_FILE="${CONFIG_FILE:-${REPO_DIR}/config.env}"
 HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-60}"
 RECREATE=false
+VALIDATE_ONLY=false
+IMAGE_OVERRIDE=""
 
 error() { echo "[x] $*" >&2; }
 info()  { echo "[i] $*"; }
@@ -37,12 +41,22 @@ while [[ $# -gt 0 ]]; do
             HEALTH_TIMEOUT_SECONDS="$2"
             shift 2
             ;;
+        --image)
+            [ "$#" -ge 2 ] || fail "--image requires a value"
+            [ -n "$2" ] || fail "--image must not be empty"
+            IMAGE_OVERRIDE="$2"
+            shift 2
+            ;;
         --recreate|--force-recreate)
             RECREATE=true
             shift
             ;;
+        --validate-only)
+            VALIDATE_ONLY=true
+            shift
+            ;;
         -h|--help)
-            sed -n '1,24p' "$0"
+            sed -n '1,28p' "$0"
             exit 0
             ;;
         *)
@@ -58,11 +72,16 @@ command -v docker >/dev/null 2>&1 || fail "docker is required"
 set -a
 source "$CONFIG_FILE"
 set +a
+if [ -n "$IMAGE_OVERRIDE" ]; then
+    ZATCA_DAEMON_IMAGE="$IMAGE_OVERRIDE"
+    export ZATCA_DAEMON_IMAGE
+fi
 
 case "${ZATCA_DAEMON_ENABLED:-0}" in
     1|true|yes)
         ;;
     *)
+        $VALIDATE_ONLY && fail "ZATCA daemon must be enabled for validation-only operation"
         info "ZATCA daemon is disabled; nothing to start."
         exit 0
         ;;
@@ -90,6 +109,16 @@ NATS_PORT="${ZATCA_NATS_PORT:-4222}"
 NATS_ROOT="${ZATCA_NATS_DATA_ROOT:-/opt/zatca-nats}"
 
 [ -f "$COMPOSE_FILE" ] || fail "Compose file not found: $COMPOSE_FILE"
+if ! docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" \
+    --profile zatca config --quiet; then
+    fail "Docker Compose config validation failed for ${COMPOSE_FILE}"
+fi
+
+if $VALIDATE_ONLY; then
+    info "ZATCA daemon configuration is valid."
+    exit 0
+fi
+
 mkdir -p "$NATS_ROOT"
 
 # A legacy standalone NATS container and the daemon's embedded NATS must never

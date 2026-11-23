@@ -43,6 +43,7 @@ Areas:
   fleet auto-pull [flags]            Run one auto-pull cycle
 
   stack restart [flags]              Restart Dokku/dashboard stack
+  stack rebuild-zatca-daemon [flags] Rebuild and recreate the ZATCA daemon image
   setup all|dokku|nats|dev-tenant    Bootstrap server pieces
   db verify                          Check MySQL connectivity
   db migrate-master [flags]          Apply the ZATCA-owned master Goose artifact
@@ -72,7 +73,7 @@ need_arg() {
 
 script_accepts_config() {
     case "$1" in
-        auto-pull.sh|backup-tenant.sh|cleanup-broken-tenant.sh|create-tenant.sh|deploy-all.sh|health-zatca-daemon.sh|init-tenant-db.sh|list-tenants.sh|manage-backups.sh|migrate-zatca-master.sh|migration-status.sh|remove-tenant.sh|reload-zatca-daemon.sh|restore-tenant.sh|restart-stack.sh|rollback-tenant.sh|set-tenant-image.sh|setup-dev-tenant.sh|setup-nats.sh|setup-zatca-daemon.sh|setup.sh|status.sh|update-tenant.sh|webhook-server.sh)
+        auto-pull.sh|backup-tenant.sh|cleanup-broken-tenant.sh|create-tenant.sh|deploy-all.sh|health-zatca-daemon.sh|init-tenant-db.sh|list-tenants.sh|manage-backups.sh|migrate-zatca-master.sh|migration-status.sh|rebuild-zatca-daemon.sh|remove-tenant.sh|reload-zatca-daemon.sh|restore-tenant.sh|restart-stack.sh|rollback-tenant.sh|set-tenant-image.sh|setup-dev-tenant.sh|setup-nats.sh|setup-zatca-daemon.sh|setup.sh|status.sh|update-tenant.sh|webhook-server.sh)
             return 0
             ;;
         *)
@@ -241,6 +242,7 @@ stack_cmd() {
     case "$verb" in
         status) run_script status.sh "$@" ;;
         restart) run_script restart-stack.sh "$@" ;;
+        rebuild-zatca-daemon|refresh-zatca-daemon) run_script rebuild-zatca-daemon.sh "$@" ;;
         *) die "unknown stack command: $verb" ;;
     esac
 }

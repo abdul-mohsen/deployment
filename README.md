@@ -130,6 +130,43 @@ the Dokku app and daemon receive the new values. The daemon retries tenant
 discovery; a schema failure in one tenant is reported without stopping other
 ready tenants.
 
+### Refreshing the daemon image
+
+`stack restart` restarts the platform and runs daemon setup, but it does not
+build daemon source or force-recreate the daemon from a source checkout. To
+deploy a daemon revision, run the explicit refresh on the deployment host with
+a clean daemon checkout at the intended full commit SHA and a private SDK
+context containing `Apps/fatoora`:
+
+```bash
+CONFIG=/opt/deployment/config.env
+DAEMON_SOURCE=/opt/src/zatca-daemon
+SDK_CONTEXT=/opt/private/zatca-sdk
+REVISION="$(git -C "$DAEMON_SOURCE" rev-parse HEAD)"
+
+sudo ./scripts/deployctl.sh --config "$CONFIG" stack rebuild-zatca-daemon \
+  --source-dir "$DAEMON_SOURCE" \
+  --revision "$REVISION" \
+  --sdk-context "$SDK_CONTEXT"
+```
+
+The command requires Docker Engine, Docker Compose V2, BuildKit, Git, and
+`flock`. It validates the protected daemon configuration before building,
+rejects a dirty checkout or a SHA that does not match `HEAD`, builds without
+layer cache while pulling current base images, verifies the image's revision
+label, and recreates the daemon through the existing container and queue-health
+checks. It does not edit `config.env`, run tenant database migrations or issue
+tenant database writes directly, or push an image to a registry. Once started,
+the daemon resumes its normal queue processing.
+
+After verification, the new image is assigned to the configured local image
+alias. Compose uses `pull_policy: missing`, so later stack operations use that
+local image while the alias is present. If replacement or readiness fails, the
+command exits nonzero, restores the alias to the prior image when available,
+retains a rollback tag, and prints the exact manual recovery command. If no
+prior image exists, there is no rollback target; review the reported state
+before taking further action.
+
 ## Server prerequisites
 
 - Linux + Docker Engine

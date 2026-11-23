@@ -12,6 +12,7 @@ services:
   zatca-daemon:
     profiles: ["zatca"]
     image: ${ZATCA_DAEMON_IMAGE:?ZATCA_DAEMON_IMAGE must be set}
+    pull_policy: missing
     container_name: ${ZATCA_DAEMON_CONTAINER:-zatca-daemon}
     restart: unless-stopped
     stop_grace_period: 30s

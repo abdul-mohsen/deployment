@@ -27,6 +27,8 @@ echo "=== daemon Compose contract ==="
 grep -qF 'profiles: ["zatca"]' "$COMPOSE_FILE" || fail "daemon overlay is not opt-in"
 grep -qF 'image: ${ZATCA_DAEMON_IMAGE:?ZATCA_DAEMON_IMAGE must be set}' "$COMPOSE_FILE" \
     || fail "daemon image is not required"
+grep -qF 'pull_policy: missing' "$COMPOSE_FILE" \
+    || fail "daemon Compose service does not prefer the refreshed local image"
 grep -qF 'restart: unless-stopped' "$COMPOSE_FILE" || fail "restart recovery is not configured"
 grep -qF '"${ZATCA_NATS_PORT:-4222}:4222"' "$COMPOSE_FILE" \
     || fail "daemon NATS client port is not published"

@@ -131,6 +131,16 @@ if docker ps --format '{{.Names}}' | grep -qx "${NATS_CONTAINER_NAME:-nats}"; th
     fi
 fi
 
+if $RECREATE; then
+    existing_container_names="$(docker ps -a --format '{{.Names}}')" ||
+        fail "Could not inspect existing ZATCA daemon containers"
+    if printf '%s\n' "$existing_container_names" | grep -qxF "$CONTAINER"; then
+        info "Removing existing ZATCA daemon container ${CONTAINER} before recreation..."
+        docker rm --force "$CONTAINER" ||
+            fail "Could not remove existing ZATCA daemon container ${CONTAINER}"
+    fi
+fi
+
 compose_args=(--env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" --profile zatca up -d)
 $RECREATE && compose_args+=(--force-recreate)
 compose_args+=(zatca-daemon)

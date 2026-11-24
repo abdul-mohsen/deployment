@@ -23,6 +23,7 @@ DOCKER_LOG="$TEST_DIR/docker.log"
 BUILD_TAGS="$TEST_DIR/build-tags"
 UP_IMAGES="$TEST_DIR/up-images"
 OUTPUT="$TEST_DIR/output"
+CONTAINER_NAME="zatca-daemon-refresh-test"
 mkdir -p "$BIN" "$SOURCE_DIR" "$SDK_CONTEXT/Apps"
 touch "$SDK_CONTEXT/Apps/fatoora"
 
@@ -44,7 +45,7 @@ write_config() {
     cat > "$path" <<EOF
 ZATCA_DAEMON_ENABLED=1
 ZATCA_DAEMON_IMAGE=${CONFIG_IMAGE}
-ZATCA_DAEMON_CONTAINER=zatca-daemon
+ZATCA_DAEMON_CONTAINER=${CONTAINER_NAME}
 ZATCA_NATS_DATA_ROOT=${TEST_DIR}/nats
 ZATCA_DB_USER=test-user
 ZATCA_DB_PASSWORD=TEST_SECRET_DB_PASSWORD
@@ -81,6 +82,7 @@ case "${1:-}" in
                 ;;
             *" ps -a -q zatca-daemon "*)
                 [ "${CONTAINER_PRESENT:-1}" = "1" ] &&
+                    [ "${COMPOSE_CONTAINER_VISIBLE:-1}" = "1" ] &&
                     printf '%s\n' "container-id"
                 ;;
             *" up -d "*)
@@ -164,7 +166,20 @@ case "${1:-}" in
         esac
         exit 0
         ;;
-    ps|logs)
+    rm)
+        if [ "${REMOVE_CONTAINER_FAIL:-0}" = "1" ]; then
+            exit 13
+        fi
+        ;;
+    ps)
+        if [ "${CONTAINER_LIST_FAIL:-0}" = "1" ] && [ "${2:-}" = "-a" ]; then
+            exit 14
+        fi
+        if [ "${2:-}" = "-a" ] && [ "${CONTAINER_PRESENT:-1}" = "1" ]; then
+            printf '%s\n' "${CONFIGURED_CONTAINER_NAME:-zatca-daemon}"
+        fi
+        ;;
+    logs)
         exit 0
         ;;
     *)
@@ -187,13 +202,14 @@ STUB
 chmod +x "$BIN/docker" "$BIN/curl"
 export PATH="$BIN:$PATH"
 export DOCKER_LOG BUILD_TAGS UP_IMAGES EXPECTED_REVISION="$REVISION" DEPLOY_STATE_DIR="$STATE_DIR"
+export CONFIGURED_CONTAINER_NAME="$CONTAINER_NAME"
 export CONFIG_IMAGE
 
 reset_mocks() {
     : > "$DOCKER_LOG"
     : > "$BUILD_TAGS"
     : > "$UP_IMAGES"
-    unset CONFIG_FAIL BUILD_FAIL RESTORE_TAG_FAIL
+    unset CONFIG_FAIL BUILD_FAIL RESTORE_TAG_FAIL REMOVE_CONTAINER_FAIL CONTAINER_LIST_FAIL COMPOSE_CONTAINER_VISIBLE
     export CONTAINER_PRESENT=1 OLD_IMAGE_AVAILABLE=1 HEALTH_STATUS=healthy
     export LABEL_REVISION="$REVISION"
 }
@@ -208,6 +224,16 @@ run_refresh() {
         --health-timeout 2
 }
 
+run_setup_recreate() {
+    local config="$1"
+    bash "$SETUP_SCRIPT" --config "$config" --recreate --health-timeout 2
+}
+
+run_setup_without_recreate() {
+    local config="$1"
+    bash "$SETUP_SCRIPT" --config "$config" --health-timeout 2
+}
+
 reset_mocks
 if ! run_refresh "$CONFIG" >"$OUTPUT" 2>&1; then
     cat "$OUTPUT" >&2
@@ -217,6 +243,15 @@ contains "$DOCKER_LOG" 'build --no-cache --pull' "build did not disable cache an
 contains "$DOCKER_LOG" "--build-context zatca-sdk=$SDK_CONTEXT" "private SDK build context was not used"
 contains "$DOCKER_LOG" "org.opencontainers.image.revision=$REVISION" "build did not label the exact source SHA"
 contains "$DOCKER_LOG" '--force-recreate' "daemon was not explicitly recreated"
+contains "$DOCKER_LOG" "rm --force $CONTAINER_NAME" "existing daemon container was not removed by its configured name"
+contains "$DOCKER_LOG" "inspect --format {{.Image}} $CONTAINER_NAME" "rollback source was not read from the exact configured container name"
+contains "$DOCKER_LOG" "image tag sha256:old-image zatca-daemon:rollback-" "actual container image was not retained for rollback"
+not_contains "$DOCKER_LOG" 'rm --volumes' "recreation attempted to remove daemon volumes"
+build_line="$(grep -nF 'build --no-cache --pull' "$DOCKER_LOG" | head -n 1 | cut -d: -f1)"
+remove_line="$(grep -nF "rm --force $CONTAINER_NAME" "$DOCKER_LOG" | head -n 1 | cut -d: -f1)"
+up_line="$(grep -nF 'up -d --force-recreate zatca-daemon' "$DOCKER_LOG" | head -n 1 | cut -d: -f1)"
+[ "$build_line" -lt "$remove_line" ] && [ "$remove_line" -lt "$up_line" ] ||
+    fail "existing container was not removed after the build and before Compose up"
 contains "$UP_IMAGES" 'zatca-daemon:refresh-' "setup did not receive the unique build image"
 contains "$OUTPUT" "$REVISION" "success output omitted the full source SHA"
 contains "$OUTPUT" 'sha256:built-image' "success output omitted the image ID"
@@ -289,8 +324,36 @@ if run_refresh "$CONFIG" >"$OUTPUT" 2>&1; then
     fail "failed Docker build was reported as success"
 fi
 not_contains "$DOCKER_LOG" 'up -d' "failed Docker build reached Compose up"
+not_contains "$DOCKER_LOG" 'rm --force' "failed Docker build removed the current daemon container"
 not_contains "$DOCKER_LOG" "image tag zatca-daemon:refresh-" "failed build updated the configured alias"
 pass "build failure leaves the configured alias and running container untouched"
+
+reset_mocks
+export REMOVE_CONTAINER_FAIL=1
+if run_setup_recreate "$CONFIG" >"$OUTPUT" 2>&1; then
+    fail "container removal failure was reported as success"
+fi
+contains "$OUTPUT" 'Could not remove existing ZATCA daemon container' "container removal failure was not explicit"
+contains "$DOCKER_LOG" "rm --force $CONTAINER_NAME" "recreation did not attempt to remove the conflicting container"
+not_contains "$DOCKER_LOG" 'up -d' "Compose started after container removal failed"
+pass "container removal failure stops before Compose starts a replacement"
+
+reset_mocks
+export CONTAINER_LIST_FAIL=1
+if run_setup_recreate "$CONFIG" >"$OUTPUT" 2>&1; then
+    fail "container list failure was reported as success"
+fi
+contains "$OUTPUT" 'Could not inspect existing ZATCA daemon containers' "container list failure was not explicit"
+not_contains "$DOCKER_LOG" 'up -d' "Compose started after existing-container inspection failed"
+pass "container inspection failure stops before Compose starts a replacement"
+
+reset_mocks
+if ! run_setup_without_recreate "$CONFIG" >"$OUTPUT" 2>&1; then
+    cat "$OUTPUT" >&2
+    fail "ordinary setup should not remove the existing daemon container"
+fi
+not_contains "$DOCKER_LOG" 'rm --force' "ordinary setup removed the existing daemon container"
+pass "container removal is limited to explicit recreation"
 
 reset_mocks
 export HEALTH_STATUS=unhealthy
@@ -319,7 +382,18 @@ if run_refresh "$CONFIG" >"$OUTPUT" 2>&1; then
     fail "unhealthy first deployment was reported as success"
 fi
 contains "$OUTPUT" 'no rollback target' "missing prior image was not reported"
+not_contains "$DOCKER_LOG" "rm --force $CONTAINER_NAME" "recreation tried removing a nonexistent daemon container"
 pass "readiness failure without an old image is reported without a false rollback claim"
+
+reset_mocks
+export COMPOSE_CONTAINER_VISIBLE=0 OLD_IMAGE_AVAILABLE=0 HEALTH_STATUS=unhealthy
+if run_refresh "$CONFIG" >"$OUTPUT" 2>&1; then
+    fail "unhealthy replacement with an out-of-project container was reported as success"
+fi
+contains "$DOCKER_LOG" "inspect --format {{.Image}} $CONTAINER_NAME" "out-of-project container image was not inspected"
+contains "$DOCKER_LOG" "image tag sha256:old-image zatca-daemon:rollback-" "out-of-project container image was not preserved for rollback"
+contains "$OUTPUT" 'Rollback command:' "out-of-project container failure omitted its recovery command"
+pass "out-of-project container image is preserved as the rollback target"
 
 reset_mocks
 digest_config="$TEST_DIR/digest-config.env"

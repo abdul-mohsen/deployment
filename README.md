@@ -155,9 +155,12 @@ The command requires Docker Engine, Docker Compose V2, BuildKit, Git, and
 rejects a dirty checkout or a SHA that does not match `HEAD`, builds without
 layer cache while pulling current base images, verifies the image's revision
 label, and recreates the daemon through the existing container and queue-health
-checks. It does not edit `config.env`, run tenant database migrations or issue
-tenant database writes directly, or push an image to a registry. Once started,
-the daemon resumes its normal queue processing.
+checks. With `--recreate`, setup removes an existing container whose name exactly
+matches `ZATCA_DAEMON_CONTAINER` before Compose starts; it does not remove
+volumes, and it aborts if it cannot inspect or remove the container. It does not
+edit `config.env`, run tenant database migrations or issue tenant database writes
+directly, or push an image to a registry. Once started, the daemon resumes its
+normal queue processing.
 
 After verification, the new image is assigned to the configured local image
 alias. Compose uses `pull_policy: missing`, so later stack operations use that

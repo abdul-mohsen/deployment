@@ -125,12 +125,13 @@ CONFIG_VALUES="$(
     bash -c '
         set -euo pipefail
         source "$1" >/dev/null
-        printf "%s\t%s\n" \
+        printf "%s\t%s\t%s\n" \
             "${ZATCA_DAEMON_IMAGE:-}" \
-            "${ZATCA_DAEMON_COMPOSE_FILE:-$2}"
+            "${ZATCA_DAEMON_COMPOSE_FILE:-$2}" \
+            "${ZATCA_DAEMON_CONTAINER:-zatca-daemon}"
     ' _ "$CONFIG_FILE" "$DEFAULT_COMPOSE_FILE"
 )" || fail "Could not read the daemon image setting from config"
-IFS=$'\t' read -r CONFIGURED_IMAGE COMPOSE_FILE <<< "$CONFIG_VALUES"
+IFS=$'\t' read -r CONFIGURED_IMAGE COMPOSE_FILE DAEMON_CONTAINER_NAME <<< "$CONFIG_VALUES"
 [ -n "$CONFIGURED_IMAGE" ] || fail "ZATCA_DAEMON_IMAGE must be configured"
 [[ "$CONFIGURED_IMAGE" != *@* ]] ||
     fail "ZATCA_DAEMON_IMAGE must be a tag-style reference, not a digest"
@@ -160,16 +161,12 @@ exec {lock_fd}>"$LOCK_FILE" ||
 flock -n "$lock_fd" ||
     fail "Another ZATCA daemon refresh is already running"
 
-container_ids="$(
-    docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" \
-        --profile zatca ps -a -q zatca-daemon
-)" || fail "Could not inspect the current ZATCA daemon container"
-[[ "$container_ids" != *$'\n'* ]] ||
-    fail "Multiple ZATCA daemon containers were found; resolve them before refresh"
-
+# Compose's project-scoped listing can miss a same-name container created elsewhere.
+existing_container_names="$(docker ps -a --format '{{.Names}}')" ||
+    fail "Could not inspect existing ZATCA daemon containers"
 old_image_id=""
-if [ -n "$container_ids" ]; then
-    old_image_id="$(docker inspect --format '{{.Image}}' "$container_ids")" ||
+if printf '%s\n' "$existing_container_names" | grep -qxF "$DAEMON_CONTAINER_NAME"; then
+    old_image_id="$(docker inspect --format '{{.Image}}' "$DAEMON_CONTAINER_NAME")" ||
         fail "Could not identify the current daemon container image"
 elif ! old_image_id="$(docker image ls --quiet --no-trunc "$CONFIGURED_IMAGE")"; then
     fail "Could not inspect the configured local daemon image"

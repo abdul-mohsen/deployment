@@ -50,6 +50,9 @@ DOCKER_LOG="$TEST_ROOT/docker.log"
 COMPOSE_JSON_FILE="$TEST_ROOT/compose.json"
 RUNNING_ENV_FILE="$TEST_ROOT/running-env.json"
 DAEMON_REPORT_FILE="$TEST_ROOT/daemon-report.json"
+MOCK_VALID_IMAGE_ID="sha256:$(printf '%064d' 0 | tr '0' 'a')"
+MOCK_STALE_IMAGE_ID="sha256:$(printf '%064d' 0 | tr '0' 'b')"
+MOCK_DAEMON_REVISION="f5459d21579e3d08420371353d88ab0216e50b58"
 mkdir -p "$TEST_REPO/scripts" "$TEST_REPO/dashboard" "$BIN"
 cp "$VERIFY_SCRIPT" "$TEST_REPO/scripts/"
 cp scripts/setup-zatca-daemon.sh scripts/health-zatca-daemon.sh scripts/lib.sh "$TEST_REPO/scripts/"
@@ -197,7 +200,7 @@ case "${1:-}" in
                 printf '%s\n' "${RUNNING_STATE:-true}"
                 ;;
             *".Image"*)
-                printf '%s\n' "${MOCK_RUNNING_IMAGE_ID:-sha256:verify-image}"
+                printf '%s\n' "${MOCK_RUNNING_IMAGE_ID:-sha256:$(printf '%064d' 0 | tr '0' 'a')}"
                 ;;
             *)
                 exit 32
@@ -210,7 +213,20 @@ case "${1:-}" in
             format="${4:-}"
             case "$format" in
                 *".Id"*)
-                printf '%s\n' "${MOCK_CONFIGURED_IMAGE_ID:-sha256:verify-image}"
+                    printf '%s\n' "${MOCK_CONFIGURED_IMAGE_ID:-sha256:$(printf '%064d' 0 | tr '0' 'a')}"
+                    ;;
+                *"org.opencontainers.image.revision"*)
+                    case "${5:-}" in
+                        "${MOCK_CONFIGURED_IMAGE_ID:-}")
+                            printf '%s\n' "${MOCK_CONFIGURED_IMAGE_REVISION:-f5459d21579e3d08420371353d88ab0216e50b58}"
+                            ;;
+                        "${MOCK_RUNNING_IMAGE_ID:-}")
+                            printf '%s\n' "${MOCK_RUNNING_IMAGE_REVISION:-f5459d21579e3d08420371353d88ab0216e50b58}"
+                            ;;
+                        *)
+                            exit 36
+                            ;;
+                    esac
                     ;;
                 *)
                     exit 33
@@ -227,6 +243,13 @@ set -euo pipefail
 request="$(cat)"
 case "$request" in
     *"/healthz"*)
+        if [ "${CURL_HEALTH_CURL_CODE:-0}" != "0" ]; then
+            printf 'curl: (%s) Failed to connect to %s port %s; secret=MONITOR_PASSWORD_FIXTURE\n' \
+                "$CURL_HEALTH_CURL_CODE" \
+                "${ZATCA_NATS_MONITOR_HOST:-127.0.0.1}" \
+                "${ZATCA_NATS_MONITOR_PORT:-8222}" >&2
+            exit "$CURL_HEALTH_CURL_CODE"
+        fi
         if [ "${CURL_HEALTH_FAIL:-0}" = "1" ]; then
             printf '%s\n' 'curl: (22) The requested URL returned error: 503' >&2
             printf '%s\n' '{"error":"missing durable consumer","secret":"MONITOR_PASSWORD_FIXTURE raw response"}'
@@ -275,12 +298,15 @@ reset_mocks() {
     COMPOSE_VALIDATE_FAIL=0
     INSPECT_FAIL=0
     RUNNING_STATE=true
-    MOCK_RUNNING_IMAGE_ID=sha256:verify-image
-    MOCK_CONFIGURED_IMAGE_ID=sha256:verify-image
+    MOCK_RUNNING_IMAGE_ID="$MOCK_VALID_IMAGE_ID"
+    MOCK_CONFIGURED_IMAGE_ID="$MOCK_VALID_IMAGE_ID"
+    MOCK_CONFIGURED_IMAGE_REVISION="$MOCK_DAEMON_REVISION"
+    MOCK_RUNNING_IMAGE_REVISION="$MOCK_DAEMON_REVISION"
     IMAGE_INSPECT_FAIL=0
     DAEMON_VERIFIER_MISSING=0
     DAEMON_EXIT_CODE=0
     CURL_HEALTH_FAIL=0
+    CURL_HEALTH_CURL_CODE=0
     CURL_JSZ_FAIL=0
     CURL_JSZ_MODE=healthy
 }
@@ -302,12 +328,15 @@ run_verify() {
             COMPOSE_VALIDATE_FAIL="${COMPOSE_VALIDATE_FAIL:-0}" \
             INSPECT_FAIL="${INSPECT_FAIL:-0}" \
             RUNNING_STATE="${RUNNING_STATE:-true}" \
-            MOCK_RUNNING_IMAGE_ID="${MOCK_RUNNING_IMAGE_ID:-sha256:verify-image}" \
-            MOCK_CONFIGURED_IMAGE_ID="${MOCK_CONFIGURED_IMAGE_ID:-sha256:verify-image}" \
+            MOCK_RUNNING_IMAGE_ID="${MOCK_RUNNING_IMAGE_ID-$MOCK_VALID_IMAGE_ID}" \
+            MOCK_CONFIGURED_IMAGE_ID="${MOCK_CONFIGURED_IMAGE_ID-$MOCK_VALID_IMAGE_ID}" \
+            MOCK_CONFIGURED_IMAGE_REVISION="${MOCK_CONFIGURED_IMAGE_REVISION-$MOCK_DAEMON_REVISION}" \
+            MOCK_RUNNING_IMAGE_REVISION="${MOCK_RUNNING_IMAGE_REVISION-$MOCK_DAEMON_REVISION}" \
             IMAGE_INSPECT_FAIL="${IMAGE_INSPECT_FAIL:-0}" \
             DAEMON_VERIFIER_MISSING="${DAEMON_VERIFIER_MISSING:-0}" \
             DAEMON_EXIT_CODE="${DAEMON_EXIT_CODE:-0}" \
             CURL_HEALTH_FAIL="${CURL_HEALTH_FAIL:-0}" \
+            CURL_HEALTH_CURL_CODE="${CURL_HEALTH_CURL_CODE:-0}" \
             CURL_JSZ_FAIL="${CURL_JSZ_FAIL:-0}" \
             CURL_JSZ_MODE="${CURL_JSZ_MODE:-healthy}" \
             bash "$TEST_REPO/$VERIFY_SCRIPT" "$@"
@@ -427,6 +456,10 @@ echo "=== daemon report and running image validation ==="
 reset_mocks
 run_verify
 [ "$RUN_STATUS" -eq 0 ] || { cat "$OUTPUT" >&2; fail "complete verification evidence was rejected"; }
+contains "$OUTPUT" "INFO | daemon.image.provenance | configured_id=$MOCK_VALID_IMAGE_ID configured_revision=$MOCK_DAEMON_REVISION running_id=$MOCK_VALID_IMAGE_ID running_revision=$MOCK_DAEMON_REVISION" \
+    "safe configured/running image provenance was not reported"
+contains "$OUTPUT" 'INFO | daemon.monitor.target | class=loopback port=8222 endpoints=/healthz,/jsz' \
+    "safe default monitor target context was not reported"
 contains "$DOCKER_LOG" "--profile zatca-check run --rm --no-deps zatca-check" \
     "one-shot verifier was not run in isolation"
 contains "$DOCKER_LOG" "--env-file $TEST_REPO/config.env" \
@@ -439,15 +472,50 @@ assert_no_secret_fixtures
 pass "complete DB, image, environment, and live-health evidence is required for PASS"
 
 reset_mocks
-MOCK_RUNNING_IMAGE_ID=sha256:stale-image
+MOCK_RUNNING_IMAGE_ID="$MOCK_STALE_IMAGE_ID"
+MOCK_RUNNING_IMAGE_REVISION=0123456789abcdef0123456789abcdef01234567
 run_verify
 [ "$RUN_STATUS" -ne 0 ] || {
     grep -E '^(PASS|FAIL|NOT VERIFIED) \| daemon\.image \||^OVERALL ' "$OUTPUT" >&2 || true
     fail "stale running daemon image was accepted"
 }
+contains "$OUTPUT" "configured_id=$MOCK_VALID_IMAGE_ID configured_revision=$MOCK_DAEMON_REVISION running_id=$MOCK_STALE_IMAGE_ID running_revision=0123456789abcdef0123456789abcdef01234567" \
+    "stale daemon provenance was not exposed safely"
 not_contains "$OUTPUT" 'OVERALL PASS' "running image mismatch produced an overall PASS"
 assert_no_secret_fixtures
 pass "configured and running daemon image identities must match"
+
+reset_mocks
+MOCK_CONFIGURED_IMAGE_REVISION=DB_PASSWORD_FIXTURE
+MOCK_RUNNING_IMAGE_REVISION=DB_PASSWORD_FIXTURE
+run_verify
+[ "$RUN_STATUS" -eq 0 ] || fail "unsafe optional revision labels changed the successful image check"
+contains "$OUTPUT" "configured_id=$MOCK_VALID_IMAGE_ID configured_revision=unavailable running_id=$MOCK_VALID_IMAGE_ID running_revision=unavailable" \
+    "unsafe image revision labels were not replaced with unavailable"
+not_contains "$OUTPUT" 'DB_PASSWORD_FIXTURE' "unsafe image revision exposed a database password"
+assert_no_secret_fixtures
+pass "unsafe optional image labels are withheld without changing the existing gate"
+
+reset_mocks
+MOCK_CONFIGURED_IMAGE_ID='sha256:invalid-DB_PASSWORD_FIXTURE'
+run_verify
+[ "$RUN_STATUS" -ne 0 ] || fail "malformed configured image ID was accepted"
+contains "$OUTPUT" 'NOT VERIFIED | daemon.image' "malformed image ID did not fail image verification"
+contains "$OUTPUT" 'configured_id=unavailable' "malformed image ID was not redacted"
+not_contains "$OUTPUT" 'invalid-DB_PASSWORD_FIXTURE' "malformed image ID was printed"
+not_contains "$DOCKER_LOG" ' run ' "one-shot verifier ran after image identity became untrusted"
+assert_no_secret_fixtures
+pass "malformed image identity is withheld and cannot start the one-shot verifier"
+
+reset_mocks
+MOCK_RUNNING_IMAGE_ID='sha256:invalid-MONITOR_PASSWORD_FIXTURE'
+run_verify
+[ "$RUN_STATUS" -ne 0 ] || fail "malformed running image ID was accepted"
+contains "$OUTPUT" 'NOT VERIFIED | daemon.image' "malformed running image ID did not fail image verification"
+contains "$OUTPUT" 'running_id=unavailable' "malformed running image ID was not redacted"
+not_contains "$OUTPUT" 'invalid-MONITOR_PASSWORD_FIXTURE' "malformed running image ID was printed"
+assert_no_secret_fixtures
+pass "malformed running image identity is withheld and cannot pass verification"
 
 reset_mocks
 IMAGE_INSPECT_FAIL=1
@@ -462,6 +530,8 @@ DAEMON_VERIFIER_MISSING=1
 run_verify
 [ "$RUN_STATUS" -ne 0 ] || fail "image without verification mode was accepted"
 not_contains "$OUTPUT" 'OVERALL PASS' "missing verifier mode produced an overall PASS"
+contains "$OUTPUT" "INFO | daemon.image.provenance | configured_id=$MOCK_VALID_IMAGE_ID configured_revision=$MOCK_DAEMON_REVISION running_id=$MOCK_VALID_IMAGE_ID running_revision=$MOCK_DAEMON_REVISION" \
+    "unsupported verifier output omitted safe configured/running image provenance"
 not_contains "$OUTPUT" 'unknown flag --verify-db' "raw daemon invocation error was forwarded"
 contains "$OUTPUT" 'daemon image rejected --verify-db/--json; database probe was not run' \
     "unsupported verifier flags did not identify why the database probe did not run"
@@ -517,6 +587,47 @@ pass "a valid nonzero daemon report is parsed and remains a failure"
 
 echo
 echo "=== authenticated daemon health and backlog gates ==="
+reset_mocks
+cp "$TEST_REPO/config.env" "$TEST_ROOT/custom-monitor.env"
+printf '%s\n' \
+    'ZATCA_NATS_MONITOR_HOST=monitor.private.invalid' \
+    'ZATCA_NATS_MONITOR_PORT=9123' >> "$TEST_ROOT/custom-monitor.env"
+for curl_code in 6 7 28; do
+    reset_mocks
+    CURL_HEALTH_CURL_CODE="$curl_code"
+    run_verify --env-file "$TEST_ROOT/custom-monitor.env"
+    [ "$RUN_STATUS" -ne 0 ] || fail "curl error $curl_code was accepted as healthy"
+    contains "$OUTPUT" 'INFO | daemon.monitor.target | class=custom_host_redacted port=9123 endpoints=/healthz,/jsz' \
+        "custom monitor target was not safely classified"
+    contains "$OUTPUT" "curl error $curl_code" "curl error $curl_code was not reported"
+    case "$curl_code" in
+        6) contains "$OUTPUT" 'name resolution failure' "curl error 6 was not classified" ;;
+        7) contains "$OUTPUT" 'connection failure' "curl error 7 was not classified" ;;
+        28) contains "$OUTPUT" 'timeout' "curl error 28 was not classified" ;;
+    esac
+    not_contains "$OUTPUT" 'monitor.private.invalid' "private monitor hostname was printed"
+    not_contains "$OUTPUT" 'Failed to connect' "raw curl diagnostic was printed"
+    not_contains "$OUTPUT" 'secret=' "raw curl diagnostic fixture was printed"
+    not_contains "$OUTPUT" 'OVERALL PASS' "curl error $curl_code produced an overall PASS"
+    assert_no_secret_fixtures
+done
+pass "curl resolution, connection, and timeout errors include safe target context only"
+
+reset_mocks
+cp "$TEST_REPO/config.env" "$TEST_ROOT/invalid-monitor-port.env"
+printf '%s\n' \
+    'ZATCA_NATS_MONITOR_HOST=monitor.private.invalid' \
+    'ZATCA_NATS_MONITOR_PORT=9123-not-a-port' >> "$TEST_ROOT/invalid-monitor-port.env"
+CURL_HEALTH_CURL_CODE=3
+run_verify --env-file "$TEST_ROOT/invalid-monitor-port.env"
+[ "$RUN_STATUS" -ne 0 ] || fail "invalid monitor port was accepted as healthy"
+contains "$OUTPUT" 'INFO | daemon.monitor.target | class=custom_host_redacted port=unavailable endpoints=/healthz,/jsz' \
+    "invalid monitor port was not withheld"
+not_contains "$OUTPUT" '9123-not-a-port' "invalid monitor port was printed"
+not_contains "$OUTPUT" 'monitor.private.invalid' "private host for invalid port was printed"
+assert_no_secret_fixtures
+pass "invalid monitor ports and private hosts are withheld"
+
 reset_mocks
 CURL_HEALTH_FAIL=1
 run_verify

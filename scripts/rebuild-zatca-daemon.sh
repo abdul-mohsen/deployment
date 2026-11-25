@@ -2,11 +2,10 @@
 # Build the ZATCA daemon from an exact local source revision and recreate it.
 #
 # Usage:
-#   bash scripts/rebuild-zatca-daemon.sh \
-#     --source-dir /opt/src/zatca-daemon \
-#     --revision <full-commit-sha> \
-#     --sdk-context /opt/private/zatca-sdk \
-#     --config /opt/deployment/config.env
+#   bash scripts/rebuild-zatca-daemon.sh
+#   bash scripts/rebuild-zatca-daemon.sh --config /opt/deployment/config.env
+#   bash scripts/rebuild-zatca-daemon.sh --source-dir /opt/src/zatca-daemon \
+#     --revision <full-commit-sha> --sdk-context /opt/private/zatca-sdk
 
 set -euo pipefail
 
@@ -23,6 +22,30 @@ HEALTH_TIMEOUT_SECONDS=""
 error() { echo "[x] $*" >&2; }
 info() { echo "[i] $*"; }
 fail() { error "$*"; exit 1; }
+
+read_config_setting() {
+    local setting="$1"
+    bash -c '
+        set -euo pipefail
+        unset ZATCA_DAEMON_SOURCE_DIR ZATCA_DAEMON_SDK_CONTEXT
+        source "$1" >/dev/null 2>&1
+        set +x
+        case "$2" in
+            ZATCA_DAEMON_SOURCE_DIR) printf "%s" "${ZATCA_DAEMON_SOURCE_DIR:-}" ;;
+            ZATCA_DAEMON_SDK_CONTEXT) printf "%s" "${ZATCA_DAEMON_SDK_CONTEXT:-}" ;;
+            *) exit 2 ;;
+        esac
+    ' _ "$CONFIG_FILE" "$setting"
+}
+
+resolve_config_path() {
+    local path="$1"
+    if [[ "$path" == /* ]]; then
+        printf '%s' "$path"
+    else
+        printf '%s/%s' "$CONFIG_DIR" "$path"
+    fi
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -61,10 +84,10 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[ -n "$SOURCE_DIR" ] || fail "--source-dir is required"
-[ -n "$REQUESTED_REVISION" ] || fail "--revision is required"
-[ -n "$SDK_CONTEXT" ] || fail "--sdk-context is required"
 [ -f "$CONFIG_FILE" ] || fail "Config file not found: $CONFIG_FILE"
+CONFIG_DIR="$(cd "$(dirname "$CONFIG_FILE")" && pwd -P)" ||
+    fail "Could not resolve the config.env directory"
+CONFIG_FILE="${CONFIG_DIR}/$(basename "$CONFIG_FILE")"
 
 if [ -n "$HEALTH_TIMEOUT_SECONDS" ]; then
     [[ "$HEALTH_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] &&
@@ -72,8 +95,24 @@ if [ -n "$HEALTH_TIMEOUT_SECONDS" ]; then
         fail "--health-timeout must be a positive integer"
 fi
 
-[[ "$REQUESTED_REVISION" =~ ^[0-9a-f]{40}$ ]] ||
-    fail "--revision must be a full 40-character lowercase Git SHA"
+if [ -z "$SOURCE_DIR" ]; then
+    SOURCE_DIR="$(read_config_setting ZATCA_DAEMON_SOURCE_DIR)" ||
+        fail "Could not read ZATCA_DAEMON_SOURCE_DIR from config.env"
+    [ -n "$SOURCE_DIR" ] ||
+        fail "ZATCA_DAEMON_SOURCE_DIR must be set in config.env or pass --source-dir"
+    SOURCE_DIR="$(resolve_config_path "$SOURCE_DIR")"
+fi
+
+if [ -z "$SDK_CONTEXT" ]; then
+    SDK_CONTEXT="$(read_config_setting ZATCA_DAEMON_SDK_CONTEXT)" ||
+        fail "Could not read ZATCA_DAEMON_SDK_CONTEXT from config.env"
+    [ -n "$SDK_CONTEXT" ] ||
+        fail "ZATCA_DAEMON_SDK_CONTEXT must be set in config.env or pass --sdk-context"
+    SDK_CONTEXT="$(resolve_config_path "$SDK_CONTEXT")"
+fi
+
+[ -n "$SOURCE_DIR" ] || fail "--source-dir is required"
+[ -n "$SDK_CONTEXT" ] || fail "--sdk-context is required"
 
 [ -d "$SOURCE_DIR" ] || fail "Daemon source directory not found: $SOURCE_DIR"
 SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd -P)" ||
@@ -89,6 +128,11 @@ SOURCE_ROOT="$(cd "$SOURCE_ROOT" && pwd -P)" ||
 
 HEAD_REVISION="$(git -C "$SOURCE_DIR" rev-parse --verify HEAD 2>/dev/null)" ||
     fail "Could not read daemon source HEAD"
+if [ -z "$REQUESTED_REVISION" ]; then
+    REQUESTED_REVISION="$HEAD_REVISION"
+fi
+[[ "$REQUESTED_REVISION" =~ ^[0-9a-f]{40}$ ]] ||
+    fail "--revision must be a full 40-character lowercase Git SHA"
 RESOLVED_REVISION="$(git -C "$SOURCE_DIR" rev-parse --verify "${REQUESTED_REVISION}^{commit}" 2>/dev/null)" ||
     fail "Requested daemon revision is not present in the local checkout"
 [ "$HEAD_REVISION" = "$REQUESTED_REVISION" ] &&
@@ -124,7 +168,8 @@ DEFAULT_COMPOSE_FILE="${REPO_DIR}/dashboard/docker-compose.zatca.yml"
 CONFIG_VALUES="$(
     bash -c '
         set -euo pipefail
-        source "$1" >/dev/null
+        source "$1" >/dev/null 2>&1
+        set +x
         printf "%s\t%s\t%s\n" \
             "${ZATCA_DAEMON_IMAGE:-}" \
             "${ZATCA_DAEMON_COMPOSE_FILE:-$2}" \
@@ -218,13 +263,29 @@ fi
 if ! bash "${SCRIPT_DIR}/setup-zatca-daemon.sh" "${setup_args[@]}"; then
     error "ZATCA daemon replacement or readiness check failed."
     if $has_rollback; then
+        alias_restored=false
         if docker image tag "$rollback_image" "$CONFIGURED_IMAGE"; then
             info "Restored configured image alias to the prior local image."
+            alias_restored=true
         else
-            error "Could not restore the configured image alias; the rollback image remains available."
+            error "Could not restore the configured image alias; attempting container recovery from the retained image."
         fi
-        printf 'Rollback command:\n  bash %q --config %q --image %q --recreate\n' \
-            "${SCRIPT_DIR}/setup-zatca-daemon.sh" "$CONFIG_FILE" "$rollback_image" >&2
+
+        rollback_args=(--config "$CONFIG_FILE" --image "$rollback_image" --recreate)
+        if [ -n "$HEALTH_TIMEOUT_SECONDS" ]; then
+            rollback_args+=(--health-timeout "$HEALTH_TIMEOUT_SECONDS")
+        fi
+        if bash "${SCRIPT_DIR}/setup-zatca-daemon.sh" "${rollback_args[@]}"; then
+            if $alias_restored; then
+                info "Automatic rollback completed: configured image alias was restored and the prior daemon container is ready."
+            else
+                error "Prior daemon container was automatically restored, but the configured image alias could not be restored."
+            fi
+        elif $alias_restored; then
+            error "Automatic rollback failed: the configured image alias was restored, but the prior daemon container did not pass readiness."
+        else
+            error "Automatic rollback failed: the configured image alias and prior daemon container readiness were not restored."
+        fi
     else
         error "There is no rollback target because no prior local daemon image was available."
     fi

@@ -23,6 +23,7 @@ DOCKER_LOG="$TEST_DIR/docker.log"
 BUILD_TAGS="$TEST_DIR/build-tags"
 UP_IMAGES="$TEST_DIR/up-images"
 OUTPUT="$TEST_DIR/output"
+DEFAULT_REPO="$TEST_DIR/default-deployment"
 CONTAINER_NAME="zatca-daemon-refresh-test"
 mkdir -p "$BIN" "$SOURCE_DIR" "$SDK_CONTEXT/Apps"
 touch "$SDK_CONTEXT/Apps/fatoora"
@@ -46,6 +47,8 @@ write_config() {
 ZATCA_DAEMON_ENABLED=1
 ZATCA_DAEMON_IMAGE=${CONFIG_IMAGE}
 ZATCA_DAEMON_CONTAINER=${CONTAINER_NAME}
+ZATCA_DAEMON_SOURCE_DIR=${SOURCE_DIR}
+ZATCA_DAEMON_SDK_CONTEXT=${SDK_CONTEXT}
 ZATCA_NATS_DATA_ROOT=${TEST_DIR}/nats
 ZATCA_DB_USER=test-user
 ZATCA_DB_PASSWORD=TEST_SECRET_DB_PASSWORD
@@ -161,7 +164,12 @@ case "${1:-}" in
                 printf '%s\n' "sha256:old-image"
                 ;;
             *"State.Health.Status"*)
-                printf '%s\n' "${HEALTH_STATUS:-healthy}"
+                up_count="$(wc -l < "${UP_IMAGES:?}")"
+                if [ "$up_count" -ge 2 ]; then
+                    printf '%s\n' "${ROLLBACK_HEALTH_STATUS:-healthy}"
+                else
+                    printf '%s\n' "${HEALTH_STATUS:-healthy}"
+                fi
                 ;;
         esac
         exit 0
@@ -210,7 +218,7 @@ reset_mocks() {
     : > "$BUILD_TAGS"
     : > "$UP_IMAGES"
     unset CONFIG_FAIL BUILD_FAIL RESTORE_TAG_FAIL REMOVE_CONTAINER_FAIL CONTAINER_LIST_FAIL COMPOSE_CONTAINER_VISIBLE
-    export CONTAINER_PRESENT=1 OLD_IMAGE_AVAILABLE=1 HEALTH_STATUS=healthy
+    export CONTAINER_PRESENT=1 OLD_IMAGE_AVAILABLE=1 HEALTH_STATUS=healthy ROLLBACK_HEALTH_STATUS=healthy
     export LABEL_REVISION="$REVISION"
 }
 
@@ -224,6 +232,27 @@ run_refresh() {
         --health-timeout 2
 }
 
+run_refresh_from_config() {
+    local config="$1"
+    bash "$REFRESH_SCRIPT" --config "$config" --health-timeout 2
+}
+
+prepare_default_repo() {
+    mkdir -p "$DEFAULT_REPO/scripts" "$DEFAULT_REPO/dashboard"
+    cp "$REFRESH_SCRIPT" "$DEFAULT_REPO/scripts/rebuild-zatca-daemon.sh"
+    cp "$SETUP_SCRIPT" "$DEFAULT_REPO/scripts/setup-zatca-daemon.sh"
+    cp scripts/lib.sh scripts/health-zatca-daemon.sh "$DEFAULT_REPO/scripts/"
+    cp dashboard/docker-compose.zatca.yml "$DEFAULT_REPO/dashboard/"
+    write_config "$DEFAULT_REPO/config.env"
+}
+
+run_noarg_refresh() {
+    (
+        cd "$TEST_DIR"
+        env -u CONFIG_FILE bash "$DEFAULT_REPO/scripts/rebuild-zatca-daemon.sh"
+    )
+}
+
 run_setup_recreate() {
     local config="$1"
     bash "$SETUP_SCRIPT" --config "$config" --recreate --health-timeout 2
@@ -232,6 +261,21 @@ run_setup_recreate() {
 run_setup_without_recreate() {
     local config="$1"
     bash "$SETUP_SCRIPT" --config "$config" --health-timeout 2
+}
+
+assert_automatic_rollback() {
+    local context="$1"
+    ROLLBACK_IMAGE="$(sed -n 's/^image tag sha256:old-image \(zatca-daemon:rollback-[^ ]*\)$/\1/p' "$DOCKER_LOG" | head -n 1)"
+    [ -n "$ROLLBACK_IMAGE" ] || fail "$context did not retain the prior image"
+    [ "$(wc -l < "$UP_IMAGES")" -eq 2 ] ||
+        fail "$context did not attempt both replacement and rollback starts"
+    [ "$(sed -n '2p' "$UP_IMAGES")" = "$ROLLBACK_IMAGE" ] ||
+        fail "$context did not start the retained rollback image"
+    [ "$(grep -cF "rm --force $CONTAINER_NAME" "$DOCKER_LOG")" -eq 2 ] ||
+        fail "$context did not recreate the prior daemon container"
+    [ "$(grep -cF 'up -d --force-recreate zatca-daemon' "$DOCKER_LOG")" -eq 2 ] ||
+        fail "$context did not start the prior daemon container"
+    not_contains "$DOCKER_LOG" 'rm --volumes' "$context removed daemon queue volumes"
 }
 
 reset_mocks
@@ -263,6 +307,72 @@ tag_one="$(head -n 1 "$BUILD_TAGS")"
 [[ "$tag_one" == zatca-daemon:refresh-"$REVISION"-* ]] || fail "build tag does not include revision and a unique suffix"
 contains "$DOCKER_LOG" "image tag $tag_one $CONFIG_IMAGE" "configured local alias was not updated"
 pass "clean source builds a uniquely identified image and reports readiness"
+
+reset_mocks
+prepare_default_repo
+if ! run_noarg_refresh >"$OUTPUT" 2>&1; then
+    cat "$OUTPUT" >&2
+    fail "no-argument refresh from outside the repository should use config.env"
+fi
+contains "$DOCKER_LOG" "--build-context zatca-sdk=$SDK_CONTEXT" \
+    "no-argument refresh did not read the SDK context from config.env"
+contains "$DOCKER_LOG" "org.opencontainers.image.revision=$REVISION" \
+    "no-argument refresh did not derive the revision from source HEAD"
+contains "$DOCKER_LOG" "$SOURCE_DIR" \
+    "no-argument refresh did not read the source path from config.env"
+contains "$UP_IMAGES" 'zatca-daemon:refresh-' \
+    "no-argument refresh did not start the image built from config.env"
+pass "no-argument refresh reads config.env paths and starts from any working directory"
+
+reset_mocks
+relative_dir="$TEST_DIR/relative-config"
+mkdir -p "$relative_dir"
+ln -s "$SOURCE_DIR" "$relative_dir/daemon-source"
+ln -s "$SDK_CONTEXT" "$relative_dir/sdk-context"
+sed \
+    -e "s#^ZATCA_DAEMON_SOURCE_DIR=.*#ZATCA_DAEMON_SOURCE_DIR=daemon-source#" \
+    -e "s#^ZATCA_DAEMON_SDK_CONTEXT=.*#ZATCA_DAEMON_SDK_CONTEXT=sdk-context#" \
+    "$CONFIG" > "$relative_dir/config.env"
+if ! run_refresh_from_config "$relative_dir/config.env" >"$OUTPUT" 2>&1; then
+    cat "$OUTPUT" >&2
+    fail "relative config paths should resolve from the config.env directory"
+fi
+contains "$DOCKER_LOG" "--build-context zatca-sdk=$SDK_CONTEXT" \
+    "relative SDK context path did not resolve from config.env"
+contains "$DOCKER_LOG" "$SOURCE_DIR" \
+    "relative source path did not resolve from config.env"
+pass "relative daemon source and SDK paths resolve from config.env"
+
+reset_mocks
+sed '/^ZATCA_DAEMON_SOURCE_DIR=/d' "$CONFIG" > "$TEST_DIR/missing-source.env"
+if run_refresh_from_config "$TEST_DIR/missing-source.env" >"$OUTPUT" 2>&1; then
+    fail "missing source path in config.env was accepted"
+fi
+contains "$OUTPUT" 'ZATCA_DAEMON_SOURCE_DIR' \
+    "missing source path error did not name the config key"
+not_contains "$DOCKER_LOG" 'build ' "missing source path reached Docker build"
+pass "missing source path fails before build with the config key named"
+
+reset_mocks
+sed '/^ZATCA_DAEMON_SDK_CONTEXT=/d' "$CONFIG" > "$TEST_DIR/missing-sdk-path.env"
+if run_refresh_from_config "$TEST_DIR/missing-sdk-path.env" >"$OUTPUT" 2>&1; then
+    fail "missing SDK context path in config.env was accepted"
+fi
+contains "$OUTPUT" 'ZATCA_DAEMON_SDK_CONTEXT' \
+    "missing SDK context error did not name the config key"
+not_contains "$DOCKER_LOG" 'build ' "missing SDK context reached Docker build"
+pass "missing SDK context fails before build with the config key named"
+
+reset_mocks
+sed \
+    -e '/^ZATCA_DAEMON_SOURCE_DIR=/d' \
+    -e '/^ZATCA_DAEMON_SDK_CONTEXT=/d' \
+    "$CONFIG" > "$TEST_DIR/legacy-config.env"
+if ! run_refresh "$TEST_DIR/legacy-config.env" >"$OUTPUT" 2>&1; then
+    cat "$OUTPUT" >&2
+    fail "explicit legacy source, revision, and SDK options should remain supported"
+fi
+pass "explicit source, revision, and SDK options remain supported"
 
 reset_mocks
 export LABEL_REVISION="ffffffffffffffffffffffffffffffffffffffff"
@@ -360,12 +470,15 @@ export HEALTH_STATUS=unhealthy
 if run_refresh "$CONFIG" >"$OUTPUT" 2>&1; then
     fail "unhealthy replacement was reported as success"
 fi
-contains "$OUTPUT" 'Rollback command:' "readiness failure omitted the manual rollback action"
-contains "$OUTPUT" 'zatca-daemon:rollback-' "rollback command omitted the retained prior image tag"
 contains "$DOCKER_LOG" "image tag zatca-daemon:rollback-" "prior image was not retained under a rollback tag"
 contains "$OUTPUT" 'Restored configured image alias' "readiness failure did not report alias recovery"
+assert_automatic_rollback "readiness failure"
+contains "$DOCKER_LOG" "image tag $ROLLBACK_IMAGE $CONFIG_IMAGE" \
+    "readiness failure did not restore the configured image alias"
+contains "$OUTPUT" 'Automatic rollback completed' \
+    "readiness failure did not report successful container recovery"
 not_contains "$OUTPUT" 'TEST_SECRET_' "failure output exposed a deployment secret"
-pass "readiness failure retains the old image and prints an exact recovery action"
+pass "readiness failure restores the alias and automatically recreates the prior container"
 
 reset_mocks
 export HEALTH_STATUS=unhealthy RESTORE_TAG_FAIL=1
@@ -373,8 +486,12 @@ if run_refresh "$CONFIG" >"$OUTPUT" 2>&1; then
     fail "alias restore failure was reported as success"
 fi
 contains "$OUTPUT" 'restore the configured image alias' "alias restore failure was not explicit"
-contains "$OUTPUT" 'Rollback command:' "alias restore failure omitted the manual rollback action"
-pass "alias restore failure is explicit while the retained image remains actionable"
+assert_automatic_rollback "alias restore failure"
+contains "$OUTPUT" 'Prior daemon container was automatically restored' \
+    "alias restore failure did not report the recovered container"
+not_contains "$OUTPUT" 'Automatic rollback completed' \
+    "alias restore failure was reported as a complete rollback"
+pass "alias restore failure is explicit and does not overstate container recovery"
 
 reset_mocks
 export CONTAINER_PRESENT=0 OLD_IMAGE_AVAILABLE=0 HEALTH_STATUS=unhealthy
@@ -392,8 +509,22 @@ if run_refresh "$CONFIG" >"$OUTPUT" 2>&1; then
 fi
 contains "$DOCKER_LOG" "inspect --format {{.Image}} $CONTAINER_NAME" "out-of-project container image was not inspected"
 contains "$DOCKER_LOG" "image tag sha256:old-image zatca-daemon:rollback-" "out-of-project container image was not preserved for rollback"
-contains "$OUTPUT" 'Rollback command:' "out-of-project container failure omitted its recovery command"
+assert_automatic_rollback "out-of-project container failure"
+contains "$OUTPUT" 'Automatic rollback completed' \
+    "out-of-project container failure did not report automatic recovery"
 pass "out-of-project container image is preserved as the rollback target"
+
+reset_mocks
+export HEALTH_STATUS=unhealthy ROLLBACK_HEALTH_STATUS=unhealthy
+if run_refresh "$CONFIG" >"$OUTPUT" 2>&1; then
+    fail "failed automatic rollback was reported as success"
+fi
+assert_automatic_rollback "rollback readiness failure"
+contains "$OUTPUT" 'Automatic rollback failed' \
+    "rollback readiness failure was not reported"
+not_contains "$OUTPUT" 'Automatic rollback completed' \
+    "rollback readiness failure was reported as successful"
+pass "failed rollback readiness is explicit and never reported as recovery"
 
 reset_mocks
 digest_config="$TEST_DIR/digest-config.env"

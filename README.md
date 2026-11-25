@@ -139,6 +139,10 @@ access to the Docker daemon:
 sudo bash ./scripts/verify-zatca-environment.sh
 ```
 
+This is the single read-only full-environment test; it runs the isolated DB
+probe and authenticated daemon health checks without requiring manual daemon
+flags or per-shell path variables.
+
 By default, the verifier selects only the deployment repository's `config.env`;
 it never falls back to `.env`, shell variables, or another file. To check a
 specific alternate file, pass it explicitly:
@@ -173,50 +177,69 @@ status when available, while withholding response bodies.
 
 For diagnosis, the verifier also prints configured/running daemon image IDs
 and validated source revisions when available, plus the monitor target class,
-valid port, and checked endpoints. Custom monitor hostnames, image references,
-raw Docker/curl errors, and response bodies are withheld. A curl error 7 means
-the monitor connection could not be established before an HTTP response; it
-does not mean the database probe ran.
+valid port, checked endpoints, and the database target class/validated port.
+Custom monitor and database hostnames, image references, raw Docker/curl errors,
+and response bodies are withheld. A curl error 7 means the monitor connection
+could not be established before an HTTP response; it does not mean the
+database probe ran.
+
+MySQL error 1045 means the server denied the tested daemon connection; it does
+not prove the password is wrong. A successful Dokku admin test does not verify
+the daemon connection's account/host match. Compare the daemon's configured
+database target and MySQL host grants from its Compose network before changing
+credentials. Different configured/running image IDs remain a mismatch even if
+their validated source-revision labels match; matching labels do not prove
+identical image artifacts, and the verifier points to the config-driven refresh
+command. Curl error 56 is reported as a response-receive failure. If it
+persists after database access and configured/running image alignment are
+verified, inspect the daemon container logs and state. It does not establish
+a connection reset or identify the cause.
 
 ### Refreshing the daemon image
 
 `stack restart` restarts the platform and runs daemon setup, but it does not
 build daemon source or force-recreate the daemon from a source checkout. To
-deploy a daemon revision, run the explicit refresh on the deployment host with
-a clean daemon checkout at the intended full commit SHA and a private SDK
-context containing `Apps/fatoora`:
+deploy a daemon revision, set these paths once in the protected deployment
+`config.env`:
 
 ```bash
-CONFIG=/opt/deployment/config.env
-DAEMON_SOURCE=/opt/src/zatca-daemon
-SDK_CONTEXT=/opt/private/zatca-sdk
-REVISION="$(git -C "$DAEMON_SOURCE" rev-parse HEAD)"
-
-sudo ./scripts/deployctl.sh --config "$CONFIG" stack rebuild-zatca-daemon \
-  --source-dir "$DAEMON_SOURCE" \
-  --revision "$REVISION" \
-  --sdk-context "$SDK_CONTEXT"
+ZATCA_DAEMON_SOURCE_DIR=/opt/src/zatca-daemon
+ZATCA_DAEMON_SDK_CONTEXT=/opt/private/zatca-sdk
 ```
 
-The command requires Docker Engine, Docker Compose V2, BuildKit, Git, and
-`flock`. It validates the protected daemon configuration before building,
-rejects a dirty checkout or a SHA that does not match `HEAD`, builds without
-layer cache while pulling current base images, verifies the image's revision
-label, and recreates the daemon through the existing container and queue-health
-checks. With `--recreate`, setup removes an existing container whose name exactly
-matches `ZATCA_DAEMON_CONTAINER` before Compose starts; it does not remove
-volumes, and it aborts if it cannot inspect or remove the container. It does not
-edit `config.env`, run tenant database migrations or issue tenant database writes
-directly, or push an image to a registry. Once started, the daemon resumes its
-normal queue processing.
+Paths can be absolute or relative to the directory containing `config.env`.
+The source directory must be a clean Git checkout, and the private SDK
+directory must contain `Apps/fatoora`.
+Then run the no-argument refresh from any working directory using the script's
+deployment-checkout path:
+
+```bash
+sudo bash /opt/deployment/scripts/rebuild-zatca-daemon.sh
+```
+
+By default, the script reads `config.env` beside the deployment checkout and
+derives the exact revision from the clean source checkout's `HEAD`; explicit
+`--source-dir`, `--revision`, `--sdk-context`, and `--config` flags remain
+available for one-off overrides. The command requires Docker Engine, Docker
+Compose V2, BuildKit, Git, and `flock`. It validates the protected daemon
+configuration before building, rejects a dirty checkout or a SHA that does not
+match `HEAD`, builds without layer cache while pulling current base images,
+verifies the image's revision label, and recreates the daemon through the
+existing container and queue-health checks. With `--recreate`, setup removes
+an existing container whose name exactly matches `ZATCA_DAEMON_CONTAINER`
+before Compose starts; it does not remove volumes, and it aborts if it cannot
+inspect or remove the container. It does not edit `config.env`, run tenant
+database migrations or issue tenant database writes directly, or push an image
+to a registry. Once started, the daemon resumes its normal queue processing.
 
 After verification, the new image is assigned to the configured local image
 alias. Compose uses `pull_policy: missing`, so later stack operations use that
 local image while the alias is present. If replacement or readiness fails, the
-command exits nonzero, restores the alias to the prior image when available,
-retains a rollback tag, and prints the exact manual recovery command. If no
-prior image exists, there is no rollback target; review the reported state
-before taking further action.
+command exits nonzero, restores the alias and automatically recreates the
+prior daemon container from a retained rollback image when one is available.
+Queue volumes are preserved. The output distinguishes a complete rollback from
+an alias-restore or readiness failure; it never reports success for the refresh.
+If no prior image exists, the output reports that there is no rollback target.
 
 ## Server prerequisites
 

@@ -175,7 +175,7 @@ case "${1:-}" in
                 ;;
             *" run "*)
                 if [ "${DAEMON_VERIFIER_MISSING:-0}" = "1" ]; then
-                    printf '%s\n' 'unknown flag --verify-db' >&2
+                    printf '%s\n' 'unknown flag --verify-db; secret=DB_PASSWORD_FIXTURE' >&2
                     exit 125
                 fi
                 cat "$DAEMON_REPORT_FILE"
@@ -228,6 +228,7 @@ request="$(cat)"
 case "$request" in
     *"/healthz"*)
         if [ "${CURL_HEALTH_FAIL:-0}" = "1" ]; then
+            printf '%s\n' 'curl: (22) The requested URL returned error: 503' >&2
             printf '%s\n' '{"error":"missing durable consumer","secret":"MONITOR_PASSWORD_FIXTURE raw response"}'
             exit 22
         fi
@@ -235,6 +236,7 @@ case "$request" in
         ;;
     *"/jsz?"*)
         if [ "${CURL_JSZ_FAIL:-0}" = "1" ]; then
+            printf '%s\n' 'curl: (22) The requested URL returned error: 401' >&2
             printf '%s\n' '{"error":"MONITOR_PASSWORD_FIXTURE raw response"}'
             exit 22
         fi
@@ -461,10 +463,22 @@ run_verify
 [ "$RUN_STATUS" -ne 0 ] || fail "image without verification mode was accepted"
 not_contains "$OUTPUT" 'OVERALL PASS' "missing verifier mode produced an overall PASS"
 not_contains "$OUTPUT" 'unknown flag --verify-db' "raw daemon invocation error was forwarded"
-contains "$OUTPUT" 'NOT VERIFIED | database.report' \
-    "missing verifier report was not explicitly marked NOT VERIFIED"
+contains "$OUTPUT" 'daemon image rejected --verify-db/--json; database probe was not run' \
+    "unsupported verifier flags did not identify why the database probe did not run"
 assert_no_secret_fixtures
-pass "missing verifier mode cannot produce a successful database check"
+pass "missing verifier mode explains that the database probe did not run without exposing stderr"
+
+reset_mocks
+write_report ""
+DAEMON_EXIT_CODE=2
+run_verify
+[ "$RUN_STATUS" -ne 0 ] || fail "a verifier with no report was accepted"
+contains "$OUTPUT" 'one-shot verifier exited with status 2 without JSON' \
+    "empty verifier output omitted the process exit status"
+contains "$OUTPUT" 'database connection and permissions were not verified' \
+    "empty verifier output did not state that database access remains unverified"
+assert_no_secret_fixtures
+pass "empty verifier output reports the exit status without claiming a database failure"
 
 echo
 echo "=== strict daemon report validation ==="
@@ -509,9 +523,11 @@ run_verify
 [ "$RUN_STATUS" -ne 0 ] || fail "missing durable consumer readiness failure was accepted"
 not_contains "$OUTPUT" 'OVERALL PASS' "unhealthy /healthz produced an overall PASS"
 contains "$OUTPUT" 'daemon.health' "failed /healthz check was not surfaced"
+contains "$OUTPUT" '/healthz returned HTTP 503; daemon readiness failed' \
+    "health failure did not identify the failing endpoint and HTTP status"
 not_contains "$OUTPUT" 'missing durable consumer' "raw /healthz response was forwarded"
 assert_no_secret_fixtures
-pass "branch-consumer readiness failure is sanitized"
+pass "readiness failure identifies the endpoint and status without exposing its response"
 
 reset_mocks
 CURL_JSZ_FAIL=1
@@ -519,8 +535,10 @@ run_verify
 [ "$RUN_STATUS" -ne 0 ] || fail "monitor authentication failure was accepted"
 not_contains "$OUTPUT" 'OVERALL PASS' "monitor authentication failure produced an overall PASS"
 contains "$OUTPUT" 'daemon.health' "monitor authentication failure was not surfaced"
+contains "$OUTPUT" '/jsz rejected monitor authentication (HTTP 401)' \
+    "monitor authentication failure did not identify its endpoint and HTTP status"
 assert_no_secret_fixtures
-pass "authenticated monitor failures are sanitized"
+pass "monitor authentication failure is identified without exposing its response"
 
 reset_mocks
 CURL_JSZ_MODE=backlog

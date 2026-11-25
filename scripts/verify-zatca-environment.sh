@@ -8,6 +8,14 @@ HEALTH_SCRIPT="${SCRIPT_DIR}/health-zatca-daemon.sh"
 CONFIG_FILE="${REPO_DIR}/config.env"
 EXPLICIT_CONFIG=false
 VERIFICATION_OK=true
+DATABASE_DIAGNOSTIC_FILE=""
+HEALTH_DIAGNOSTIC_FILE=""
+
+cleanup_diagnostics() {
+    [ -z "$DATABASE_DIAGNOSTIC_FILE" ] || rm -f -- "$DATABASE_DIAGNOSTIC_FILE"
+    [ -z "$HEALTH_DIAGNOSTIC_FILE" ] || rm -f -- "$HEALTH_DIAGNOSTIC_FILE"
+}
+trap cleanup_diagnostics EXIT
 
 usage() {
     cat <<'USAGE'
@@ -232,23 +240,32 @@ fi
 
 database_report=""
 database_exit_status=125
+database_probe_started=false
 if [ -n "$CONFIGURED_IMAGE_ID" ] && [ -n "$compose_json" ]; then
-    if database_report="$(
-        docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" \
-            --profile zatca-check run --rm --no-deps zatca-check 2>/dev/null
-    )"; then
-        database_exit_status=0
+    if DATABASE_DIAGNOSTIC_FILE="$(mktemp 2>/dev/null)"; then
+        database_probe_started=true
+        if database_report="$(
+            docker compose --env-file "$CONFIG_FILE" -f "$COMPOSE_FILE" \
+                --profile zatca-check run --rm --no-deps zatca-check \
+                2>"$DATABASE_DIAGNOSTIC_FILE"
+        )"; then
+            database_exit_status=0
+        else
+            database_exit_status=$?
+        fi
     else
-        database_exit_status=$?
+        mark_failure "NOT VERIFIED" "database.report" \
+            "private diagnostic capture could not be created; verifier was not started"
     fi
 else
     mark_failure "NOT VERIFIED" "database.report" "one-shot verifier image or Compose evidence is unavailable"
 fi
 
-if [ -n "$database_report" ]; then
-    if database_validation="$(
-        printf '%s' "$database_report" |
-            DAEMON_EXIT_STATUS="$database_exit_status" python3 -c '
+if [ "$database_probe_started" = true ]; then
+    if [ -n "$database_report" ]; then
+        if database_validation="$(
+            printf '%s' "$database_report" |
+                DAEMON_EXIT_STATUS="$database_exit_status" python3 -c '
 import json
 import os
 import re
@@ -355,52 +372,70 @@ print("REPORT\t" + aggregate)
 for line in lines:
     print(line)
 ' 2>/dev/null
-    )"; then
-        database_report_status=""
-        while IFS=$'\t' read -r record_type status check_id context; do
-            case "$record_type" in
-                REPORT)
-                    database_report_status="$status"
-                    ;;
-                CHECK)
-                    case "$status" in
-                        PASS)
-                            printf 'PASS | %s | %s\n' "database.${check_id}" "$context"
-                            ;;
-                        FAIL)
-                            mark_failure "FAIL" "database.${check_id}" "$context"
-                            ;;
-                        "NOT VERIFIED")
-                            mark_failure "NOT VERIFIED" "database.${check_id}" "$context"
-                            ;;
-                    esac
-                    ;;
-            esac
-        done <<< "$database_validation"
-        if [ "$database_report_status" != PASS ]; then
-            VERIFICATION_OK=false
+        )"; then
+            database_report_status=""
+            while IFS=$'\t' read -r record_type status check_id context; do
+                case "$record_type" in
+                    REPORT)
+                        database_report_status="$status"
+                        ;;
+                    CHECK)
+                        case "$status" in
+                            PASS)
+                                printf 'PASS | %s | %s\n' "database.${check_id}" "$context"
+                                ;;
+                            FAIL)
+                                mark_failure "FAIL" "database.${check_id}" "$context"
+                                ;;
+                            "NOT VERIFIED")
+                                mark_failure "NOT VERIFIED" "database.${check_id}" "$context"
+                                ;;
+                        esac
+                        ;;
+                esac
+            done <<< "$database_validation"
+            if [ "$database_report_status" != PASS ]; then
+                VERIFICATION_OK=false
+            fi
+        else
+            mark_failure "NOT VERIFIED" "database.report" "daemon JSON report is malformed, unknown, or inconsistent"
         fi
     else
-        mark_failure "NOT VERIFIED" "database.report" "daemon JSON report is malformed, unknown, or inconsistent"
+        if grep -Eiq 'unknown flag|flag provided but not defined' "$DATABASE_DIAGNOSTIC_FILE"; then
+            database_failure_detail="daemon image rejected --verify-db/--json; database probe was not run"
+        elif [ "$database_exit_status" -eq 125 ]; then
+            database_failure_detail="Docker could not start the one-shot verifier (exit 125); no database result was produced"
+        elif [ "$database_exit_status" -eq 0 ]; then
+            database_failure_detail="one-shot verifier exited successfully without a JSON report; database result is unavailable"
+        else
+            database_failure_detail="one-shot verifier exited with status ${database_exit_status} without JSON; database connection and permissions were not verified"
+        fi
+        mark_failure "NOT VERIFIED" "database.report" "$database_failure_detail"
     fi
-else
-    mark_failure "NOT VERIFIED" "database.report" "one-shot daemon report is missing"
 fi
 
 health_output=""
 health_exit_status=125
+health_probe_started=false
 if [ ! -f "$HEALTH_SCRIPT" ]; then
     mark_failure "NOT VERIFIED" "daemon.health" "daemon health checker is unavailable"
-elif health_output="$(bash "$HEALTH_SCRIPT" --config "$CONFIG_FILE" --json 2>/dev/null)"; then
-    health_exit_status=0
+elif HEALTH_DIAGNOSTIC_FILE="$(mktemp 2>/dev/null)"; then
+    health_probe_started=true
+    if health_output="$(bash "$HEALTH_SCRIPT" --config "$CONFIG_FILE" --json 2>"$HEALTH_DIAGNOSTIC_FILE")"; then
+        health_exit_status=0
+    else
+        health_exit_status=$?
+    fi
 else
-    health_exit_status=$?
+    mark_failure "NOT VERIFIED" "daemon.health" \
+        "private diagnostic capture could not be created; health check was not started"
 fi
 
-if [ -n "$health_output" ]; then
-    if health_result="$(
-        printf '%s' "$health_output" |
-            HEALTH_EXIT_STATUS="$health_exit_status" python3 -c '
+if [ "$health_probe_started" = true ]; then
+    if [ -n "$health_output" ]; then
+        if health_result="$(
+            printf '%s' "$health_output" |
+                HEALTH_EXIT_STATUS="$health_exit_status" python3 -c '
 import json
 import os
 import sys
@@ -428,30 +463,62 @@ if status == "healthy":
             raise SystemExit(2)
 print("%s\t%s\t%s" % (status, "true" if limits_ok else "false", os.environ["HEALTH_EXIT_STATUS"]))
 ' 2>/dev/null
-    )"; then
-        IFS=$'\t' read -r health_status limits_ok health_exit_status <<< "$health_result"
-        case "$health_status:$limits_ok:$health_exit_status" in
-            healthy:true:0)
-                printf 'PASS | daemon.health | authenticated /healthz readiness and JetStream backlog are healthy\n'
-                ;;
-            backlog_exceeded:false:*)
-                mark_failure "FAIL" "daemon.health" "JetStream backlog exceeds configured thresholds"
-                ;;
-            disabled:*)
-                mark_failure "FAIL" "daemon.health" "daemon health checker reports disabled"
-                ;;
-            *)
-                mark_failure "NOT VERIFIED" "daemon.health" "daemon health evidence is not healthy or exit status is inconsistent"
-                ;;
-        esac
+        )"; then
+            IFS=$'\t' read -r health_status limits_ok health_exit_status <<< "$health_result"
+            case "$health_status:$limits_ok:$health_exit_status" in
+                healthy:true:0)
+                    printf 'PASS | daemon.health | authenticated /healthz readiness and JetStream backlog are healthy\n'
+                    ;;
+                backlog_exceeded:false:*)
+                    mark_failure "FAIL" "daemon.health" "JetStream backlog exceeds configured thresholds"
+                    ;;
+                disabled:*)
+                    mark_failure "FAIL" "daemon.health" "daemon health checker reports disabled"
+                    ;;
+                *)
+                    mark_failure "NOT VERIFIED" "daemon.health" "daemon health evidence is not healthy or exit status is inconsistent"
+                    ;;
+            esac
+        else
+            mark_failure "NOT VERIFIED" "daemon.health" "health report is malformed, disabled, or incomplete"
+        fi
     else
-        mark_failure "NOT VERIFIED" "daemon.health" "health report is malformed, disabled, or incomplete"
-    fi
-else
-    if [ "$health_exit_status" -eq 125 ]; then
-        mark_failure "NOT VERIFIED" "daemon.health" "daemon health check could not be started"
-    else
-        mark_failure "NOT VERIFIED" "daemon.health" "authenticated daemon readiness or JetStream health check failed"
+        health_http_status="$(
+            grep -Eo 'returned error: [0-9]{3}' "$HEALTH_DIAGNOSTIC_FILE" |
+                tail -n 1 | grep -Eo '[0-9]{3}$' || true
+        )"
+        health_curl_code="$(
+            grep -Eo 'curl: \([0-9]+\)' "$HEALTH_DIAGNOSTIC_FILE" |
+                tail -n 1 | tr -cd '0-9' || true
+        )"
+        if grep -Fq 'daemon readiness check failed' "$HEALTH_DIAGNOSTIC_FILE"; then
+            if [ "$health_http_status" = 401 ] || [ "$health_http_status" = 403 ]; then
+                health_failure_detail="/healthz rejected monitor authentication (HTTP ${health_http_status})"
+            elif [ -n "$health_http_status" ]; then
+                health_failure_detail="/healthz returned HTTP ${health_http_status}; daemon readiness failed"
+            elif [ -n "$health_curl_code" ]; then
+                health_failure_detail="/healthz request failed before an HTTP response (curl error ${health_curl_code})"
+            else
+                health_failure_detail="/healthz readiness request failed; response details withheld"
+            fi
+        elif grep -Fq 'daemon JetStream monitor check failed' "$HEALTH_DIAGNOSTIC_FILE"; then
+            if [ "$health_http_status" = 401 ] || [ "$health_http_status" = 403 ]; then
+                health_failure_detail="/jsz rejected monitor authentication (HTTP ${health_http_status})"
+            elif [ -n "$health_http_status" ]; then
+                health_failure_detail="/jsz returned HTTP ${health_http_status}"
+            elif [ -n "$health_curl_code" ]; then
+                health_failure_detail="/jsz request failed before an HTTP response (curl error ${health_curl_code})"
+            else
+                health_failure_detail="/jsz monitor request failed; response details withheld"
+            fi
+        elif grep -Fq 'missing ZATCA stream' "$HEALTH_DIAGNOSTIC_FILE"; then
+            health_failure_detail="JetStream monitor response does not contain the ZATCA stream"
+        elif grep -Fq 'invalid JetStream health JSON' "$HEALTH_DIAGNOSTIC_FILE"; then
+            health_failure_detail="/jsz returned invalid JSON"
+        else
+            health_failure_detail="health checker exited with status ${health_exit_status} without a valid health report"
+        fi
+        mark_failure "NOT VERIFIED" "daemon.health" "$health_failure_detail"
     fi
 fi
 

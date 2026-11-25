@@ -132,7 +132,7 @@ CURL_CONFIG
 readiness_payload="$(monitor_get "/healthz" 2>&1)" \
     || fail "daemon readiness check failed at ${MONITOR_BASE}/healthz: ${readiness_payload}"
 
-jsz_payload="$(monitor_get "/jsz?accounts=true&streams=true&consumers=true" 2>/dev/null)" \
+jsz_payload="$(monitor_get "/jsz?accounts=true&streams=true&consumers=true")" \
     || fail "daemon JetStream monitor check failed at ${MONITOR_BASE}/jsz"
 
 summary="$(

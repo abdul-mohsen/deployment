@@ -218,24 +218,68 @@ else
     mark_failure "NOT VERIFIED" "env.parity" "running daemon environment could not be inspected"
 fi
 
+is_valid_image_id() {
+    [[ "$1" =~ ^sha256:[0-9a-f]{64}$ ]]
+}
+
+read_safe_image_revision() {
+    local image="$1" revision
+    if revision="$(
+        docker image inspect \
+            --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+            "$image" 2>/dev/null
+    )" && [[ "$revision" =~ ^[[:xdigit:]]{7,40}$ ]]; then
+        printf '%s' "${revision,,}"
+    else
+        printf 'unavailable'
+    fi
+}
+
 CONFIGURED_IMAGE_ID=""
 RUNNING_IMAGE_ID=""
+CONFIGURED_IMAGE_ID_DISPLAY="unavailable"
+RUNNING_IMAGE_ID_DISPLAY="unavailable"
+CONFIGURED_IMAGE_REVISION="unavailable"
+RUNNING_IMAGE_REVISION="unavailable"
+
 if CONFIGURED_IMAGE_ID="$(
     docker image inspect --format '{{.Id}}' "$ZATCA_DAEMON_IMAGE" 2>/dev/null
 )"; then
-    if [ -n "$CONFIGURED_IMAGE_ID" ] &&
-        RUNNING_IMAGE_ID="$(docker inspect --format '{{.Image}}' "$CONTAINER" 2>/dev/null)" &&
-        [ -n "$RUNNING_IMAGE_ID" ]; then
-        if [ "$CONFIGURED_IMAGE_ID" = "$RUNNING_IMAGE_ID" ]; then
-            printf 'PASS | daemon.image | configured image matches the running daemon image\n'
-        else
-            mark_failure "FAIL" "daemon.image" "configured image does not match the running daemon image"
-        fi
+    if is_valid_image_id "$CONFIGURED_IMAGE_ID"; then
+        CONFIGURED_IMAGE_ID_DISPLAY="$CONFIGURED_IMAGE_ID"
+        CONFIGURED_IMAGE_REVISION="$(read_safe_image_revision "$CONFIGURED_IMAGE_ID")"
     else
-        mark_failure "NOT VERIFIED" "daemon.image" "running daemon image could not be inspected"
+        CONFIGURED_IMAGE_ID=""
+        mark_failure "NOT VERIFIED" "daemon.image" "configured daemon image returned an invalid image ID"
     fi
 else
     mark_failure "NOT VERIFIED" "daemon.image" "configured daemon image is unavailable locally"
+fi
+
+if RUNNING_IMAGE_ID="$(
+    docker inspect --format '{{.Image}}' "$CONTAINER" 2>/dev/null
+)"; then
+    if is_valid_image_id "$RUNNING_IMAGE_ID"; then
+        RUNNING_IMAGE_ID_DISPLAY="$RUNNING_IMAGE_ID"
+        RUNNING_IMAGE_REVISION="$(read_safe_image_revision "$RUNNING_IMAGE_ID")"
+    else
+        RUNNING_IMAGE_ID=""
+        mark_failure "NOT VERIFIED" "daemon.image" "running daemon returned an invalid image ID"
+    fi
+else
+    mark_failure "NOT VERIFIED" "daemon.image" "running daemon image could not be inspected"
+fi
+
+printf 'INFO | daemon.image.provenance | configured_id=%s configured_revision=%s running_id=%s running_revision=%s\n' \
+    "$CONFIGURED_IMAGE_ID_DISPLAY" "$CONFIGURED_IMAGE_REVISION" \
+    "$RUNNING_IMAGE_ID_DISPLAY" "$RUNNING_IMAGE_REVISION"
+
+if [ -n "$CONFIGURED_IMAGE_ID" ] && [ -n "$RUNNING_IMAGE_ID" ]; then
+    if [ "$CONFIGURED_IMAGE_ID" = "$RUNNING_IMAGE_ID" ]; then
+        printf 'PASS | daemon.image | configured image matches the running daemon image\n'
+    else
+        mark_failure "FAIL" "daemon.image" "configured image does not match the running daemon image"
+    fi
 fi
 
 database_report=""
@@ -414,6 +458,21 @@ for line in lines:
     fi
 fi
 
+MONITOR_HOST="${ZATCA_NATS_MONITOR_HOST:-127.0.0.1}"
+MONITOR_PORT="${ZATCA_NATS_MONITOR_PORT:-8222}"
+monitor_target_class="custom_host_redacted"
+case "${MONITOR_HOST,,}" in
+    localhost|127.0.0.1|::1) monitor_target_class="loopback" ;;
+esac
+
+safe_monitor_port="unavailable"
+if [[ "$MONITOR_PORT" =~ ^[0-9]{1,5}$ ]] &&
+    (( 10#$MONITOR_PORT >= 1 && 10#$MONITOR_PORT <= 65535 )); then
+    safe_monitor_port="$MONITOR_PORT"
+fi
+monitor_context="class=${monitor_target_class} port=${safe_monitor_port}"
+printf 'INFO | daemon.monitor.target | %s endpoints=/healthz,/jsz\n' "$monitor_context"
+
 health_output=""
 health_exit_status=125
 health_probe_started=false
@@ -470,17 +529,20 @@ print("%s\t%s\t%s" % (status, "true" if limits_ok else "false", os.environ["HEAL
                     printf 'PASS | daemon.health | authenticated /healthz readiness and JetStream backlog are healthy\n'
                     ;;
                 backlog_exceeded:false:*)
-                    mark_failure "FAIL" "daemon.health" "JetStream backlog exceeds configured thresholds"
+                    mark_failure "FAIL" "daemon.health" \
+                        "/jsz JetStream backlog exceeds configured thresholds (${monitor_context})"
                     ;;
                 disabled:*)
-                    mark_failure "FAIL" "daemon.health" "daemon health checker reports disabled"
+                    mark_failure "FAIL" "daemon.health" \
+                        "health checker reports disabled; /healthz and /jsz were not verified (${monitor_context})"
                     ;;
                 *)
                     mark_failure "NOT VERIFIED" "daemon.health" "daemon health evidence is not healthy or exit status is inconsistent"
                     ;;
             esac
         else
-            mark_failure "NOT VERIFIED" "daemon.health" "health report is malformed, disabled, or incomplete"
+            mark_failure "NOT VERIFIED" "daemon.health" \
+                "health checker did not provide a valid /healthz and /jsz report (${monitor_context})"
         fi
     else
         health_http_status="$(
@@ -491,13 +553,25 @@ print("%s\t%s\t%s" % (status, "true" if limits_ok else "false", os.environ["HEAL
             grep -Eo 'curl: \([0-9]+\)' "$HEALTH_DIAGNOSTIC_FILE" |
                 tail -n 1 | tr -cd '0-9' || true
         )"
+        case "$health_curl_code" in
+            [0-9]|[0-9][0-9]|[0-9][0-9][0-9]) ;;
+            *) health_curl_code="" ;;
+        esac
+        health_curl_category=""
+        case "$health_curl_code" in
+            6) health_curl_category="name resolution failure" ;;
+            7) health_curl_category="connection failure" ;;
+            28) health_curl_category="timeout" ;;
+            "") ;;
+            *) health_curl_category="transport failure" ;;
+        esac
         if grep -Fq 'daemon readiness check failed' "$HEALTH_DIAGNOSTIC_FILE"; then
             if [ "$health_http_status" = 401 ] || [ "$health_http_status" = 403 ]; then
                 health_failure_detail="/healthz rejected monitor authentication (HTTP ${health_http_status})"
             elif [ -n "$health_http_status" ]; then
                 health_failure_detail="/healthz returned HTTP ${health_http_status}; daemon readiness failed"
             elif [ -n "$health_curl_code" ]; then
-                health_failure_detail="/healthz request failed before an HTTP response (curl error ${health_curl_code})"
+                health_failure_detail="/healthz request failed before an HTTP response (${health_curl_category}; curl error ${health_curl_code})"
             else
                 health_failure_detail="/healthz readiness request failed; response details withheld"
             fi
@@ -507,7 +581,7 @@ print("%s\t%s\t%s" % (status, "true" if limits_ok else "false", os.environ["HEAL
             elif [ -n "$health_http_status" ]; then
                 health_failure_detail="/jsz returned HTTP ${health_http_status}"
             elif [ -n "$health_curl_code" ]; then
-                health_failure_detail="/jsz request failed before an HTTP response (curl error ${health_curl_code})"
+                health_failure_detail="/jsz request failed before an HTTP response (${health_curl_category}; curl error ${health_curl_code})"
             else
                 health_failure_detail="/jsz monitor request failed; response details withheld"
             fi
@@ -518,6 +592,7 @@ print("%s\t%s\t%s" % (status, "true" if limits_ok else "false", os.environ["HEAL
         else
             health_failure_detail="health checker exited with status ${health_exit_status} without a valid health report"
         fi
+        health_failure_detail="${health_failure_detail} (${monitor_context})"
         mark_failure "NOT VERIFIED" "daemon.health" "$health_failure_detail"
     fi
 fi

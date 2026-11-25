@@ -171,6 +171,13 @@ the process exited without a report; in either case, it states that database
 access was not verified. Health failures identify the endpoint and HTTP/curl
 status when available, while withholding response bodies.
 
+For diagnosis, the verifier also prints configured/running daemon image IDs
+and validated source revisions when available, plus the monitor target class,
+valid port, and checked endpoints. Custom monitor hostnames, image references,
+raw Docker/curl errors, and response bodies are withheld. A curl error 7 means
+the monitor connection could not be established before an HTTP response; it
+does not mean the database probe ran.
+
 ### Refreshing the daemon image
 
 `stack restart` restarts the platform and runs daemon setup, but it does not

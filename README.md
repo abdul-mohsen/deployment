@@ -165,8 +165,11 @@ check. Overall success covers configuration, database access, consumer
 readiness, and daemon health only; it does not test external invoice
 submission. The verifier performs no persistent database writes, NATS
 publishes, or invoice submissions. It never prints passwords, encryption keys,
-DSNs, or raw database, Compose, or monitor errors; do not add temporary
-credential logging when diagnosing a failure.
+DSNs, or raw database, Compose, or monitor errors. If the one-shot database
+report is missing, it reports whether the image rejected the verifier flags or
+the process exited without a report; in either case, it states that database
+access was not verified. Health failures identify the endpoint and HTTP/curl
+status when available, while withholding response bodies.
 
 ### Refreshing the daemon image
 

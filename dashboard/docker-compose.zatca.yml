@@ -8,6 +8,34 @@
 # is fixed by the daemon (one ordered fetch per active branch); backlog values
 # are checked by scripts/health-zatca-daemon.sh, not passed as unsupported
 # daemon environment variables.
+x-zatca-daemon-environment: &zatca-daemon-environment
+  DB_USER: ${ZATCA_DB_USER:?ZATCA_DB_USER must be set}
+  DB_PASS: ${ZATCA_DB_PASSWORD:?ZATCA_DB_PASSWORD must be set}
+  DB_HOST: ${MYSQL_HOST:-host.docker.internal}
+  DB_PORT: ${MYSQL_PORT:-3306}
+  MASTER_DB: ${MYSQL_MASTER_DB:-zatca_master}
+  ADMIN_DB_USER: ${ZATCA_ADMIN_DB_USER:-}
+  ADMIN_DB_PASS: ${ZATCA_ADMIN_DB_PASSWORD:-}
+  ADMIN_DB_HOST: ${ZATCA_ADMIN_DB_HOST:-}
+  ENCRYPT_KEY: ${ZATCA_ENCRYPT_KEY:?ZATCA_ENCRYPT_KEY must be set}
+  NATS_USER: "${NATS_USER:?NATS_USER must be set}"
+  NATS_PASSWORD: "${NATS_PASSWORD:?NATS_PASSWORD must be set}"
+  NATS_ALLOW_UNAUTHENTICATED: "false"
+  NATS_LOCAL_TEST_MODE: "false"
+  NATS_PRIVATE_NETWORK_ONLY: "${NATS_PRIVATE_NETWORK_ONLY:?NATS_PRIVATE_NETWORK_ONLY must be set}"
+  NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED: "${NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED:-false}"
+  NATS_SHARED_CREDENTIALS_ACKNOWLEDGED: "${NATS_SHARED_CREDENTIALS_ACKNOWLEDGED:-false}"
+  NATS_SHARED_CREDENTIALS_APPROVAL_ID: "${NATS_SHARED_CREDENTIALS_APPROVAL_ID:-}"
+  NATS_SHARED_CREDENTIALS_EXPIRES: "${NATS_SHARED_CREDENTIALS_EXPIRES:-}"
+  MONITOR_PASS: ${ZATCA_MONITOR_PASSWORD:?ZATCA_MONITOR_PASSWORD must be set}
+  NATS_MONITOR_PRIVATE_NETWORK_ONLY: "${NATS_PRIVATE_NETWORK_ONLY:?NATS_PRIVATE_NETWORK_ONLY must be set}"
+  NATS_MONITOR_LOCAL_TEST_MODE: "false"
+  SMTP_HOST: ${ZATCA_SMTP_HOST:-host.docker.internal}
+  SMTP_PORT: ${ZATCA_SMTP_PORT:-25}
+  SMTP_USER: ${ZATCA_SMTP_USER:-}
+  SMTP_PASS: ${ZATCA_SMTP_PASSWORD:-}
+  SMTP_FROM: ${ZATCA_SMTP_FROM:-zatca-daemon@localhost}
+
 services:
   zatca-daemon:
     profiles: ["zatca"]
@@ -23,33 +51,7 @@ services:
       - "127.0.0.1:${ZATCA_NATS_MONITOR_PORT:-8222}:8222"
     volumes:
       - "${ZATCA_NATS_DATA_ROOT:-/opt/zatca-nats}:/data/nats"
-    environment:
-      DB_USER: ${ZATCA_DB_USER:?ZATCA_DB_USER must be set}
-      DB_PASS: ${ZATCA_DB_PASSWORD:?ZATCA_DB_PASSWORD must be set}
-      DB_HOST: ${MYSQL_HOST:-host.docker.internal}
-      DB_PORT: ${MYSQL_PORT:-3306}
-      MASTER_DB: ${MYSQL_MASTER_DB:-zatca_master}
-      ADMIN_DB_USER: ${ZATCA_ADMIN_DB_USER:-}
-      ADMIN_DB_PASS: ${ZATCA_ADMIN_DB_PASSWORD:-}
-      ADMIN_DB_HOST: ${ZATCA_ADMIN_DB_HOST:-}
-      ENCRYPT_KEY: ${ZATCA_ENCRYPT_KEY:?ZATCA_ENCRYPT_KEY must be set}
-      NATS_USER: "${NATS_USER:?NATS_USER must be set}"
-      NATS_PASSWORD: "${NATS_PASSWORD:?NATS_PASSWORD must be set}"
-      NATS_ALLOW_UNAUTHENTICATED: "false"
-      NATS_LOCAL_TEST_MODE: "false"
-      NATS_PRIVATE_NETWORK_ONLY: "${NATS_PRIVATE_NETWORK_ONLY:?NATS_PRIVATE_NETWORK_ONLY must be set}"
-      NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED: "${NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED:-false}"
-      NATS_SHARED_CREDENTIALS_ACKNOWLEDGED: "${NATS_SHARED_CREDENTIALS_ACKNOWLEDGED:-false}"
-      NATS_SHARED_CREDENTIALS_APPROVAL_ID: "${NATS_SHARED_CREDENTIALS_APPROVAL_ID:-}"
-      NATS_SHARED_CREDENTIALS_EXPIRES: "${NATS_SHARED_CREDENTIALS_EXPIRES:-}"
-      MONITOR_PASS: ${ZATCA_MONITOR_PASSWORD:?ZATCA_MONITOR_PASSWORD must be set}
-      NATS_MONITOR_PRIVATE_NETWORK_ONLY: "${NATS_PRIVATE_NETWORK_ONLY:?NATS_PRIVATE_NETWORK_ONLY must be set}"
-      NATS_MONITOR_LOCAL_TEST_MODE: "false"
-      SMTP_HOST: ${ZATCA_SMTP_HOST:-host.docker.internal}
-      SMTP_PORT: ${ZATCA_SMTP_PORT:-25}
-      SMTP_USER: ${ZATCA_SMTP_USER:-}
-      SMTP_PASS: ${ZATCA_SMTP_PASSWORD:-}
-      SMTP_FROM: ${ZATCA_SMTP_FROM:-zatca-daemon@localhost}
+    environment: *zatca-daemon-environment
     command:
       - "--nats-mode=embedded"
       - "--nats-port=4222"
@@ -68,3 +70,14 @@ services:
       options:
         max-size: "20m"
         max-file: "5"
+
+  zatca-check:
+    profiles: ["zatca-check"]
+    image: ${ZATCA_DAEMON_IMAGE:?ZATCA_DAEMON_IMAGE must be set}
+    pull_policy: missing
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment: *zatca-daemon-environment
+    command:
+      - "--verify-db"
+      - "--json"

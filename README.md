@@ -130,6 +130,44 @@ the Dokku app and daemon receive the new values. The daemon retries tenant
 discovery; a schema failure in one tenant is reported without stopping other
 ready tenants.
 
+### Verifying the configured environment and database access
+
+Run this on the Dokku host after updating the protected `config.env`, with
+access to the Docker daemon:
+
+```bash
+sudo bash ./scripts/verify-zatca-environment.sh
+```
+
+By default, the verifier selects only the deployment repository's `config.env`;
+it never falls back to `.env`, shell variables, or another file. To check a
+specific alternate file, pass it explicitly:
+
+```bash
+sudo bash ./scripts/verify-zatca-environment.sh --env-file /secure/path/config.env
+```
+
+The verifier requires `ZATCA_DAEMON_ENABLED=1`. It compares every mapped
+Compose setting and the configured image identity with the running daemon,
+then checks database access for every enabled tenant and active branch using
+the configured runtime account and, when supplied, the optional onboarding
+account. Required write privileges are checked with non-mutating `EXPLAIN`
+probes; it does not require MySQL global-administrator credentials or inspect
+`mysql.*` privilege tables. It also checks the running daemon's authenticated
+health and active-branch consumer readiness. If the file was changed, restart
+or recreate the daemon first; a stale container environment or image is not
+reported as verified.
+
+Each check reports `PASS`, `FAIL`, or `NOT VERIFIED`. Exit status `0` means all
+required checks passed, `1` means at least one check failed or remains unknown,
+and `2` means invocation or selected-configuration validation prevented a
+check. Overall success covers configuration, database access, consumer
+readiness, and daemon health only; it does not test external invoice
+submission. The verifier performs no persistent database writes, NATS
+publishes, or invoice submissions. It never prints passwords, encryption keys,
+DSNs, or raw database, Compose, or monitor errors; do not add temporary
+credential logging when diagnosing a failure.
+
 ### Refreshing the daemon image
 
 `stack restart` restarts the platform and runs daemon setup, but it does not

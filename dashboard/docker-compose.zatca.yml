@@ -28,6 +28,9 @@ x-zatca-daemon-environment: &zatca-daemon-environment
   NATS_SHARED_CREDENTIALS_APPROVAL_ID: "${NATS_SHARED_CREDENTIALS_APPROVAL_ID:-}"
   NATS_SHARED_CREDENTIALS_EXPIRES: "${NATS_SHARED_CREDENTIALS_EXPIRES:-}"
   MONITOR_PASS: ${ZATCA_MONITOR_PASSWORD:?ZATCA_MONITOR_PASSWORD must be set}
+  # Bind inside the container so Docker's loopback-only port mapping
+  # (127.0.0.1:8222:8222) can reach the monitor proxy from the host.
+  NATS_MONITOR_HOST: "0.0.0.0"
   NATS_MONITOR_PRIVATE_NETWORK_ONLY: "${NATS_PRIVATE_NETWORK_ONLY:?NATS_PRIVATE_NETWORK_ONLY must be set}"
   NATS_MONITOR_LOCAL_TEST_MODE: "false"
   SMTP_HOST: ${ZATCA_SMTP_HOST:-host.docker.internal}

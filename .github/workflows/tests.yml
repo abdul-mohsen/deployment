@@ -56,6 +56,7 @@ jobs:
           bash scripts/tests/test-migrate-zatca-master.sh
           bash scripts/tests/test-zatca-runtime.sh
           bash scripts/tests/test-rebuild-zatca-daemon.sh
+          bash scripts/tests/test-verify-zatca-environment.sh
 
       - name: Check PR215 MySQL rehearsal availability
         id: mysql-rehearsal

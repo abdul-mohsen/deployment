@@ -111,6 +111,7 @@ write_compose_json() {
   "NATS_SHARED_CREDENTIALS_APPROVAL_ID":"VERIFY-TEST-APPROVAL",
   "NATS_SHARED_CREDENTIALS_EXPIRES":"2099-12-31",
   "MONITOR_PASS":"MONITOR_PASSWORD_FIXTURE",
+  "NATS_MONITOR_HOST":"0.0.0.0",
   "NATS_MONITOR_PRIVATE_NETWORK_ONLY":"true",
   "NATS_MONITOR_LOCAL_TEST_MODE":"false",
   "SMTP_HOST":"smtp.test.internal",
@@ -170,6 +171,7 @@ write_running_env() {
   "NATS_SHARED_CREDENTIALS_APPROVAL_ID=VERIFY-TEST-APPROVAL",
   "NATS_SHARED_CREDENTIALS_EXPIRES=2099-12-31",
   "MONITOR_PASS=MONITOR_PASSWORD_FIXTURE",
+  "NATS_MONITOR_HOST=0.0.0.0",
   "NATS_MONITOR_PRIVATE_NETWORK_ONLY=true",
   "NATS_MONITOR_LOCAL_TEST_MODE=false",
   "SMTP_HOST=smtp.test.internal",
@@ -215,6 +217,41 @@ case "${1:-}" in
                 ;;
         esac
         ;;
+    ps)
+        if [ -n "${MOCK_DOCKER_PS:-}" ]; then
+            printf '%s\n' "$MOCK_DOCKER_PS"
+        fi
+        ;;
+    port)
+        if [ "${2:-}" = "nats" ] && [ -n "${MOCK_LEGACY_NATS_PORT:-}" ]; then
+            printf '0.0.0.0:%s\n' "$MOCK_LEGACY_NATS_PORT"
+        fi
+        ;;
+    logs)
+        if [ -n "${MOCK_CONTAINER_LOGS:-}" ]; then
+            printf '%b\n' "$MOCK_CONTAINER_LOGS"
+        fi
+        ;;
+    exec)
+        if [ "${2:-}" = "dokku" ]; then
+            case "${4:-}" in
+                apps:list)
+                    printf '%s\n' "=====> My Apps" "acme-backend" "acme-frontend"
+                    ;;
+                config)
+                    printf '%s\n' \
+                        "=====> acme-backend env vars" \
+                        "HOST: ${MOCK_TENANT_HOST:-db.test.internal}" \
+                        "NATS_URL: ${MOCK_TENANT_NATS_URL:-nats://host.docker.internal:4222}" \
+                        "NATS_USER: ${MOCK_TENANT_NATS_USER:-daemon-user}" \
+                        "NATS_PASSWORD: ${MOCK_TENANT_NATS_PASSWORD:-NATS_PASSWORD_FIXTURE}"
+                    ;;
+                docker-options:report)
+                    printf '%s\n' "${MOCK_TENANT_DOCKER_OPTS---add-host=host.docker.internal:host-gateway}"
+                    ;;
+            esac
+        fi
+        ;;
     inspect)
         [ "${INSPECT_FAIL:-0}" = "0" ] || exit 31
         format="${3:-}"
@@ -227,6 +264,18 @@ case "${1:-}" in
                 ;;
             *".Image"*)
                 printf '%s\n' "${MOCK_RUNNING_IMAGE_ID:-sha256:$(printf '%064d' 0 | tr '0' 'a')}"
+                ;;
+            *".NetworkSettings.Networks"*)
+                printf '%s\n' '{"zatca_net":{"IPAddress":"172.22.0.5"}}'
+                ;;
+            *".State"*)
+                printf '%s\n' '{"Status":"running","Health":{"Status":"healthy"},"OOMKilled":false}'
+                ;;
+            *".HostConfig.ExtraHosts"*)
+                printf '%s\n' '["host.docker.internal:host-gateway"]'
+                ;;
+            *".RestartCount"*)
+                printf '%s\n' '0'
                 ;;
             *)
                 exit 32
@@ -335,6 +384,14 @@ reset_mocks() {
     CURL_HEALTH_CURL_CODE=0
     CURL_JSZ_FAIL=0
     CURL_JSZ_MODE=healthy
+    MOCK_DOCKER_PS=""
+    MOCK_LEGACY_NATS_PORT=""
+    MOCK_CONTAINER_LOGS=""
+    MOCK_TENANT_HOST="db.test.internal"
+    MOCK_TENANT_NATS_URL="nats://host.docker.internal:4222"
+    MOCK_TENANT_NATS_USER="daemon-user"
+    MOCK_TENANT_NATS_PASSWORD="NATS_PASSWORD_FIXTURE"
+    MOCK_TENANT_DOCKER_OPTS="--add-host=host.docker.internal:host-gateway"
 }
 
 write_report() {
@@ -365,6 +422,14 @@ run_verify() {
             CURL_HEALTH_CURL_CODE="${CURL_HEALTH_CURL_CODE:-0}" \
             CURL_JSZ_FAIL="${CURL_JSZ_FAIL:-0}" \
             CURL_JSZ_MODE="${CURL_JSZ_MODE:-healthy}" \
+            MOCK_DOCKER_PS="${MOCK_DOCKER_PS:-}" \
+            MOCK_LEGACY_NATS_PORT="${MOCK_LEGACY_NATS_PORT:-}" \
+            MOCK_CONTAINER_LOGS="${MOCK_CONTAINER_LOGS:-}" \
+            MOCK_TENANT_HOST="${MOCK_TENANT_HOST:-db.test.internal}" \
+            MOCK_TENANT_NATS_URL="${MOCK_TENANT_NATS_URL:-nats://host.docker.internal:4222}" \
+            MOCK_TENANT_NATS_USER="${MOCK_TENANT_NATS_USER:-daemon-user}" \
+            MOCK_TENANT_NATS_PASSWORD="${MOCK_TENANT_NATS_PASSWORD:-NATS_PASSWORD_FIXTURE}" \
+            MOCK_TENANT_DOCKER_OPTS="${MOCK_TENANT_DOCKER_OPTS---add-host=host.docker.internal:host-gateway}" \
             bash "$TEST_REPO/$VERIFY_SCRIPT" "$@"
     ) >"$OUTPUT" 2>&1; then
         RUN_STATUS=0
@@ -488,7 +553,13 @@ contains "$OUTPUT" 'INFO | daemon.monitor.target | class=loopback port=8222 endp
     "safe default monitor target context was not reported"
 contains "$OUTPUT" 'INFO | database.target | class=custom_host_redacted port=3307' \
     "safe database target class and port were not reported"
-not_contains "$OUTPUT" 'db.test.internal' "database hostname was printed"
+contains "$OUTPUT" 'INFO | database.target.details | user=runtime-user host=db.test.internal port=3307 master_db=zatca_master' \
+    "verbose non-secret database target details were not reported"
+contains "$OUTPUT" 'INFO | daemon.jetstream | stream=ZATCA messages=0 consumers=1 pending=0/1000 ack_pending=0/100 redelivered=0' \
+    "JetStream summary counters were not reported"
+contains "$OUTPUT" 'PASS | compose.monitor_bind' "Compose NATS_MONITOR_HOST=0.0.0.0 bind check did not pass"
+contains "$OUTPUT" 'PASS | daemon.monitor_bind' "running container NATS_MONITOR_HOST=0.0.0.0 bind check did not pass"
+contains "$OUTPUT" 'database=zatca_master' "database check output omitted database name"
 contains "$DOCKER_LOG" "--profile zatca-check run --rm --no-deps zatca-check" \
     "one-shot verifier was not run in isolation"
 contains "$DOCKER_LOG" "--env-file $TEST_REPO/config.env" \
@@ -498,35 +569,36 @@ contains "$OUTPUT" 'OVERALL PASS' "complete verified evidence did not produce an
 contains "$OUTPUT" 'external invoice submission was not tested' \
     "overall PASS did not state the external-invoice boundary"
 assert_no_secret_fixtures
-pass "complete DB, image, environment, and live-health evidence is required for PASS"
+pass "complete DB, image, environment, monitor bind, and live-health evidence is required for PASS"
 
 reset_mocks
 write_database_target "host.docker.internal" "3306"
 run_verify
 contains "$OUTPUT" 'INFO | database.target | class=host_gateway port=3306' \
     "host gateway database target was not classified"
-not_contains "$OUTPUT" 'host.docker.internal' "host gateway database hostname was printed"
+contains "$OUTPUT" 'host=host.docker.internal' "host gateway database target detail was not shown"
 assert_no_secret_fixtures
-pass "host gateway database targets report only the safe class and port"
+pass "host gateway database targets report safe class, port, and non-secret host"
 
 reset_mocks
 write_database_target "127.0.0.2" "3307"
 run_verify
 contains "$OUTPUT" 'INFO | database.target | class=container_loopback port=3307' \
     "container loopback database target was not classified"
-not_contains "$OUTPUT" '127.0.0.2' "container loopback database address was printed"
+contains "$OUTPUT" 'WARN | database.target.loopback' \
+    "container loopback DB_HOST did not emit a loopback warning"
+contains "$OUTPUT" 'NEXT STEP' "container loopback DB_HOST did not emit a guided next step"
 assert_no_secret_fixtures
-pass "container loopback database targets report only the safe class and port"
+pass "container loopback database targets warn and guide toward host.docker.internal"
 
 reset_mocks
 write_database_target "private-db.test.invalid" "70000"
 run_verify
 contains "$OUTPUT" 'INFO | database.target | class=custom_host_redacted port=unavailable' \
     "invalid database port was not withheld"
-not_contains "$OUTPUT" 'private-db.test.invalid' "private database hostname was printed"
 not_contains "$OUTPUT" '70000' "invalid database port was printed"
 assert_no_secret_fixtures
-pass "invalid database ports and custom database hosts are withheld"
+pass "invalid database ports are withheld as unavailable"
 
 reset_mocks
 MOCK_RUNNING_IMAGE_ID="$MOCK_STALE_IMAGE_ID"
@@ -647,9 +719,10 @@ contains "$OUTPUT" 'successful Dokku admin test does not verify the daemon conne
     "MySQL 1045 guidance ignored the known working Dokku admin test"
 contains "$OUTPUT" 'before changing credentials' \
     "MySQL 1045 guidance did not prioritize diagnosis before credential changes"
-not_contains "$OUTPUT" 'db.test.internal' "MySQL 1045 diagnostics exposed the database hostname"
+contains "$OUTPUT" 'user=runtime-user' "MySQL 1045 guidance did not identify the tested DB user"
+contains "$OUTPUT" '172.22.0.5' "MySQL 1045 guidance did not show the container source IP"
 assert_no_secret_fixtures
-pass "a valid nonzero daemon report is parsed and remains a failure"
+pass "a valid nonzero daemon report is parsed and remains a failure with actionable DB grant context"
 
 echo
 echo "=== authenticated daemon health and backlog gates ==="
@@ -680,13 +753,12 @@ for curl_code in 6 7 28 56; do
                 "curl error 56 omitted the safe logs/state follow-up after DB and image checks"
             ;;
     esac
-    not_contains "$OUTPUT" 'monitor.private.invalid' "private monitor hostname was printed"
     not_contains "$OUTPUT" 'Failed to connect' "raw curl diagnostic was printed"
     not_contains "$OUTPUT" 'secret=' "raw curl diagnostic fixture was printed"
     not_contains "$OUTPUT" 'OVERALL PASS' "curl error $curl_code produced an overall PASS"
     assert_no_secret_fixtures
 done
-pass "curl resolution, connection, timeout, and response-receive errors include safe target context only"
+pass "curl resolution, connection, timeout, and response-receive errors include safe target context without leaking secrets"
 
 reset_mocks
 cp "$TEST_REPO/config.env" "$TEST_ROOT/invalid-monitor-port.env"
@@ -696,12 +768,12 @@ printf '%s\n' \
 CURL_HEALTH_CURL_CODE=3
 run_verify --env-file "$TEST_ROOT/invalid-monitor-port.env"
 [ "$RUN_STATUS" -ne 0 ] || fail "invalid monitor port was accepted as healthy"
+contains "$OUTPUT" 'FAIL | config.port.ZATCA_NATS_MONITOR_PORT' "invalid monitor port was not flagged in Stage 1"
 contains "$OUTPUT" 'INFO | daemon.monitor.target | class=custom_host_redacted port=unavailable endpoints=/healthz,/jsz' \
     "invalid monitor port was not withheld"
 not_contains "$OUTPUT" '9123-not-a-port' "invalid monitor port was printed"
-not_contains "$OUTPUT" 'monitor.private.invalid' "private host for invalid port was printed"
 assert_no_secret_fixtures
-pass "invalid monitor ports and private hosts are withheld"
+pass "invalid monitor ports are flagged and withheld as unavailable"
 
 reset_mocks
 CURL_HEALTH_FAIL=1
@@ -711,9 +783,11 @@ not_contains "$OUTPUT" 'OVERALL PASS' "unhealthy /healthz produced an overall PA
 contains "$OUTPUT" 'daemon.health' "failed /healthz check was not surfaced"
 contains "$OUTPUT" '/healthz returned HTTP 503; daemon readiness failed' \
     "health failure did not identify the failing endpoint and HTTP status"
-not_contains "$OUTPUT" 'missing durable consumer' "raw /healthz response was forwarded"
+contains "$OUTPUT" 'INFO | daemon.readiness | error=missing durable consumer' \
+    "allow-listed readiness error reason was not surfaced for operator debugging"
+not_contains "$OUTPUT" 'raw response' "non-allow-listed secret field from /healthz was exposed"
 assert_no_secret_fixtures
-pass "readiness failure identifies the endpoint and status without exposing its response"
+pass "readiness failure extracts allow-listed redacted reason while excluding unknown/secret fields"
 
 reset_mocks
 CURL_JSZ_FAIL=1
@@ -775,5 +849,194 @@ not_contains "$OUTPUT" 'OVERALL PASS' "disabled configuration produced an overal
 not_contains "$DOCKER_LOG" ' run ' "disabled configuration started a verifier container"
 assert_no_secret_fixtures
 pass "disabled daemon configuration blocks the verifier before Compose execution"
+
+echo
+echo "=== new verbose guided checks: monitor bind, single-pass scan, drift, interpolation, logs, dokku ==="
+
+# 1. --config alias and --verbose full mapped env table with secrets strictly redacted
+reset_mocks
+run_verify --config "$TEST_ROOT/alternate.env" --verbose
+[ "$RUN_STATUS" -eq 0 ] || { cat "$OUTPUT" >&2; fail "--config --verbose valid run failed"; }
+contains "$OUTPUT" 'INFO | compose.env | DB_PASS=[REDACTED]' "--verbose did not redact DB_PASS"
+contains "$OUTPUT" 'INFO | compose.env | NATS_MONITOR_HOST=0.0.0.0' "--verbose did not print NATS_MONITOR_HOST"
+contains "$OUTPUT" 'INFO | summary |' "summary counts were not printed"
+assert_no_secret_fixtures
+pass "--config alias and --verbose mapped environment table redact all secrets"
+
+# 2. Missing/loopback NATS_MONITOR_HOST in Compose & running container + curl 56 cross-link
+reset_mocks
+python3 - "$COMPOSE_JSON_FILE" "$RUNNING_ENV_FILE" <<'PY'
+import json, sys
+c_path, r_path = sys.argv[1:3]
+with open(c_path, encoding="utf-8") as fh:
+    c = json.load(fh)
+c["services"]["zatca-daemon"]["environment"].pop("NATS_MONITOR_HOST", None)
+with open(c_path, "w", encoding="utf-8") as fh:
+    json.dump(c, fh)
+with open(r_path, encoding="utf-8") as fh:
+    r = [x for x in json.load(fh) if not x.startswith("NATS_MONITOR_HOST=")]
+with open(r_path, "w", encoding="utf-8") as fh:
+    json.dump(r, fh)
+PY
+CURL_HEALTH_CURL_CODE=56
+run_verify
+[ "$RUN_STATUS" -ne 0 ] || fail "missing NATS_MONITOR_HOST was accepted"
+contains "$OUTPUT" 'FAIL | compose.monitor_bind' "missing Compose NATS_MONITOR_HOST was not flagged"
+contains "$OUTPUT" 'FAIL | daemon.monitor_bind' "missing running container NATS_MONITOR_HOST was not flagged"
+contains "$OUTPUT" 'curl error 56 correlates directly with NATS_MONITOR_HOST' \
+    "curl 56 did not cross-link to the Stage 3 NATS_MONITOR_HOST root cause"
+contains "$OUTPUT" 'NEXT STEP 1 |' "guided next steps were not emitted"
+assert_no_secret_fixtures
+pass "missing NATS_MONITOR_HOST is flagged in Stage 3 and correlated with curl error 56"
+
+# 3. Single-pass multi-error config scan (does NOT abort on the first missing key)
+reset_mocks
+cat > "$TEST_ROOT/multi-broken.env" <<'BROKEN'
+ZATCA_DAEMON_ENABLED=1
+ZATCA_DAEMON_IMAGE=local/zatca-daemon:verify-test
+ZATCA_DB_USER=runtime-user
+MYSQL_PORT=3307
+ZATCA_NATS_PORT=4333
+NATS_URL=nats://host.docker.internal:4222
+NATS_PRIVATE_NETWORK_ONLY=false
+NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED=false
+NATS_SHARED_CREDENTIALS_ACKNOWLEDGED=false
+NATS_SHARED_CREDENTIALS_APPROVAL_ID=
+NATS_SHARED_CREDENTIALS_EXPIRES=2020-01-01
+BROKEN
+python3 - "$TEST_ROOT/multi-broken.env" <<'PY'
+import sys
+p = sys.argv[1]
+data = open(p, "rb").read().replace(b"\n", b"\r\n")
+open(p, "wb").write(data)
+PY
+run_verify --env-file "$TEST_ROOT/multi-broken.env"
+[ "$RUN_STATUS" -eq 2 ] || fail "multi-error config did not exit with code 2 (got $RUN_STATUS)"
+contains "$OUTPUT" 'FAIL | config.format.crlf' "CRLF endings were not detected"
+contains "$OUTPUT" 'ZATCA_DB_PASSWORD' "missing ZATCA_DB_PASSWORD was not listed"
+contains "$OUTPUT" 'ZATCA_ENCRYPT_KEY' "missing ZATCA_ENCRYPT_KEY was not listed in the same pass"
+contains "$OUTPUT" 'NATS_PASSWORD' "missing NATS_PASSWORD was not listed in the same pass"
+contains "$OUTPUT" 'NATS_PRIVATE_NETWORK_ONLY must be true' "NATS_PRIVATE_NETWORK_ONLY gate failure was skipped"
+contains "$OUTPUT" 'NATS_SHARED_CREDENTIALS_EXPIRES (2020-01-01) is expired' "expired approval gate was skipped"
+contains "$OUTPUT" 'FAIL | config.nats_url' "NATS_URL port mismatch was skipped"
+contains "$OUTPUT" 'NEXT STEP 1 |' "multi-error config did not produce guided next steps"
+assert_no_secret_fixtures
+pass "multi-error config scan reports CRLF, all missing keys, all security gates, and NATS_URL mismatch in one pass"
+
+# 4. Sibling install.env & .env drift checks (boolean-only password compare, zero secret leakage)
+reset_mocks
+mkdir -p "$TEST_ROOT/drift-dir"
+write_config "$TEST_ROOT/drift-dir/config.env"
+cat > "$TEST_ROOT/drift-dir/install.env" <<'INST'
+MYSQL_PORT=3306
+MYSQL_ADMIN_USER=runtime-user
+MYSQL_ADMIN_PASSWORD=INSTALL_SECRET_DRIFT_FIXTURE
+INST
+sed 's/^ZATCA_DB_PASSWORD=.*/ZATCA_DB_PASSWORD=DOTENV_SECRET_DRIFT_FIXTURE/' \
+    "$TEST_ROOT/drift-dir/config.env" > "$TEST_ROOT/drift-dir/.env"
+run_verify --env-file "$TEST_ROOT/drift-dir/config.env"
+[ "$RUN_STATUS" -eq 0 ] || { cat "$OUTPUT" >&2; fail "advisory drift warnings unexpectedly failed verification"; }
+contains "$OUTPUT" 'WARN | config.drift.install_env | MYSQL_PORT differs' "install.env port drift not detected"
+contains "$OUTPUT" 'ZATCA_DB_PASSWORD differs from MYSQL_ADMIN_PASSWORD' "same-user password drift not detected"
+contains "$OUTPUT" 'WARN | config.drift.dotenv' "sibling .env drift not detected"
+not_contains "$OUTPUT" 'INSTALL_SECRET_DRIFT_FIXTURE' "install.env secret leaked"
+not_contains "$OUTPUT" 'DOTENV_SECRET_DRIFT_FIXTURE' "sibling .env secret leaked"
+assert_no_secret_fixtures
+pass "sibling install.env and .env drift are reported without leaking secrets"
+
+# 5. Bash-vs-Compose interpolation mismatch ($ in password) without leaking values
+reset_mocks
+cp "$TEST_REPO/config.env" "$TEST_ROOT/dollar-secret.env"
+sed -i "s/^ZATCA_DB_PASSWORD=.*/ZATCA_DB_PASSWORD='PASS\$DOLLAR_FIXTURE'/" "$TEST_ROOT/dollar-secret.env"
+# Compose mock resolves DB_PASS differently from Bash's literal single-quoted value
+run_verify --env-file "$TEST_ROOT/dollar-secret.env"
+[ "$RUN_STATUS" -ne 0 ] || fail "Bash-vs-Compose interpolation mismatch was accepted"
+contains "$OUTPUT" 'FAIL | config.interpolation' "Bash-vs-Compose interpolation mismatch was not caught"
+contains "$OUTPUT" 'DB_PASS(ZATCA_DB_PASSWORD)' "interpolation failure did not name the affected key"
+not_contains "$OUTPUT" 'DOLLAR_FIXTURE' "interpolation diagnostic leaked secret value"
+assert_no_secret_fixtures
+pass "Bash-vs-Compose interpolation drift is detected without exposing values"
+
+# 6. ZATCA_ENCRYPT_KEY valid 64-char hex vs malformed length warning
+reset_mocks
+cp "$TEST_REPO/config.env" "$TEST_ROOT/hex-key.env"
+HEX64="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+sed -i "s/^ZATCA_ENCRYPT_KEY=.*/ZATCA_ENCRYPT_KEY=${HEX64}/" "$TEST_ROOT/hex-key.env"
+python3 - "$COMPOSE_JSON_FILE" "$RUNNING_ENV_FILE" "$HEX64" <<'PY'
+import json, sys
+c_path, r_path, key = sys.argv[1:4]
+c = json.load(open(c_path, encoding="utf-8"))
+c["services"]["zatca-daemon"]["environment"]["ENCRYPT_KEY"] = key
+json.dump(c, open(c_path, "w", encoding="utf-8"))
+r = [("ENCRYPT_KEY=" + key if x.startswith("ENCRYPT_KEY=") else x) for x in json.load(open(r_path, encoding="utf-8"))]
+json.dump(r, open(r_path, "w", encoding="utf-8"))
+PY
+run_verify --env-file "$TEST_ROOT/hex-key.env"
+[ "$RUN_STATUS" -eq 0 ] || { cat "$OUTPUT" >&2; fail "valid 64-char hex key run failed"; }
+contains "$OUTPUT" 'PASS | config.encrypt_key | ZATCA_ENCRYPT_KEY format valid (32-byte hex AES-256 key)' \
+    "valid 64-char hex encryption key did not pass"
+not_contains "$OUTPUT" "$HEX64" "hex encryption key was leaked"
+pass "32-byte AES-256 encryption key format is validated without leaking key material"
+
+# 7. Legacy standalone NATS container port conflict
+reset_mocks
+MOCK_DOCKER_PS="nats"
+MOCK_LEGACY_NATS_PORT="4222"
+run_verify
+[ "$RUN_STATUS" -ne 0 ] || fail "legacy NATS port conflict was accepted"
+contains "$OUTPUT" 'FAIL | host.nats_port_conflict' "legacy NATS port conflict was not flagged"
+assert_no_secret_fixtures
+pass "legacy standalone NATS port conflicts fail with guided remediation"
+
+# 8. Non-secret env parity diff shows expected/actual while secret env parity diff withholds values
+reset_mocks
+python3 - "$RUNNING_ENV_FILE" <<'PY'
+import json, sys
+path = sys.argv[1]
+env = json.load(open(path, encoding="utf-8"))
+env = [
+    "DB_HOST=old-db.test.internal" if x.startswith("DB_HOST=") else
+    "DB_PASS=OTHER_SECRET_FIXTURE" if x.startswith("DB_PASS=") else x
+    for x in env
+]
+json.dump(env, open(path, "w", encoding="utf-8"))
+PY
+run_verify
+[ "$RUN_STATUS" -ne 0 ] || fail "env parity mismatch was accepted"
+contains "$OUTPUT" 'INFO | env.parity.diff | DB_HOST: expected=db.test.internal actual=old-db.test.internal' \
+    "non-secret env parity diff did not show expected vs actual"
+contains "$OUTPUT" 'INFO | env.parity.diff | DB_PASS: secret value differs' \
+    "secret env parity diff did not report redacted diff"
+not_contains "$OUTPUT" 'OTHER_SECRET_FIXTURE' "secret env parity diff exposed running container secret"
+assert_no_secret_fixtures
+pass "env parity shows non-secret expected/actual diffs while strictly redacting secret diffs"
+
+# 9. Bounded redacted container logs on health failure
+reset_mocks
+CURL_HEALTH_FAIL=1
+MOCK_CONTAINER_LOGS='level=error msg="connect failed user:DB_PASSWORD_FIXTURE@tcp(db:3306)/m"\nlevel=error msg="monitor_pass=MONITOR_PASSWORD_FIXTURE auth failed"'
+run_verify
+[ "$RUN_STATUS" -ne 0 ] || fail "health failure with container logs was accepted"
+contains "$OUTPUT" 'INFO | daemon.logs.header' "bounded container log header was not printed on health failure"
+contains "$OUTPUT" '[REDACTED]' "container logs were not redacted"
+not_contains "$OUTPUT" 'DB_PASSWORD_FIXTURE' "container logs leaked DB password"
+not_contains "$OUTPUT" 'MONITOR_PASSWORD_FIXTURE' "container logs leaked monitor password"
+assert_no_secret_fixtures
+pass "container logs printed on health failure strictly redact secrets and DSNs"
+
+# 10. Dokku tenant backend wiring check when dokku container is running
+reset_mocks
+MOCK_DOCKER_PS="dokku"
+MOCK_TENANT_NATS_URL="nats://host.docker.internal:9999"
+MOCK_TENANT_NATS_PASSWORD="WRONG_TENANT_NATS_PASSWORD_FIXTURE"
+MOCK_TENANT_DOCKER_OPTS=""
+run_verify
+[ "$RUN_STATUS" -eq 0 ] || { cat "$OUTPUT" >&2; fail "advisory tenant wiring warning unexpectedly failed daemon check"; }
+contains "$OUTPUT" 'WARN | tenants.wiring.acme-backend' "mismatched Dokku tenant wiring was not flagged"
+contains "$OUTPUT" 'missing host.docker.internal:host-gateway' "missing host-gateway was not flagged"
+contains "$OUTPUT" 'NATS_PASSWORD does not match selected config' "tenant NATS_PASSWORD mismatch was not flagged"
+not_contains "$OUTPUT" 'WRONG_TENANT_NATS_PASSWORD_FIXTURE' "tenant NATS_PASSWORD leaked"
+assert_no_secret_fixtures
+pass "Dokku tenant wiring checks host-gateway, NATS_URL, and boolean NATS_PASSWORD safely"
 
 printf '\nAll environment-verifier wrapper tests passed.\n'

@@ -80,6 +80,12 @@ expect_plan "bash scripts/restart-stack.sh --env all" \
 expect_plan "bash scripts/verify-zatca-environment.sh --verbose --config /opt/deployment/config.prod.env" \
     --config /opt/deployment/config.prod.env stack verify --verbose
 
+expect_plan "bash scripts/verify-zatca-environment.sh --verbose --config /opt/deployment/config.prod.env" \
+    --config=/opt/deployment/config.prod.env verify --verbose
+
+expect_plan "bash scripts/verify-zatca-environment.sh --db-only --verbose --config /opt/deployment/config.prod.env" \
+    --env-file=/opt/deployment/config.prod.env db verify-zatca --verbose
+
 expect_plan "bash scripts/verify-zatca-environment.sh" \
     setup verify
 

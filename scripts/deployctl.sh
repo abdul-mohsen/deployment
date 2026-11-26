@@ -16,9 +16,10 @@ Usage:
   deployctl [global flags] <area> <command> [args]
 
 Global flags:
-  --config <file>  Forward a config.env path to commands that support it
-  --plan           Print the underlying script command without running it
-  -h, --help       Show this help
+  --config <file>     Forward a config.env path to commands that support it
+  --env-file <file>   Alias for --config (also accepts --config=<file> / --env-file=<file>)
+  --plan              Print the underlying script command without running it
+  -h, --help          Show this help
 
 Areas:
   tenant create <name> [flags]       Provision backend, frontend, storage, DB
@@ -46,7 +47,9 @@ Areas:
   stack verify [flags]               Run full verbose ZATCA/environment setup verification
   stack rebuild-zatca-daemon [flags] Rebuild and recreate the ZATCA daemon image
   setup all|dokku|nats|verify|dev-tenant Bootstrap or verify server pieces
-  db verify                          Check MySQL connectivity
+  verify [flags]                     Shortcut for full ZATCA/environment setup verification
+  db verify                          Check MySQL admin connectivity (Docker)
+  db verify-zatca [flags]            Direct host-Bash MySQL verification for ZATCA credentials (no Docker)
   db migrate-master [flags]          Apply the ZATCA-owned master Goose artifact
   dokku fix-hostname|discover-nginx|traffic
   webhook serve|tls
@@ -270,6 +273,9 @@ db_cmd() {
     shift || true
     case "$verb" in
         verify|check) run_script verify-mysql.sh "$@" ;;
+        verify-zatca|zatca|direct-zatca)
+            run_script verify-zatca-environment.sh --db-only "$@"
+            ;;
         migrate-master|migrate-zatca-master|master-migrate)
             run_script migrate-zatca-master.sh "$@"
             ;;
@@ -332,10 +338,15 @@ legacy_script_cmd() {
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --config)
+        --config|--env-file)
             CONFIG_FILE="${2:-}"
             need_arg "$CONFIG_FILE" "config path"
             shift 2
+            ;;
+        --config=*|--env-file=*)
+            CONFIG_FILE="${1#*=}"
+            need_arg "$CONFIG_FILE" "config path"
+            shift
             ;;
         --plan)
             PLAN=true
@@ -364,6 +375,7 @@ case "$cmd" in
     fleet) fleet_cmd "$@" ;;
     stack) stack_cmd "$@" ;;
     setup) setup_cmd "$@" ;;
+    verify|verify-zatca|zatca-verify) run_script verify-zatca-environment.sh "$@" ;;
     db) db_cmd "$@" ;;
     dokku) dokku_cmd "$@" ;;
     webhook) webhook_cmd "$@" ;;

@@ -133,13 +133,18 @@ ready tenants.
 ### Verifying the configured environment and database access
 
 Run this on the Dokku host after updating the protected `config.env`, with
-access to the Docker daemon:
+access to the Docker daemon (or run `--db-only` / `db verify-zatca` for direct
+host-Bash MySQL verification with zero Docker calls):
 
 ```bash
 sudo bash ./scripts/verify-zatca-environment.sh
 # or via deployctl:
+sudo bash ./scripts/deployctl.sh verify
 sudo bash ./scripts/deployctl.sh setup verify
 sudo bash ./scripts/deployctl.sh --config /secure/path/config.env stack verify --verbose
+# direct host-Bash MySQL verification only (no Docker):
+sudo bash ./scripts/verify-zatca-environment.sh --db-only --verbose
+sudo bash ./scripts/deployctl.sh --config=/secure/path/config.env db verify-zatca --verbose
 ```
 
 This is the single read-only, verbose, start-to-finish setup verifier. It runs
@@ -147,17 +152,21 @@ six layered stages and finishes with a summary and numbered **Guided Next
 Steps** without requiring manual daemon flags or per-shell path variables:
 
 1. **Stage 1 — Configuration, Security Gates & File Drift**: checks LF line
-   endings, file permissions, `ZATCA_DAEMON_ENABLED`, all 7 required daemon
-   settings in a single pass (never stopping at the first missing key),
-   optional account pairs (`ZATCA_ADMIN_DB_*`, `ZATCA_SMTP_*`),
-   `ZATCA_ENCRYPT_KEY` 32-byte AES-256 format, all 5 NATS security gates
-   individually, TCP port ranges and backlog thresholds, `NATS_URL` vs
-   `ZATCA_NATS_PORT` consistency, quoting/`$`/`#` syntax hazards, sibling
-   `install.env` and `.env` drift (boolean-only comparison for passwords), and
+   endings, file permissions, duplicate keys (with exact line numbers and
+   whether values match or differ), `ZATCA_DAEMON_ENABLED`, all 7 required
+   daemon settings in a single pass (never stopping at the first missing key),
+   optional account pairs (`ZATCA_ADMIN_DB_*`, `ZATCA_SMTP_*`), same-user
+   password consistency across `ZATCA_DB_USER`, `ZATCA_ADMIN_DB_USER`,
+   `MYSQL_ADMIN_USER`, and `MYSQL_ROOT_USER`, `ZATCA_ENCRYPT_KEY` 32-byte
+   AES-256 format, all 5 NATS security gates individually, TCP port ranges and
+   backlog thresholds, `NATS_URL` vs `ZATCA_NATS_PORT` consistency,
+   quoting/`$`/`#` syntax hazards, sibling `install.env` (treating local
+   `MYSQL_HOST` aliases like `host.docker.internal` and `127.0.0.1` as
+   compatible) and `.env` drift (boolean-only comparison for passwords), and
    `setup-zatca-daemon.sh --validate-only`.
 2. **Stage 2 — Host Tooling, Directories & Port Conflicts**: verifies `docker`,
-   `python3`, `curl`, JetStream/build paths, and whether a legacy standalone
-   `nats` container conflicts with `ZATCA_NATS_PORT`.
+   `python3`, host `mysql` CLI, `curl`, JetStream/build paths, and whether a
+   legacy standalone `nats` container conflicts with `ZATCA_NATS_PORT`.
 3. **Stage 3 — Compose Resolution, Container Runtime, Image & Env Parity**:
    resolves `dashboard/docker-compose.zatca.yml`, checks Bash-vs-Compose
    interpolation parity, verifies `NATS_MONITOR_HOST: "0.0.0.0"` in both
@@ -169,9 +178,28 @@ Steps** without requiring manual daemon flags or per-shell path variables:
    revisions.
 4. **Stage 4 — Database Target & Live MySQL Verification**: prints non-secret
    target metadata (`user`, `host`, `port`, `master_db`, container IPs), flags
-   container loopback (`localhost`/`127.0.0.1`) traps, and runs the isolated
+   container loopback (`localhost`/`127.0.0.1`) traps, runs the isolated Docker
    `zatca-check` (`--verify-db --json`) probe across enabled tenants and active
-   branches using non-mutating `EXPLAIN` privilege checks.
+   branches using non-mutating `EXPLAIN` privilege checks (skipped in
+   `--db-only` mode), and runs direct host-Bash `mysql` CLI verification
+   without Docker:
+   - Runtime TCP (`--no-defaults --protocol=TCP`), reporting `CURRENT_USER()`,
+     `USER()`, `@@version`, master DB visibility, and redacted `SHOW GRANTS`.
+   - Plaintext TCP probe (`--ssl-mode=DISABLED` / `--skip-ssl`, matching Go
+     `zatca-daemon` plaintext DSN) to catch `REQUIRE SSL` /
+     `require_secure_transport=ON`.
+   - On runtime failure: Unix socket fallback (`--protocol=SOCKET`),
+     `~/.my.cnf` option-file precedence check, shadowed earlier duplicate
+     `ZATCA_DB_PASSWORD` line proof, onboarding (`ZATCA_ADMIN_DB_*`) and
+     deployment control-plane (`MYSQL_ADMIN_*` / `MYSQL_ROOT_*`) TCP probes,
+     read-only server variables (`bind_address`, `port`,
+     `require_secure_transport`, `default_authentication_plugin`), non-secret
+     `mysql.user` trap detection (host-precedence shadowing, anonymous users,
+     `account_locked`, `ssl_type`, missing user; never reads password hashes),
+     redacted account grants, and a cross-comparison `HINT | database.diagnosis`
+     verdict. When Docker `zatca-check` passes while host `127.0.0.1` is
+     denied, host TCP is reported as `INFO` so Docker-subnet-only grants never
+     cause false failures.
 5. **Stage 5 — Live Daemon Health, Readiness & JetStream**: runs authenticated
    `/healthz` and `/jsz` checks via `health-zatca-daemon.sh`, prints JetStream
    counters (`messages`, `consumers`, `pending`, `ack_pending`, `redelivered`),
@@ -180,15 +208,17 @@ Steps** without requiring manual daemon flags or per-shell path variables:
    misconfigured, and tails bounded secret-redacted daemon logs on failure.
 6. **Stage 6 — Tenant Backend Wiring (Dokku)**: when the `dokku` container is
    running, checks every `*-backend` app for `host.docker.internal:host-gateway`,
-   `NATS_URL`, `NATS_USER`, boolean `NATS_PASSWORD` alignment, and `HOST`.
+   `NATS_URL`, `NATS_USER`, boolean `NATS_PASSWORD` alignment, `HOST`
+   (`<host>:<port>` or bare `<host>`), `DB_HOST`, and `DB_PORT`.
 
 By default, the verifier selects only the deployment repository's `config.env`;
 it never falls back to `.env`, shell variables, or another file. Supported
-flags:
+flags (both `--flag VALUE` and `--flag=VALUE` forms work):
 
 ```bash
-sudo bash ./scripts/verify-zatca-environment.sh --env-file /secure/path/config.env
+sudo bash ./scripts/verify-zatca-environment.sh --env-file=/secure/path/config.env
 sudo bash ./scripts/verify-zatca-environment.sh --config /secure/path/config.env --install-env /secure/path/install.env --verbose
+sudo bash ./scripts/verify-zatca-environment.sh --config /secure/path/config.env --db-only --verbose
 ```
 
 Each check reports `PASS`, `WARN`, `INFO`, `FAIL`, or `NOT VERIFIED`. Exit

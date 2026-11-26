@@ -47,13 +47,15 @@ TEST_REPO="$TEST_ROOT/repo"
 BIN="$TEST_ROOT/bin"
 OUTPUT="$TEST_ROOT/output"
 DOCKER_LOG="$TEST_ROOT/docker.log"
+MYSQL_LOG="$TEST_ROOT/mysql.log"
+MOCK_HOME_DEFAULT="$TEST_ROOT/home"
 COMPOSE_JSON_FILE="$TEST_ROOT/compose.json"
 RUNNING_ENV_FILE="$TEST_ROOT/running-env.json"
 DAEMON_REPORT_FILE="$TEST_ROOT/daemon-report.json"
 MOCK_VALID_IMAGE_ID="sha256:$(printf '%064d' 0 | tr '0' 'a')"
 MOCK_STALE_IMAGE_ID="sha256:$(printf '%064d' 0 | tr '0' 'b')"
 MOCK_DAEMON_REVISION="f5459d21579e3d08420371353d88ab0216e50b58"
-mkdir -p "$TEST_REPO/scripts" "$TEST_REPO/dashboard" "$BIN"
+mkdir -p "$TEST_REPO/scripts" "$TEST_REPO/dashboard" "$BIN" "$MOCK_HOME_DEFAULT"
 cp "$VERIFY_SCRIPT" "$TEST_REPO/scripts/"
 cp scripts/setup-zatca-daemon.sh scripts/health-zatca-daemon.sh scripts/lib.sh "$TEST_REPO/scripts/"
 cp "$COMPOSE_FILE" "$TEST_REPO/dashboard/"
@@ -245,6 +247,8 @@ case "${1:-}" in
                         "NATS_URL: ${MOCK_TENANT_NATS_URL:-nats://host.docker.internal:4222}" \
                         "NATS_USER: ${MOCK_TENANT_NATS_USER:-daemon-user}" \
                         "NATS_PASSWORD: ${MOCK_TENANT_NATS_PASSWORD:-NATS_PASSWORD_FIXTURE}"
+                    [ -z "${MOCK_TENANT_DB_HOST:-}" ] || printf 'DB_HOST: %s\n' "$MOCK_TENANT_DB_HOST"
+                    [ -z "${MOCK_TENANT_DB_PORT:-}" ] || printf 'DB_PORT: %s\n' "$MOCK_TENANT_DB_PORT"
                     ;;
                 docker-options:report)
                     printf '%s\n' "${MOCK_TENANT_DOCKER_OPTS---add-host=host.docker.internal:host-gateway}"
@@ -356,7 +360,138 @@ case "$request" in
 esac
 CURL
 
-chmod +x "$BIN/docker" "$BIN/curl"
+cat > "$BIN/mysql" <<'MYSQL'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%q ' "$@" >> "${MYSQL_LOG:?}"
+printf '\n' >> "$MYSQL_LOG"
+
+if [ "${1:-}" = "--help" ]; then
+    case "${MOCK_MYSQL_HELP_MODE:-ssl-mode}" in
+        ssl-mode)
+            printf '%s\n' '  --ssl-mode=name     Desired security state of the connection to the server.'
+            printf '%s\n' '  --get-server-public-key  Get public key from server.'
+            ;;
+        skip-ssl) printf '%s\n' '  --skip-ssl          Disable SSL for connection.' ;;
+        none)     printf '%s\n' '  --protocol=name     The protocol to use for connection.' ;;
+    esac
+    exit 0
+fi
+
+no_defaults=false
+protocol=""
+host=""
+port=""
+user=""
+sql=""
+plaintext=false
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --no-defaults) no_defaults=true; shift ;;
+        --protocol=*) protocol="${1#*=}"; shift ;;
+        --ssl-mode=DISABLED|--skip-ssl|--ssl=0) plaintext=true; shift ;;
+        --get-server-public-key) shift ;;
+        -h) host="$2"; shift 2 ;;
+        -P) port="$2"; shift 2 ;;
+        -u) user="$2"; shift 2 ;;
+        -e) sql="$2"; shift 2 ;;
+        --connect-timeout=*|-N|-B) shift ;;
+        *) shift ;;
+    esac
+done
+
+pass="${MYSQL_PWD:-}"
+
+auth_ok=false
+if [ "$no_defaults" = false ] && [ -z "${MYSQL_PWD+x}" ] && [ "${MOCK_MYSQL_MYCNF_OK:-0}" = "1" ]; then
+    auth_ok=true
+elif [ "$protocol" = "SOCKET" ]; then
+    if [ "${MOCK_MYSQL_SOCKET_OK:-0}" = "1" ] && [ "$user" = "${MOCK_MYSQL_RUNTIME_USER:-runtime-user}" ] && [ "$pass" = "${MOCK_MYSQL_VALID_RUNTIME_PASS:-DB_PASSWORD_FIXTURE}" ]; then
+        auth_ok=true
+    fi
+else
+    if [ "${MOCK_MYSQL_TCP_MODE:-pass}" = "deny_host_1045" ] && [ "$user" = "${MOCK_MYSQL_RUNTIME_USER:-runtime-user}" ]; then
+        auth_ok=false
+    elif [ "${MOCK_MYSQL_TCP_MODE:-pass}" = "socket_only" ] && [ "$user" = "${MOCK_MYSQL_RUNTIME_USER:-runtime-user}" ]; then
+        auth_ok=false
+    else
+        if [ "$user" = "${MOCK_MYSQL_RUNTIME_USER:-runtime-user}" ] && [ "$pass" = "${MOCK_MYSQL_VALID_RUNTIME_PASS:-DB_PASSWORD_FIXTURE}" ]; then
+            auth_ok=true
+        elif [ "$user" = "${MOCK_MYSQL_ONBOARD_USER:-onboarding-user}" ] && [ "$pass" = "${MOCK_MYSQL_VALID_ONBOARD_PASS:-ADMIN_PASSWORD_FIXTURE}" ]; then
+            auth_ok=true
+        elif [ -n "${MOCK_MYSQL_DEPLOY_ADMIN_USER:-}" ] && [ "$user" = "$MOCK_MYSQL_DEPLOY_ADMIN_USER" ] && [ "$pass" = "${MOCK_MYSQL_DEPLOY_ADMIN_PASS:-}" ]; then
+            auth_ok=true
+        fi
+    fi
+fi
+
+if [ "$auth_ok" != true ]; then
+    printf "ERROR 1045 (28000): Access denied for user '%s'@'%s' (using password: %s)\n" \
+        "$user" "${host:-localhost}" "$( [ -n "$pass" ] && printf YES || printf NO )" >&2
+    exit 1
+fi
+
+if [ "$plaintext" = true ] && [ "${MOCK_MYSQL_PLAINTEXT_FAIL:-0}" = "1" ]; then
+    printf "ERROR 3159 (HY000): Connections using insecure transport are prohibited while --require_secure_transport=ON.\n" >&2
+    exit 1
+fi
+
+case "$sql" in
+    "SELECT CURRENT_USER(), USER(), @@version;")
+        if [ "$protocol" = "SOCKET" ]; then
+            printf '%s@localhost\t%s@localhost\t8.0.39-mock\n' "$user" "$user"
+        else
+            printf '%s@%%\t%s@%s\t8.0.39-mock\n' "$user" "$user" "${host:-127.0.0.1}"
+        fi
+        ;;
+    "SELECT CURRENT_USER(), USER();")
+        if [ "$protocol" = "SOCKET" ]; then
+            printf '%s@localhost\t%s@localhost\n' "$user" "$user"
+        else
+            printf '%s@%%\t%s@%s\n' "$user" "$user" "${host:-127.0.0.1}"
+        fi
+        ;;
+    "SELECT 1;")
+        printf '1\n'
+        ;;
+    "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA"*)
+        if [ "${MOCK_MYSQL_MASTER_MISSING:-0}" != "1" ]; then
+            printf '%s\n' "${MOCK_MYSQL_MASTER_DB:-zatca_master}"
+        fi
+        ;;
+    "SHOW GRANTS FOR CURRENT_USER();"|"SHOW GRANTS FOR "*)
+        if [ -n "${MOCK_MYSQL_GRANTS:-}" ]; then
+            printf '%b\n' "$MOCK_MYSQL_GRANTS"
+        else
+            printf "GRANT USAGE ON *.* TO '%s'@'%%' IDENTIFIED BY PASSWORD 'DB_PASSWORD_FIXTURE'\nGRANT SELECT, INSERT, UPDATE ON \`zatca_master\`.* TO '%s'@'%%'\n" "$user" "$user"
+        fi
+        ;;
+    "SHOW VARIABLES WHERE Variable_name IN"*)
+        if [ -n "${MOCK_MYSQL_SERVER_VARS:-}" ]; then
+            printf '%b\n' "$MOCK_MYSQL_SERVER_VARS"
+        else
+            printf 'bind_address\t0.0.0.0\nport\t3306\nrequire_secure_transport\tOFF\ndefault_authentication_plugin\tcaching_sha2_password\n'
+        fi
+        ;;
+    "SELECT user, host, plugin, account_locked, ssl_type FROM mysql.user"*)
+        if [ "${MOCK_MYSQL_USER_DENIED:-0}" = "1" ]; then
+            printf "ERROR 1142 (42000) at line 1: SELECT command denied to user '%s'@'127.0.0.1' for table 'user'\n" "$user" >&2
+            exit 1
+        fi
+        if [ -n "${MOCK_MYSQL_USER_ROWS:-}" ]; then
+            printf '%b\n' "$MOCK_MYSQL_USER_ROWS"
+        else
+            printf '%s\t%%\tcaching_sha2_password\tN\t\n' "${MOCK_MYSQL_RUNTIME_USER:-runtime-user}"
+        fi
+        ;;
+    *)
+        printf 'ok\n'
+        ;;
+esac
+MYSQL
+
+chmod +x "$BIN/docker" "$BIN/curl" "$BIN/mysql"
 write_config "$TEST_REPO/config.env"
 write_config "$TEST_ROOT/alternate.env"
 write_config "$TEST_REPO/.env"
@@ -366,6 +501,7 @@ write_pass_report
 
 reset_mocks() {
     : > "$DOCKER_LOG"
+    : > "$MYSQL_LOG"
     write_compose_json
     write_running_env
     write_pass_report
@@ -388,10 +524,30 @@ reset_mocks() {
     MOCK_LEGACY_NATS_PORT=""
     MOCK_CONTAINER_LOGS=""
     MOCK_TENANT_HOST="db.test.internal"
+    MOCK_TENANT_DB_HOST=""
+    MOCK_TENANT_DB_PORT=""
     MOCK_TENANT_NATS_URL="nats://host.docker.internal:4222"
     MOCK_TENANT_NATS_USER="daemon-user"
     MOCK_TENANT_NATS_PASSWORD="NATS_PASSWORD_FIXTURE"
     MOCK_TENANT_DOCKER_OPTS="--add-host=host.docker.internal:host-gateway"
+    MOCK_HOME="$MOCK_HOME_DEFAULT"
+    MOCK_MYSQL_HELP_MODE="ssl-mode"
+    MOCK_MYSQL_TCP_MODE="pass"
+    MOCK_MYSQL_SOCKET_OK=0
+    MOCK_MYSQL_MYCNF_OK=0
+    MOCK_MYSQL_PLAINTEXT_FAIL=0
+    MOCK_MYSQL_MASTER_MISSING=0
+    MOCK_MYSQL_MASTER_DB="zatca_master"
+    MOCK_MYSQL_RUNTIME_USER="runtime-user"
+    MOCK_MYSQL_VALID_RUNTIME_PASS="DB_PASSWORD_FIXTURE"
+    MOCK_MYSQL_ONBOARD_USER="onboarding-user"
+    MOCK_MYSQL_VALID_ONBOARD_PASS="ADMIN_PASSWORD_FIXTURE"
+    MOCK_MYSQL_DEPLOY_ADMIN_USER=""
+    MOCK_MYSQL_DEPLOY_ADMIN_PASS=""
+    MOCK_MYSQL_GRANTS=""
+    MOCK_MYSQL_SERVER_VARS=""
+    MOCK_MYSQL_USER_DENIED=0
+    MOCK_MYSQL_USER_ROWS=""
 }
 
 write_report() {
@@ -403,8 +559,9 @@ run_verify() {
         cd "$TEST_REPO"
         env -i \
             PATH="$BIN:$PATH" \
-            HOME="${HOME:-/tmp}" \
+            HOME="${MOCK_HOME:-$MOCK_HOME_DEFAULT}" \
             DOCKER_LOG="$DOCKER_LOG" \
+            MYSQL_LOG="$MYSQL_LOG" \
             COMPOSE_JSON_FILE="$COMPOSE_JSON_FILE" \
             RUNNING_ENV_FILE="$RUNNING_ENV_FILE" \
             DAEMON_REPORT_FILE="$DAEMON_REPORT_FILE" \
@@ -426,10 +583,29 @@ run_verify() {
             MOCK_LEGACY_NATS_PORT="${MOCK_LEGACY_NATS_PORT:-}" \
             MOCK_CONTAINER_LOGS="${MOCK_CONTAINER_LOGS:-}" \
             MOCK_TENANT_HOST="${MOCK_TENANT_HOST:-db.test.internal}" \
+            MOCK_TENANT_DB_HOST="${MOCK_TENANT_DB_HOST:-}" \
+            MOCK_TENANT_DB_PORT="${MOCK_TENANT_DB_PORT:-}" \
             MOCK_TENANT_NATS_URL="${MOCK_TENANT_NATS_URL:-nats://host.docker.internal:4222}" \
             MOCK_TENANT_NATS_USER="${MOCK_TENANT_NATS_USER:-daemon-user}" \
             MOCK_TENANT_NATS_PASSWORD="${MOCK_TENANT_NATS_PASSWORD:-NATS_PASSWORD_FIXTURE}" \
             MOCK_TENANT_DOCKER_OPTS="${MOCK_TENANT_DOCKER_OPTS---add-host=host.docker.internal:host-gateway}" \
+            MOCK_MYSQL_HELP_MODE="${MOCK_MYSQL_HELP_MODE:-ssl-mode}" \
+            MOCK_MYSQL_TCP_MODE="${MOCK_MYSQL_TCP_MODE:-pass}" \
+            MOCK_MYSQL_SOCKET_OK="${MOCK_MYSQL_SOCKET_OK:-0}" \
+            MOCK_MYSQL_MYCNF_OK="${MOCK_MYSQL_MYCNF_OK:-0}" \
+            MOCK_MYSQL_PLAINTEXT_FAIL="${MOCK_MYSQL_PLAINTEXT_FAIL:-0}" \
+            MOCK_MYSQL_MASTER_MISSING="${MOCK_MYSQL_MASTER_MISSING:-0}" \
+            MOCK_MYSQL_MASTER_DB="${MOCK_MYSQL_MASTER_DB:-zatca_master}" \
+            MOCK_MYSQL_RUNTIME_USER="${MOCK_MYSQL_RUNTIME_USER:-runtime-user}" \
+            MOCK_MYSQL_VALID_RUNTIME_PASS="${MOCK_MYSQL_VALID_RUNTIME_PASS:-DB_PASSWORD_FIXTURE}" \
+            MOCK_MYSQL_ONBOARD_USER="${MOCK_MYSQL_ONBOARD_USER:-onboarding-user}" \
+            MOCK_MYSQL_VALID_ONBOARD_PASS="${MOCK_MYSQL_VALID_ONBOARD_PASS:-ADMIN_PASSWORD_FIXTURE}" \
+            MOCK_MYSQL_DEPLOY_ADMIN_USER="${MOCK_MYSQL_DEPLOY_ADMIN_USER:-}" \
+            MOCK_MYSQL_DEPLOY_ADMIN_PASS="${MOCK_MYSQL_DEPLOY_ADMIN_PASS:-}" \
+            MOCK_MYSQL_GRANTS="${MOCK_MYSQL_GRANTS:-}" \
+            MOCK_MYSQL_SERVER_VARS="${MOCK_MYSQL_SERVER_VARS:-}" \
+            MOCK_MYSQL_USER_DENIED="${MOCK_MYSQL_USER_DENIED:-0}" \
+            MOCK_MYSQL_USER_ROWS="${MOCK_MYSQL_USER_ROWS:-}" \
             bash "$TEST_REPO/$VERIFY_SCRIPT" "$@"
     ) >"$OUTPUT" 2>&1; then
         RUN_STATUS=0
@@ -449,6 +625,7 @@ assert_no_secret_fixtures() {
         SMTP_PASSWORD_FIXTURE; do
         not_contains "$OUTPUT" "$marker" "operator output exposed a secret fixture"
         not_contains "$DOCKER_LOG" "$marker" "Docker arguments exposed a secret fixture"
+        not_contains "$MYSQL_LOG" "$marker" "mysql CLI arguments exposed a secret fixture"
     done
 }
 
@@ -1038,5 +1215,248 @@ contains "$OUTPUT" 'NATS_PASSWORD does not match selected config' "tenant NATS_P
 not_contains "$OUTPUT" 'WRONG_TENANT_NATS_PASSWORD_FIXTURE' "tenant NATS_PASSWORD leaked"
 assert_no_secret_fixtures
 pass "Dokku tenant wiring checks host-gateway, NATS_URL, and boolean NATS_PASSWORD safely"
+
+echo
+echo "=== direct host-Bash MySQL verification & verifier fixes ==="
+
+# 11. --db-only direct host-Bash pass with zero Docker calls and --config=PATH syntax
+reset_mocks
+cat > "$TEST_ROOT/db-only.env" <<'DBONLY'
+ZATCA_DAEMON_ENABLED=0
+ZATCA_DB_USER=runtime-user
+ZATCA_DB_PASSWORD=DB_PASSWORD_FIXTURE
+MYSQL_HOST=host.docker.internal
+MYSQL_PORT=3306
+MYSQL_MASTER_DB=zatca_master
+DBONLY
+chmod 600 "$TEST_ROOT/db-only.env"
+run_verify "--config=$TEST_ROOT/db-only.env" --db-only --verbose
+[ "$RUN_STATUS" -eq 0 ] || { cat "$OUTPUT" >&2; fail "--db-only direct host-Bash check failed unexpectedly (status=$RUN_STATUS)"; }
+[ ! -s "$DOCKER_LOG" ] || { cat "$DOCKER_LOG" >&2; fail "--db-only invoked Docker unexpectedly"; }
+contains "$OUTPUT" 'PASS | database.host.runtime_tcp' "--db-only did not run direct host TCP probe"
+contains "$OUTPUT" 'PASS | database.host.master_db' "--db-only did not verify master DB visibility"
+contains "$OUTPUT" 'PASS | database.host.runtime_plaintext' "--db-only did not run plaintext TCP probe"
+contains "$MYSQL_LOG" '--get-server-public-key' "MySQL 8 TCP probes did not pass --get-server-public-key"
+contains "$OUTPUT" "IDENTIFIED BY '[REDACTED]'" "SHOW GRANTS did not scrub IDENTIFIED BY hash"
+contains "$OUTPUT" 'OVERALL PASS | selected configuration and direct host-Bash MySQL database access verified without Docker' \
+    "--db-only OVERALL PASS summary did not reflect non-Docker scope"
+assert_no_secret_fixtures
+pass "--db-only verifies MySQL directly from host Bash with zero Docker calls and scrubs SHOW GRANTS"
+
+# 12. Duplicate ZATCA_DB_PASSWORD with differing values + shadowed earlier line proof
+reset_mocks
+cat > "$TEST_ROOT/dup-pass.env" <<'DUP'
+ZATCA_DB_USER=runtime-user
+ZATCA_DB_PASSWORD=DB_PASSWORD_FIXTURE
+MYSQL_HOST=host.docker.internal
+MYSQL_PORT=3306
+MYSQL_MASTER_DB=zatca_master
+ZATCA_DB_PASSWORD=SHADOWED_WRONG_PASSWORD_FIXTURE
+DUP
+chmod 600 "$TEST_ROOT/dup-pass.env"
+run_verify "--env-file=$TEST_ROOT/dup-pass.env" --db-only
+[ "$RUN_STATUS" -eq 1 ] || { cat "$OUTPUT" >&2; fail "shadowed duplicate password did not fail effective login (status=$RUN_STATUS)"; }
+contains "$OUTPUT" 'WARN | config.duplicate_keys |' "duplicate key warning missing"
+contains "$OUTPUT" 'ZATCA_DB_PASSWORD (lines 2, 6; values DIFFER' "duplicate key warning did not include line numbers and value diff"
+contains "$OUTPUT" 'FAIL | database.host.runtime_tcp' "effective wrong password did not fail runtime_tcp"
+contains "$OUTPUT" '(using password: YES)' "redactor corrupted (using password: YES) diagnostic"
+contains "$OUTPUT" 'WARN | database.host.shadowed_password | EARLIER shadowed ZATCA_DB_PASSWORD on line 2' \
+    "shadowed earlier line probe did not prove line 2 authenticates"
+contains "$OUTPUT" 'HINT | database.diagnosis | Duplicate ZATCA_DB_PASSWORD' "diagnosis did not pinpoint duplicate override"
+not_contains "$OUTPUT" 'SHADOWED_WRONG_PASSWORD_FIXTURE' "wrong shadowed password leaked"
+assert_no_secret_fixtures
+pass "duplicate ZATCA_DB_PASSWORD reports line numbers, proves earlier working line via host TCP, and leaks no secrets"
+
+# 13. Same-user ZATCA_DB_USER == ZATCA_ADMIN_DB_USER password mismatch
+reset_mocks
+cat > "$TEST_ROOT/same-user-mismatch.env" <<'SAMEU'
+ZATCA_DB_USER=runtime-user
+ZATCA_DB_PASSWORD=WRONG_RUNTIME_SECRET_FIXTURE
+ZATCA_ADMIN_DB_USER=runtime-user
+ZATCA_ADMIN_DB_PASSWORD=DB_PASSWORD_FIXTURE
+MYSQL_HOST=host.docker.internal
+MYSQL_PORT=3306
+MYSQL_MASTER_DB=zatca_master
+SAMEU
+chmod 600 "$TEST_ROOT/same-user-mismatch.env"
+run_verify --config "$TEST_ROOT/same-user-mismatch.env" --db-only
+[ "$RUN_STATUS" -eq 1 ] || fail "same-user password mismatch did not fail runtime check"
+contains "$OUTPUT" 'WARN | config.db_password_mismatch' "same-user password mismatch inside config.env was not flagged"
+contains "$OUTPUT" 'FAIL | database.host.runtime_tcp' "wrong runtime password did not fail"
+contains "$OUTPUT" 'PASS | database.host.onboarding_tcp' "working admin password for same user did not succeed"
+contains "$OUTPUT" 'HINT | database.diagnosis | ZATCA_DB_USER and ZATCA_ADMIN_DB_USER both use' \
+    "diagnosis did not pinpoint same-user onboarding vs runtime password mismatch"
+not_contains "$OUTPUT" 'WRONG_RUNTIME_SECRET_FIXTURE' "mismatched runtime password leaked"
+assert_no_secret_fixtures
+pass "same-user password mismatch inside config.env is flagged and proved via host TCP"
+
+# 14. Plaintext TLS mismatch (require_secure_transport=ON / --skip-ssl client)
+reset_mocks
+MOCK_MYSQL_HELP_MODE="skip-ssl"
+MOCK_MYSQL_PLAINTEXT_FAIL=1
+MOCK_MYSQL_SERVER_VARS='bind_address\t0.0.0.0\nport\t3306\nrequire_secure_transport\tON\ndefault_authentication_plugin\tcaching_sha2_password'
+run_verify --config "$TEST_ROOT/db-only.env" --db-only
+[ "$RUN_STATUS" -eq 1 ] || fail "plaintext TLS rejection did not fail --db-only verification"
+contains "$OUTPUT" 'PASS | database.host.runtime_tcp' "TLS TCP probe should have passed"
+contains "$OUTPUT" 'FAIL | database.host.runtime_plaintext' "plaintext TCP probe (--skip-ssl) did not fail"
+contains "$OUTPUT" 'FAIL | database.host.tls_policy' "require_secure_transport=ON was not flagged"
+contains "$OUTPUT" 'HINT | database.diagnosis | Credentials for' "diagnosis did not explain TLS-only vs Go plaintext mismatch"
+assert_no_secret_fixtures
+pass "TLS-required MySQL server is detected by plaintext probe and require_secure_transport check"
+
+# 15. Unix socket-only grant ('user'@'localhost')
+reset_mocks
+MOCK_MYSQL_TCP_MODE="socket_only"
+MOCK_MYSQL_SOCKET_OK=1
+MOCK_MYSQL_USER_ROWS='runtime-user\tlocalhost\tcaching_sha2_password\tN\t'
+run_verify --config "$TEST_ROOT/db-only.env" --db-only
+[ "$RUN_STATUS" -eq 1 ] || fail "socket-only grant did not fail TCP check"
+contains "$OUTPUT" 'FAIL | database.host.runtime_tcp' "TCP check should fail for socket-only grant"
+contains "$OUTPUT" 'WARN | database.host.runtime_socket' "Unix socket fallback did not succeed and warn"
+contains "$OUTPUT" 'WARN | database.host.localhost_only' "localhost-only mysql.user row was not flagged"
+contains "$OUTPUT" 'HINT | database.diagnosis | Direct host-Bash TCP' "diagnosis did not identify socket-only access"
+assert_no_secret_fixtures
+pass "Unix socket fallback distinguishes socket-only localhost grants from TCP failures"
+
+# 16. ~/.my.cnf option-file precedence masking check
+reset_mocks
+mkdir -p "$TEST_ROOT/mycnf-home"
+printf '[client]\npassword=MYCNF_SECRET_FIXTURE\n' > "$TEST_ROOT/mycnf-home/.my.cnf"
+chmod 600 "$TEST_ROOT/mycnf-home/.my.cnf"
+MOCK_HOME="$TEST_ROOT/mycnf-home"
+MOCK_MYSQL_MYCNF_OK=1
+cat > "$TEST_ROOT/mycnf-test.env" <<'MYCNF'
+ZATCA_DB_USER=runtime-user
+ZATCA_DB_PASSWORD=CONFIG_WRONG_SECRET_FIXTURE
+MYSQL_HOST=host.docker.internal
+MYSQL_PORT=3306
+MYSQL_MASTER_DB=zatca_master
+MYCNF
+chmod 600 "$TEST_ROOT/mycnf-test.env"
+run_verify --config "$TEST_ROOT/mycnf-test.env" --db-only
+[ "$RUN_STATUS" -eq 1 ] || fail "config.env wrong password should still fail when ~/.my.cnf succeeds"
+contains "$OUTPUT" 'WARN | database.host.my_cnf' "~/.my.cnf masking was not detected"
+contains "$OUTPUT" 'HINT | database.diagnosis | Direct host-Bash TCP with --no-defaults' "diagnosis did not mention ~/.my.cnf masking"
+not_contains "$OUTPUT" 'CONFIG_WRONG_SECRET_FIXTURE' "wrong config password leaked"
+not_contains "$OUTPUT" 'MYCNF_SECRET_FIXTURE' "~/.my.cnf password leaked"
+assert_no_secret_fixtures
+pass "~/.my.cnf option-file masking is detected without leaking credentials"
+
+# 17. Docker-only grant safety: Docker zatca-check PASSES while host 127.0.0.1 returns 1045 -> INFO + OVERALL PASS
+reset_mocks
+MOCK_MYSQL_TCP_MODE="deny_host_1045"
+run_verify
+[ "$RUN_STATUS" -eq 0 ] || { cat "$OUTPUT" >&2; fail "Docker-only grant caused false failure when Docker zatca-check PASSED"; }
+contains "$OUTPUT" 'INFO | database.host.runtime_tcp' "Docker-only grant did not downgrade host 1045 to INFO"
+not_contains "$OUTPUT" 'FAIL | database.host.runtime_tcp' "Docker-only grant emitted FAIL despite Docker PASS"
+contains "$OUTPUT" 'OVERALL PASS |' "Docker-only grant did not reach OVERALL PASS"
+assert_no_secret_fixtures
+pass "Docker-subnet-only MySQL grants do not cause false failures when Docker zatca-check passes"
+
+# 18. Deploy admin succeeds + mysql.user traps (host precedence, anonymous user, locked, ssl_type) + redacted admin grants
+reset_mocks
+mkdir -p "$TEST_ROOT/admin-diag-dir"
+cat > "$TEST_ROOT/admin-diag-dir/config.env" <<'ADMCFG'
+ZATCA_DB_USER=runtime-user
+ZATCA_DB_PASSWORD=WRONG_RT_ADMTEST_FIXTURE
+MYSQL_HOST=host.docker.internal
+MYSQL_PORT=3306
+MYSQL_MASTER_DB=zatca_master
+ADMCFG
+cat > "$TEST_ROOT/admin-diag-dir/install.env" <<'ADMINST'
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_ADMIN_USER=deploy-admin
+MYSQL_ADMIN_PASSWORD=DEPLOY_ADMIN_SECRET_FIXTURE
+ADMINST
+chmod 600 "$TEST_ROOT/admin-diag-dir/config.env" "$TEST_ROOT/admin-diag-dir/install.env"
+MOCK_MYSQL_DEPLOY_ADMIN_USER="deploy-admin"
+MOCK_MYSQL_DEPLOY_ADMIN_PASS="DEPLOY_ADMIN_SECRET_FIXTURE"
+MOCK_MYSQL_USER_ROWS='runtime-user\t%\tcaching_sha2_password\tN\t\nruntime-user\t172.%\tcaching_sha2_password\tY\tANY\n\tlocalhost\tmysql_native_password\tN\t'
+MOCK_MYSQL_GRANTS="GRANT USAGE ON *.* TO 'runtime-user'@'%' IDENTIFIED WITH 'caching_sha2_password' AS '\$A\$005\$ab\\'SECRET_HASH_TOKEN_FIXTURE'\nGRANT USAGE ON *.* TO 'runtime-user'@'172.%' IDENTIFIED VIA unix_socket OR caching_sha2_password USING '\$A\$005\$ab;cd\\'MARIADB_HASH_TOKEN_FIXTURE'"
+run_verify --config "$TEST_ROOT/admin-diag-dir/config.env" --db-only
+[ "$RUN_STATUS" -eq 1 ] || fail "admin-diagnosed broken runtime should exit 1"
+contains "$OUTPUT" 'INFO | config.drift.install_env | MYSQL_HOST uses compatible local aliases' \
+    "compatible host.docker.internal vs 127.0.0.1 was not treated as INFO"
+not_contains "$OUTPUT" 'WARN | config.drift.install_env | MYSQL_HOST differs' \
+    "compatible local MYSQL_HOST aliases falsely warned"
+contains "$OUTPUT" 'PASS | database.host.deploy_admin' "deployment admin account from install.env did not authenticate"
+contains "$OUTPUT" 'WARN | database.host.host_precedence' "multiple host rows (172.% + %) did not warn on host precedence"
+contains "$OUTPUT" 'WARN | database.host.anonymous_user' "anonymous user row was not flagged"
+contains "$OUTPUT" 'FAIL | database.host.account_locked' "account_locked=Y was not flagged"
+contains "$OUTPUT" 'FAIL | database.host.account_ssl' "ssl_type=ANY was not flagged"
+contains "$OUTPUT" 'INFO | database.host.account_grants' "admin SHOW GRANTS for runtime account was not reported"
+contains "$OUTPUT" 'IDENTIFIED WITH [REDACTED]' "IDENTIFIED WITH hash was not scrubbed from SHOW GRANTS"
+contains "$OUTPUT" "USING '[REDACTED]'" "IDENTIFIED VIA USING hash was not scrubbed from SHOW GRANTS"
+not_contains "$OUTPUT" 'DEPLOY_ADMIN_SECRET_FIXTURE' "deploy admin password leaked"
+not_contains "$OUTPUT" 'WRONG_RT_ADMTEST_FIXTURE' "wrong runtime password leaked"
+not_contains "$OUTPUT" 'SECRET_HASH_TOKEN_FIXTURE' "IDENTIFIED WITH hash leaked"
+not_contains "$OUTPUT" 'MARIADB_HASH_TOKEN_FIXTURE' "MariaDB IDENTIFIED VIA USING hash leaked"
+assert_no_secret_fixtures
+pass "deploy admin probes mysql.user traps and redacted grants while treating local MYSQL_HOST aliases as compatible"
+
+# 19. Stage 6 accepts HOST=host.docker.internal:3306 + DB_HOST + DB_PORT and flags DB_PORT mismatch
+reset_mocks
+cp "$TEST_REPO/config.env" "$TEST_ROOT/stage6-local.env"
+sed -i 's/^MYSQL_HOST=.*/MYSQL_HOST=127.0.0.1/; s/^MYSQL_PORT=.*/MYSQL_PORT=3306/' "$TEST_ROOT/stage6-local.env"
+write_database_target "127.0.0.1" "3306"
+MOCK_DOCKER_PS="dokku"
+MOCK_TENANT_HOST="host.docker.internal:3306"
+MOCK_TENANT_DB_HOST="host.docker.internal"
+MOCK_TENANT_DB_PORT="3306"
+run_verify --config "$TEST_ROOT/stage6-local.env"
+[ "$RUN_STATUS" -eq 0 ] || { cat "$OUTPUT" >&2; fail "Stage 6 HOST=host.docker.internal:3306 check failed"; }
+contains "$OUTPUT" 'PASS | tenants.wiring.acme-backend' "Stage 6 falsely warned on HOST=host.docker.internal:3306"
+MOCK_TENANT_DB_PORT="3307"
+run_verify --config "$TEST_ROOT/stage6-local.env"
+contains "$OUTPUT" 'WARN | tenants.wiring.acme-backend' "Stage 6 did not flag DB_PORT mismatch"
+contains "$OUTPUT" 'DB_PORT=3307 differs from expected 3306' "Stage 6 did not report exact DB_PORT mismatch"
+pass "Stage 6 accepts HOST=host.docker.internal:3306 and validates DB_HOST/DB_PORT"
+
+# 20. Stage 3 consolidates multiple recreate triggers into a single --recreate NEXT STEP
+reset_mocks
+RUNNING_STATE=false
+python3 - "$RUNNING_ENV_FILE" <<'PY'
+import json, sys
+p = sys.argv[1]
+env = [x for x in json.load(open(p, encoding="utf-8")) if not x.startswith("NATS_MONITOR_HOST=")]
+env = ["DB_HOST=stale-db.test.internal" if x.startswith("DB_HOST=") else x for x in env]
+json.dump(env, open(p, "w", encoding="utf-8"))
+PY
+run_verify
+[ "$RUN_STATUS" -ne 0 ] || fail "stopped/drifted container unexpectedly passed"
+recreate_count="$(grep -Fc 'setup-zatca-daemon.sh --config' "$OUTPUT" | tr -d '[:space:]')"
+[ "$recreate_count" -eq 1 ] || { cat "$OUTPUT" >&2; fail "expected 1 consolidated --recreate NEXT STEP, got $recreate_count"; }
+contains "$OUTPUT" 'start stopped container; apply NATS_MONITOR_HOST=0.0.0.0; sync running container env' \
+    "consolidated --recreate NEXT STEP did not combine all Stage 3 reasons"
+assert_no_secret_fixtures
+pass "Stage 3 deduplicates multiple recreate triggers into one consolidated NEXT STEP"
+
+# 21. --db-only passes when active CURRENT_USER() works and secondary host row is locked/SSL, and skips different-target install.env admin
+reset_mocks
+mkdir -p "$TEST_ROOT/secondary-row-dir"
+cat > "$TEST_ROOT/secondary-row-dir/config.env" <<'SECROW'
+ZATCA_DB_USER=runtime-user
+ZATCA_DB_PASSWORD=DB_PASSWORD_FIXTURE
+MYSQL_HOST=host.docker.internal
+MYSQL_PORT=3306
+MYSQL_MASTER_DB=zatca_master
+SECROW
+cat > "$TEST_ROOT/secondary-row-dir/install.env" <<'SECDRIFT'
+MYSQL_HOST=10.9.9.9
+MYSQL_PORT=3307
+MYSQL_ADMIN_USER=other-server-admin
+MYSQL_ADMIN_PASSWORD=OTHER_SERVER_SECRET_FIXTURE
+SECDRIFT
+chmod 600 "$TEST_ROOT/secondary-row-dir/config.env" "$TEST_ROOT/secondary-row-dir/install.env"
+MOCK_MYSQL_USER_ROWS='runtime-user\t%\tcaching_sha2_password\tN\t\nruntime-user\t172.%\tcaching_sha2_password\tY\tANY'
+run_verify --config "$TEST_ROOT/secondary-row-dir/config.env" --db-only
+[ "$RUN_STATUS" -eq 0 ] || { cat "$OUTPUT" >&2; fail "healthy --db-only with locked secondary host row should exit 0 (status=$RUN_STATUS)"; }
+contains "$OUTPUT" 'WARN | database.host.account_locked' "secondary locked row did not downgrade to WARN"
+contains "$OUTPUT" 'WARN | database.host.account_ssl' "secondary SSL row did not downgrade to WARN"
+contains "$OUTPUT" 'skipped deployment control-plane account from install.env' "different-target install.env admin was not skipped"
+not_contains "$OUTPUT" 'OTHER_SERVER_SECRET_FIXTURE' "other-server deploy admin password leaked"
+assert_no_secret_fixtures
+pass "healthy --db-only downgrades inactive secondary locked/SSL rows to WARN and skips different-target install.env admin"
 
 printf '\nAll environment-verifier wrapper tests passed.\n'

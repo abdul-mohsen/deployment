@@ -10,8 +10,12 @@ ARG_CONFIG_FILE="${REPO_DIR}/config.env"
 ARG_EXPLICIT_CONFIG=false
 ARG_INSTALL_ENV=""
 ARG_VERBOSE=false
+ARG_DB_ONLY=false
 
 SECRETS_FILE=""
+SHADOWED_PASSWORDS_FILE=""
+DEPLOY_ADMIN_CREDS_FILE=""
+HOST_MYSQL_ERR_FILE=""
 STAGE1_ERR_FILE=""
 COMPOSE_ERR_FILE=""
 DATABASE_DIAGNOSTIC_FILE=""
@@ -22,6 +26,9 @@ cleanup_diagnostics() {
     local f
     for f in \
         "$SECRETS_FILE" \
+        "$SHADOWED_PASSWORDS_FILE" \
+        "$DEPLOY_ADMIN_CREDS_FILE" \
+        "$HOST_MYSQL_ERR_FILE" \
         "$STAGE1_ERR_FILE" \
         "$COMPOSE_ERR_FILE" \
         "$DATABASE_DIAGNOSTIC_FILE" \
@@ -38,15 +45,22 @@ Usage: scripts/verify-zatca-environment.sh [OPTIONS]
 
 Run a read-only, verbose, start-to-finish verification of the ZATCA deployment
 configuration, host readiness, Compose resolution, running daemon parity,
-database access, live readiness/JetStream health, and Dokku tenant wiring.
+direct host-Bash and Docker database access, live readiness/JetStream health,
+and Dokku tenant wiring.
 
 Options:
   --env-file PATH, --config PATH  Select a specific config.env file
-                                  (default: <repo>/config.env; never falls back to .env)
+                                  (also accepts --env-file=PATH / --config=PATH;
+                                  default: <repo>/config.env; never falls back to .env)
   --install-env PATH              Explicit install.env path for drift comparison
-                                  (default: sibling install.env next to config.env, if present)
+                                  (also accepts --install-env=PATH;
+                                  default: sibling install.env next to config.env, if present)
+  --db-only                       Run direct host-Bash MySQL verification only
+                                  (zero Docker calls; checks credentials, plaintext TCP,
+                                  socket fallback, shadowed duplicate lines, grants, and
+                                  non-secret mysql.user metadata)
   --verbose, -v                   Include full non-secret mapped daemon env table,
-                                  matching drift details, and deeper redacted failure logs
+                                  matching drift details, grant lines, and deeper logs
   -h, --help                      Show this help
 
 Exit codes:
@@ -70,11 +84,28 @@ while [ "$#" -gt 0 ]; do
             ARG_EXPLICIT_CONFIG=true
             shift 2
             ;;
+        --env-file=*|--config=*)
+            arg_val="${1#*=}"
+            [ -n "$arg_val" ] || config_error "${1%%=*} requires a path"
+            ARG_CONFIG_FILE="$arg_val"
+            ARG_EXPLICIT_CONFIG=true
+            shift
+            ;;
         --install-env)
             [ "$#" -ge 2 ] || config_error "--install-env requires a path"
             [ -n "$2" ] || config_error "--install-env requires a path"
             ARG_INSTALL_ENV="$2"
             shift 2
+            ;;
+        --install-env=*)
+            arg_val="${1#*=}"
+            [ -n "$arg_val" ] || config_error "--install-env requires a path"
+            ARG_INSTALL_ENV="$arg_val"
+            shift
+            ;;
+        --db-only)
+            ARG_DB_ONLY=true
+            shift
             ;;
         --verbose|-v)
             ARG_VERBOSE=true
@@ -108,6 +139,7 @@ readonly SELECTED_CONFIG_DIR="$(cd "$(dirname "$SELECTED_CONFIG_FILE")" && pwd)"
 readonly EXPLICIT_CONFIG="$ARG_EXPLICIT_CONFIG"
 readonly EXPLICIT_INSTALL_ENV="$ARG_INSTALL_ENV"
 readonly VERBOSE="$ARG_VERBOSE"
+readonly DB_ONLY="$ARG_DB_ONLY"
 
 set +e
 set -a
@@ -132,9 +164,11 @@ NEXT_STEPS=()
 HAS_DOCKER=false
 HAS_PYTHON=false
 HAS_CURL=false
+HAS_MYSQL_CLIENT=false
 command -v docker >/dev/null 2>&1 && HAS_DOCKER=true
 command -v python3 >/dev/null 2>&1 && HAS_PYTHON=true
 command -v curl >/dev/null 2>&1 && HAS_CURL=true
+command -v mysql >/dev/null 2>&1 && HAS_MYSQL_CLIENT=true
 
 add_next_step() {
     local step="$1" existing
@@ -347,13 +381,46 @@ for s in secrets:
 text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
 text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", text)
 
-# Scrub URI user:pass@, MySQL Go DSN user:pass@tcp(, Bearer/Basic auth, key=value secrets
+# Scrub URI user:pass@, MySQL Go DSN user:pass@tcp(, legacy GRANT hashes, Bearer/Basic auth, key=value secrets
+_SQL_STR = r"(?:'(?:\\.|''|[^'\\])*'|\"(?:\\.|\"\"|[^\"\\])*\")"
 text = re.sub(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^:@/\s]+):([^@/\s]+)@", r"\1[REDACTED]@", text)
 text = re.sub(r"([A-Za-z0-9._-]+):([^@\s]+)@tcp\(", r"\1:[REDACTED]@tcp(", text)
-text = re.sub(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9+/=._-]{4,}", r"\1 [REDACTED]", text)
 text = re.sub(
-    r'(?i)\b([A-Za-z0-9_.-]*(?:password|passwd|pass|pwd|secret|token|encrypt_key|monitor_pass|api_key|authorization))\s*([:=])\s*(?:"[^"]*"|\'[^\']*\'|[^\s,;}\]]+)',
-    r"\1\2[REDACTED]",
+    rf"(?i)\bIDENTIFIED\s+BY\s+(?:PASSWORD\s+)?{_SQL_STR}",
+    "IDENTIFIED BY '[REDACTED]'",
+    text,
+)
+text = re.sub(
+    rf"(?i)\bIDENTIFIED\s+WITH\s+\S+\s+(?:AS|BY)\s+{_SQL_STR}",
+    "IDENTIFIED WITH [REDACTED]",
+    text,
+)
+text = re.sub(
+    rf"(?i)\bIDENTIFIED\s+VIA\s+(?:{_SQL_STR}|[^\n;])+",
+    lambda m: re.sub(
+        rf"(?i)\bUSING\s+(?:PASSWORD\s+)?{_SQL_STR}",
+        "USING '[REDACTED]'",
+        m.group(0),
+    ),
+    text,
+)
+text = re.sub(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9+/=._-]{4,}", r"\1 [REDACTED]", text)
+
+def _redact_kv(match):
+    prefix_start = max(0, match.start() - 6)
+    before = text[prefix_start:match.start()].lower()
+    if (
+        before == "using "
+        and match.group(1).lower() == "password"
+        and match.group(2) == ":"
+        and re.fullmatch(r"(?i)(?:YES|NO)\)?", match.group(3))
+    ):
+        return match.group(0)
+    return f"{match.group(1)}{match.group(2)}[REDACTED]"
+
+text = re.sub(
+    r'(?i)\b([A-Za-z0-9_.-]*(?:password|passwd|pass|pwd|secret|token|encrypt_key|monitor_pass|api_key|authorization))\s*([:=])\s*("[^"]*"|\'[^\']*\'|[^\s,;}\]]+)',
+    _redact_kv,
     text,
 )
 sys.stdout.write(text)
@@ -439,18 +506,24 @@ case "${ZATCA_DAEMON_ENABLED:-}" in
 esac
 
 if [ "$HAS_PYTHON" = true ]; then
+    SHADOWED_PASSWORDS_FILE="$(mktemp 2>/dev/null || true)"
+    [ -z "$SHADOWED_PASSWORDS_FILE" ] || chmod 600 "$SHADOWED_PASSWORDS_FILE" 2>/dev/null || true
+    DEPLOY_ADMIN_CREDS_FILE="$(mktemp 2>/dev/null || true)"
+    [ -z "$DEPLOY_ADMIN_CREDS_FILE" ] || chmod 600 "$DEPLOY_ADMIN_CREDS_FILE" 2>/dev/null || true
     stage1_output="$(
-        python3 - "$SELECTED_CONFIG_FILE" "$EXPLICIT_INSTALL_ENV" "$VERBOSE" "$SECRETS_FILE" <<'PY'
+        python3 - "$SELECTED_CONFIG_FILE" "$EXPLICIT_INSTALL_ENV" "$VERBOSE" "$SECRETS_FILE" "$DB_ONLY" "$SHADOWED_PASSWORDS_FILE" "$DEPLOY_ADMIN_CREDS_FILE" <<'PY'
 import base64
 import datetime
 import ipaddress
+import json
 import os
 import re
 import stat
 import sys
 
-cfg_path, explicit_install, verbose_str, secrets_path = sys.argv[1:5]
+cfg_path, explicit_install, verbose_str, secrets_path, db_only_str, shadowed_path, deploy_admin_path = sys.argv[1:8]
 verbose = verbose_str == "true"
+db_only = db_only_str == "true"
 cfg_dir = os.path.dirname(os.path.abspath(cfg_path))
 
 secrets = []
@@ -527,16 +600,16 @@ try:
 except OSError:
     pass
 
-# 2. Raw env-file static scan (duplicates, $, trailing whitespace, inline #)
+# 2. Raw env-file static scan (duplicates with line numbers + value diff, $, trailing whitespace, inline #)
 def parse_raw_env(path):
     entries = {}
-    duplicates = []
+    occurrences = {}
     dollar_keys = []
     trailing_ws_keys = []
     hash_keys = []
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for raw_line in fh:
+            for lineno, raw_line in enumerate(fh, 1):
                 line = raw_line.rstrip("\r\n")
                 stripped = line.lstrip()
                 if not stripped or stripped.startswith("#"):
@@ -549,8 +622,6 @@ def parse_raw_env(path):
                 k = k.strip()
                 if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
                     continue
-                if k in entries and k not in duplicates:
-                    duplicates.append(k)
                 unquoted = raw_v
                 is_quoted = len(raw_v) >= 2 and raw_v[0] == raw_v[-1] and raw_v[0] in ("'", '"')
                 if is_quoted:
@@ -564,19 +635,54 @@ def parse_raw_env(path):
                 if "$" in raw_v and "$$" not in raw_v and k not in dollar_keys:
                     dollar_keys.append(k)
                 entries[k] = unquoted
+                occurrences.setdefault(k, []).append((lineno, unquoted))
     except OSError:
-        return None, [], [], [], []
-    return entries, duplicates, dollar_keys, trailing_ws_keys, hash_keys
+        return None, {}, [], [], []
+    return entries, occurrences, dollar_keys, trailing_ws_keys, hash_keys
 
-raw_entries, dup_keys, dollar_keys, ws_keys, hash_keys = parse_raw_env(cfg_path)
+def env_get(key, default=""):
+    val = os.environ.get(key)
+    if val is None:
+        return default
+    return val.rstrip("\r")
+
+raw_entries, raw_occurrences, dollar_keys, ws_keys, hash_keys = parse_raw_env(cfg_path)
+dup_keys = sorted(k for k, occs in raw_occurrences.items() if len(occs) > 1)
 if dup_keys:
+    dup_details = []
+    for k in dup_keys:
+        occs = raw_occurrences[k]
+        line_nums = ", ".join(str(ln) for ln, _ in occs)
+        distinct_vals = {val for _, val in occs}
+        if len(distinct_vals) > 1:
+            dup_details.append(f"{k} (lines {line_nums}; values DIFFER — line {occs[-1][0]} overrides earlier line(s))")
+        else:
+            dup_details.append(f"{k} (lines {line_nums}; identical values)")
     emit(
         "WARN",
         "config.duplicate_keys",
-        "keys defined multiple times in selected config (last value wins): " + ", ".join(sorted(dup_keys)),
+        "keys defined multiple times in selected config (last value wins): " + "; ".join(dup_details),
         "0",
-        f"Remove duplicate key definitions in {cfg_path}: " + ", ".join(sorted(dup_keys)),
+        f"Remove duplicate key definitions in {cfg_path}: " + ", ".join(dup_keys),
     )
+
+# Record distinct shadowed ZATCA_DB_PASSWORD values (line + value) privately for Stage 4 host-Bash probe
+if shadowed_path and "ZATCA_DB_PASSWORD" in raw_occurrences and len(raw_occurrences["ZATCA_DB_PASSWORD"]) > 1:
+    eff_pass = env_get("ZATCA_DB_PASSWORD", "")
+    last_line = raw_occurrences["ZATCA_DB_PASSWORD"][-1][0]
+    seen_vals = {eff_pass}
+    candidates = []
+    for ln, val in raw_occurrences["ZATCA_DB_PASSWORD"][:-1]:
+        if val and val not in seen_vals:
+            seen_vals.add(val)
+            candidates.append({"line": ln, "effective_line": last_line, "value": val})
+    if candidates:
+        try:
+            with open(shadowed_path, "w", encoding="utf-8") as fh:
+                json.dump(candidates, fh)
+        except OSError:
+            pass
+
 if dollar_keys:
     emit(
         "WARN",
@@ -602,16 +708,12 @@ if hash_keys:
         f"Verify keys containing '#' in {cfg_path}: " + ", ".join(sorted(hash_keys)),
     )
 
-def env_get(key, default=""):
-    val = os.environ.get(key)
-    if val is None:
-        return default
-    return val.rstrip("\r")
-
 # 3. Daemon enabled flag
 enabled_raw = env_get("ZATCA_DAEMON_ENABLED", "")
 daemon_enabled = enabled_raw in ("1", "true", "yes")
-if daemon_enabled:
+if db_only:
+    emit("INFO", "config.enabled", f"ZATCA_DAEMON_ENABLED={safe_nonsecret(enabled_raw)} (not gating --db-only host MySQL check)")
+elif daemon_enabled:
     emit("PASS", "config.enabled", f"ZATCA_DAEMON_ENABLED={safe_nonsecret(enabled_raw)}")
 else:
     emit(
@@ -622,19 +724,25 @@ else:
         f"Set ZATCA_DAEMON_ENABLED=1 in {cfg_path} once all required settings and security gates are configured",
     )
 
-# 4. All 7 required settings checked together
-required_keys = [
-    "ZATCA_DAEMON_IMAGE",
-    "ZATCA_DB_USER",
-    "ZATCA_DB_PASSWORD",
-    "ZATCA_ENCRYPT_KEY",
-    "ZATCA_MONITOR_PASSWORD",
-    "NATS_USER",
-    "NATS_PASSWORD",
-]
+# 4. Required settings checked together
+if db_only:
+    required_keys = ["ZATCA_DB_USER", "ZATCA_DB_PASSWORD"]
+else:
+    required_keys = [
+        "ZATCA_DAEMON_IMAGE",
+        "ZATCA_DB_USER",
+        "ZATCA_DB_PASSWORD",
+        "ZATCA_ENCRYPT_KEY",
+        "ZATCA_MONITOR_PASSWORD",
+        "NATS_USER",
+        "NATS_PASSWORD",
+    ]
 missing_required = [k for k in required_keys if not env_get(k, "")]
 if not missing_required:
-    emit("PASS", "config.required", "all 7 required daemon settings are populated")
+    if db_only:
+        emit("PASS", "config.required", "required ZATCA database settings (ZATCA_DB_USER, ZATCA_DB_PASSWORD) are populated")
+    else:
+        emit("PASS", "config.required", "all 7 required daemon settings are populated")
 else:
     emit(
         "FAIL",
@@ -644,7 +752,7 @@ else:
         f"Populate missing required keys in {cfg_path}: " + ", ".join(missing_required),
     )
 
-# 5. Optional account pairs
+# 5. Optional account pairs & same-user password alignment inside selected config
 admin_user = env_get("ZATCA_ADMIN_DB_USER", "")
 admin_pass = env_get("ZATCA_ADMIN_DB_PASSWORD", "")
 if bool(admin_user) != bool(admin_pass):
@@ -660,102 +768,128 @@ elif admin_user:
 else:
     emit("INFO", "config.optional.admin_db", "optional onboarding DB account (ZATCA_ADMIN_DB_*) not configured")
 
-smtp_user = env_get("ZATCA_SMTP_USER", "")
-smtp_pass = env_get("ZATCA_SMTP_PASSWORD", "")
-if bool(smtp_user) != bool(smtp_pass):
+z_user = env_get("ZATCA_DB_USER", "")
+z_pass = env_get("ZATCA_DB_PASSWORD", "")
+if z_user and admin_user and z_user == admin_user and z_pass and admin_pass and z_pass != admin_pass:
     emit(
         "WARN",
-        "config.optional.smtp",
-        "ZATCA_SMTP_USER and ZATCA_SMTP_PASSWORD are only partially configured",
+        "config.db_password_mismatch",
+        f"ZATCA_DB_USER and ZATCA_ADMIN_DB_USER are both '{safe_nonsecret(z_user)}', but ZATCA_DB_PASSWORD differs from ZATCA_ADMIN_DB_PASSWORD (values withheld)",
         "0",
-        f"Set both ZATCA_SMTP_USER and ZATCA_SMTP_PASSWORD in {cfg_path}, or leave both empty",
+        f"Align ZATCA_DB_PASSWORD and ZATCA_ADMIN_DB_PASSWORD for shared MySQL user '{safe_nonsecret(z_user)}' in {cfg_path}",
     )
-
-# 6. ZATCA_ENCRYPT_KEY format check (32-byte AES-256 hex/base64/raw)
-enc_key = env_get("ZATCA_ENCRYPT_KEY", "")
-if enc_key:
-    enc_ok = False
-    enc_kind = ""
-    if re.fullmatch(r"[0-9a-fA-F]{64}", enc_key):
-        enc_ok = True
-        enc_kind = "32-byte hex"
-    else:
-        for decoder in (base64.b64decode, base64.urlsafe_b64decode):
-            try:
-                padded = enc_key + ("=" * ((4 - len(enc_key) % 4) % 4))
-                decoded = decoder(padded.encode("ascii"))
-                if len(decoded) == 32:
-                    enc_ok = True
-                    enc_kind = "32-byte base64"
-                    break
-            except Exception:
-                pass
-        if not enc_ok and len(enc_key.encode("utf-8")) == 32:
-            enc_ok = True
-            enc_kind = "32-byte raw"
-    if enc_ok:
-        emit("PASS", "config.encrypt_key", f"ZATCA_ENCRYPT_KEY format valid ({enc_kind} AES-256 key)")
-    else:
+for u_key, p_key in (
+    ("MYSQL_ADMIN_USER", "MYSQL_ADMIN_PASSWORD"),
+    ("MYSQL_ROOT_USER", "MYSQL_ROOT_PASSWORD"),
+):
+    c_u = env_get(u_key, "")
+    c_p = env_get(p_key, "")
+    if z_user and c_u and z_user == c_u and z_pass and c_p and z_pass != c_p:
         emit(
             "WARN",
-            "config.encrypt_key",
-            "ZATCA_ENCRYPT_KEY does not decode to 32 bytes (expected 44-char base64 or 64-char hex for AES-256); branch config decryption may fail",
+            "config.db_password_mismatch",
+            f"ZATCA_DB_USER matches {u_key} ('{safe_nonsecret(z_user)}') in selected config, but ZATCA_DB_PASSWORD differs from {p_key} (values withheld)",
             "0",
-            f"Verify ZATCA_ENCRYPT_KEY in {cfg_path} is a valid 32-byte AES-256 key (e.g. openssl rand -base64 32) matching stored branch certificates",
+            f"Align ZATCA_DB_PASSWORD with {p_key} for shared MySQL user '{safe_nonsecret(z_user)}' in {cfg_path}",
         )
 
-# 7. All NATS security gates checked individually
-gate_failures = []
-
-if env_get("NATS_PRIVATE_NETWORK_ONLY", "false") not in ("1", "true", "yes"):
-    gate_failures.append("NATS_PRIVATE_NETWORK_ONLY must be true (overlay runs NATS without TLS)")
-if env_get("NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED", "false") not in ("1", "true", "yes"):
-    gate_failures.append("NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED must be true after confirming host firewall restricts NATS port")
-if env_get("NATS_SHARED_CREDENTIALS_ACKNOWLEDGED", "false") not in ("1", "true", "yes"):
-    gate_failures.append("NATS_SHARED_CREDENTIALS_ACKNOWLEDGED must be true")
-if not env_get("NATS_SHARED_CREDENTIALS_APPROVAL_ID", ""):
-    gate_failures.append("NATS_SHARED_CREDENTIALS_APPROVAL_ID is empty")
-
-expires = env_get("NATS_SHARED_CREDENTIALS_EXPIRES", "")
-if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", expires):
-    gate_failures.append("NATS_SHARED_CREDENTIALS_EXPIRES must use YYYY-MM-DD format")
-else:
-    try:
-        exp_date = datetime.date.fromisoformat(expires)
-        today_utc = datetime.datetime.now(datetime.timezone.utc).date()
-        if exp_date <= today_utc:
-            gate_failures.append(f"NATS_SHARED_CREDENTIALS_EXPIRES ({expires}) is expired (must be after {today_utc.isoformat()})")
-        else:
-            days_left = (exp_date - today_utc).days
-            if days_left <= 14:
-                emit(
-                    "WARN",
-                    "config.security_gates.expiry",
-                    f"NATS_SHARED_CREDENTIALS_EXPIRES ({expires}) expires in {days_left} day(s)",
-                    "0",
-                    f"Renew NATS_SHARED_CREDENTIALS_EXPIRES in {cfg_path} before {expires}",
-                )
-    except ValueError:
-        gate_failures.append("NATS_SHARED_CREDENTIALS_EXPIRES is not a valid calendar date")
-
-if not gate_failures:
-    emit(
-        "PASS",
-        "config.security_gates",
-        f"all 5 NATS security gates are valid (approval_id={safe_nonsecret(env_get('NATS_SHARED_CREDENTIALS_APPROVAL_ID', ''))} expires={safe_nonsecret(expires)})",
-    )
-else:
-    for idx, reason in enumerate(gate_failures, 1):
+if not db_only:
+    smtp_user = env_get("ZATCA_SMTP_USER", "")
+    smtp_pass = env_get("ZATCA_SMTP_PASSWORD", "")
+    if bool(smtp_user) != bool(smtp_pass):
         emit(
-            "FAIL",
-            f"config.security_gates.{idx}",
-            reason,
-            "1",
-            f"Update NATS security gate settings in {cfg_path}: {reason}",
+            "WARN",
+            "config.optional.smtp",
+            "ZATCA_SMTP_USER and ZATCA_SMTP_PASSWORD are only partially configured",
+            "0",
+            f"Set both ZATCA_SMTP_USER and ZATCA_SMTP_PASSWORD in {cfg_path}, or leave both empty",
         )
+
+    # 6. ZATCA_ENCRYPT_KEY format check (32-byte AES-256 hex/base64/raw)
+    enc_key = env_get("ZATCA_ENCRYPT_KEY", "")
+    if enc_key:
+        enc_ok = False
+        enc_kind = ""
+        if re.fullmatch(r"[0-9a-fA-F]{64}", enc_key):
+            enc_ok = True
+            enc_kind = "32-byte hex"
+        else:
+            for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+                try:
+                    padded = enc_key + ("=" * ((4 - len(enc_key) % 4) % 4))
+                    decoded = decoder(padded.encode("ascii"))
+                    if len(decoded) == 32:
+                        enc_ok = True
+                        enc_kind = "32-byte base64"
+                        break
+                except Exception:
+                    pass
+            if not enc_ok and len(enc_key.encode("utf-8")) == 32:
+                enc_ok = True
+                enc_kind = "32-byte raw"
+        if enc_ok:
+            emit("PASS", "config.encrypt_key", f"ZATCA_ENCRYPT_KEY format valid ({enc_kind} AES-256 key)")
+        else:
+            emit(
+                "WARN",
+                "config.encrypt_key",
+                "ZATCA_ENCRYPT_KEY does not decode to 32 bytes (expected 44-char base64 or 64-char hex for AES-256); branch config decryption may fail",
+                "0",
+                f"Verify ZATCA_ENCRYPT_KEY in {cfg_path} is a valid 32-byte AES-256 key (e.g. openssl rand -base64 32) matching stored branch certificates",
+            )
+
+    # 7. All NATS security gates checked individually
+    gate_failures = []
+
+    if env_get("NATS_PRIVATE_NETWORK_ONLY", "false") not in ("1", "true", "yes"):
+        gate_failures.append("NATS_PRIVATE_NETWORK_ONLY must be true (overlay runs NATS without TLS)")
+    if env_get("NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED", "false") not in ("1", "true", "yes"):
+        gate_failures.append("NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED must be true after confirming host firewall restricts NATS port")
+    if env_get("NATS_SHARED_CREDENTIALS_ACKNOWLEDGED", "false") not in ("1", "true", "yes"):
+        gate_failures.append("NATS_SHARED_CREDENTIALS_ACKNOWLEDGED must be true")
+    if not env_get("NATS_SHARED_CREDENTIALS_APPROVAL_ID", ""):
+        gate_failures.append("NATS_SHARED_CREDENTIALS_APPROVAL_ID is empty")
+
+    expires = env_get("NATS_SHARED_CREDENTIALS_EXPIRES", "")
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", expires):
+        gate_failures.append("NATS_SHARED_CREDENTIALS_EXPIRES must use YYYY-MM-DD format")
+    else:
+        try:
+            exp_date = datetime.date.fromisoformat(expires)
+            today_utc = datetime.datetime.now(datetime.timezone.utc).date()
+            if exp_date <= today_utc:
+                gate_failures.append(f"NATS_SHARED_CREDENTIALS_EXPIRES ({expires}) is expired (must be after {today_utc.isoformat()})")
+            else:
+                days_left = (exp_date - today_utc).days
+                if days_left <= 14:
+                    emit(
+                        "WARN",
+                        "config.security_gates.expiry",
+                        f"NATS_SHARED_CREDENTIALS_EXPIRES ({expires}) expires in {days_left} day(s)",
+                        "0",
+                        f"Renew NATS_SHARED_CREDENTIALS_EXPIRES in {cfg_path} before {expires}",
+                    )
+        except ValueError:
+            gate_failures.append("NATS_SHARED_CREDENTIALS_EXPIRES is not a valid calendar date")
+
+    if not gate_failures:
+        emit(
+            "PASS",
+            "config.security_gates",
+            f"all 5 NATS security gates are valid (approval_id={safe_nonsecret(env_get('NATS_SHARED_CREDENTIALS_APPROVAL_ID', ''))} expires={safe_nonsecret(expires)})",
+        )
+    else:
+        for idx, reason in enumerate(gate_failures, 1):
+            emit(
+                "FAIL",
+                f"config.security_gates.{idx}",
+                reason,
+                "1",
+                f"Update NATS security gate settings in {cfg_path}: {reason}",
+            )
 
 # 8. Numeric ports & thresholds (never print invalid raw values)
-port_specs = [
+port_specs = [("MYSQL_PORT", "3306", True)] if db_only else [
     ("MYSQL_PORT", "3306", True),
     ("ZATCA_NATS_PORT", "4222", True),
     ("ZATCA_NATS_MONITOR_PORT", "8222", True),
@@ -781,85 +915,138 @@ for key, default_val, required_valid in port_specs:
                 f"Set {key} in {cfg_path} to a valid integer TCP port between 1 and 65535",
             )
 if not port_errors:
-    emit(
-        "PASS",
-        "config.ports",
-        f"all configured TCP ports are valid (mysql={resolved_ports['MYSQL_PORT']} nats={resolved_ports['ZATCA_NATS_PORT']} monitor={resolved_ports['ZATCA_NATS_MONITOR_PORT']})",
-    )
-
-for key, default_val, allow_zero in (
-    ("ZATCA_MAX_PENDING", "1000", False),
-    ("ZATCA_MAX_ACK_PENDING", "100", True),
-):
-    raw_val = env_get(key, "")
-    eff = raw_val if raw_val != "" else default_val
-    ok = re.fullmatch(r"[0-9]+", eff) is not None and (int(eff) >= 0 if allow_zero else int(eff) > 0)
-    if not ok:
-        emit(
-            "FAIL",
-            f"config.threshold.{key}",
-            f"{key} must be a {'non-negative' if allow_zero else 'positive'} integer",
-            "0",
-            f"Set {key} in {cfg_path} to a valid {'non-negative' if allow_zero else 'positive'} integer",
-        )
-
-# 9. NATS_URL consistency with ZATCA_NATS_PORT
-nats_url = env_get("NATS_URL", "")
-nats_port = resolved_ports.get("ZATCA_NATS_PORT") or 4222
-if not nats_url:
-    emit("INFO", "config.nats_url", f"NATS_URL is empty; backend apps will derive nats://host.docker.internal:{nats_port}")
-else:
-    if not (nats_url.startswith("nats://") or nats_url.startswith("tls://")):
-        emit(
-            "FAIL",
-            "config.nats_url",
-            "NATS_URL must start with nats:// or tls://",
-            "1",
-            f"Fix NATS_URL in {cfg_path} (leave empty to derive nats://host.docker.internal:{nats_port})",
-        )
-    elif "@" in nats_url or "," in nats_url or re.search(r"\s", nats_url):
-        emit(
-            "FAIL",
-            "config.nats_url",
-            "NATS_URL must not contain embedded credentials, commas, or whitespace",
-            "1",
-            f"Remove embedded credentials/spaces from NATS_URL in {cfg_path}; use NATS_USER and NATS_PASSWORD instead",
-        )
+    if db_only:
+        emit("PASS", "config.ports", f"configured MySQL TCP port is valid (mysql={resolved_ports['MYSQL_PORT']})")
     else:
-        hostport = nats_url.split("://", 1)[1].split("/", 1)[0]
-        url_port = 4222
-        if ":" in hostport and not hostport.endswith("]"):
-            maybe_port = hostport.rsplit(":", 1)[1]
-            if re.fullmatch(r"[0-9]{1,5}", maybe_port) and 1 <= int(maybe_port) <= 65535:
-                url_port = int(maybe_port)
-            else:
-                url_port = None
-        if url_port is None:
+        emit(
+            "PASS",
+            "config.ports",
+            f"all configured TCP ports are valid (mysql={resolved_ports['MYSQL_PORT']} nats={resolved_ports['ZATCA_NATS_PORT']} monitor={resolved_ports['ZATCA_NATS_MONITOR_PORT']})",
+        )
+
+if not db_only:
+    for key, default_val, allow_zero in (
+        ("ZATCA_MAX_PENDING", "1000", False),
+        ("ZATCA_MAX_ACK_PENDING", "100", True),
+    ):
+        raw_val = env_get(key, "")
+        eff = raw_val if raw_val != "" else default_val
+        ok = re.fullmatch(r"[0-9]+", eff) is not None and (int(eff) >= 0 if allow_zero else int(eff) > 0)
+        if not ok:
             emit(
                 "FAIL",
-                "config.nats_url",
-                "NATS_URL contains an invalid port (must be 1-65535)",
-                "1",
-                f"Fix the port in NATS_URL in {cfg_path} to match ZATCA_NATS_PORT={nats_port}",
+                f"config.threshold.{key}",
+                f"{key} must be a {'non-negative' if allow_zero else 'positive'} integer",
+                "0",
+                f"Set {key} in {cfg_path} to a valid {'non-negative' if allow_zero else 'positive'} integer",
             )
-        elif daemon_enabled and resolved_ports.get("ZATCA_NATS_PORT") is not None and url_port != nats_port:
+
+    # 9. NATS_URL consistency with ZATCA_NATS_PORT
+    nats_url = env_get("NATS_URL", "")
+    nats_port = resolved_ports.get("ZATCA_NATS_PORT") or 4222
+    if not nats_url:
+        emit("INFO", "config.nats_url", f"NATS_URL is empty; backend apps will derive nats://host.docker.internal:{nats_port}")
+    else:
+        if not (nats_url.startswith("nats://") or nats_url.startswith("tls://")):
             emit(
                 "FAIL",
                 "config.nats_url",
-                f"NATS_URL port ({url_port}) does not match ZATCA_NATS_PORT ({nats_port})",
+                "NATS_URL must start with nats:// or tls://",
                 "1",
-                f"Align NATS_URL port with ZATCA_NATS_PORT={nats_port} in {cfg_path} (or leave NATS_URL empty)",
+                f"Fix NATS_URL in {cfg_path} (leave empty to derive nats://host.docker.internal:{nats_port})",
+            )
+        elif "@" in nats_url or "," in nats_url or re.search(r"\s", nats_url):
+            emit(
+                "FAIL",
+                "config.nats_url",
+                "NATS_URL must not contain embedded credentials, commas, or whitespace",
+                "1",
+                f"Remove embedded credentials/spaces from NATS_URL in {cfg_path}; use NATS_USER and NATS_PASSWORD instead",
             )
         else:
-            emit("PASS", "config.nats_url", f"NATS_URL is valid and matches ZATCA_NATS_PORT={nats_port} ({safe_nonsecret(nats_url)})")
+            hostport = nats_url.split("://", 1)[1].split("/", 1)[0]
+            url_port = 4222
+            if ":" in hostport and not hostport.endswith("]"):
+                maybe_port = hostport.rsplit(":", 1)[1]
+                if re.fullmatch(r"[0-9]{1,5}", maybe_port) and 1 <= int(maybe_port) <= 65535:
+                    url_port = int(maybe_port)
+                else:
+                    url_port = None
+            if url_port is None:
+                emit(
+                    "FAIL",
+                    "config.nats_url",
+                    "NATS_URL contains an invalid port (must be 1-65535)",
+                    "1",
+                    f"Fix the port in NATS_URL in {cfg_path} to match ZATCA_NATS_PORT={nats_port}",
+                )
+            elif daemon_enabled and resolved_ports.get("ZATCA_NATS_PORT") is not None and url_port != nats_port:
+                emit(
+                    "FAIL",
+                    "config.nats_url",
+                    f"NATS_URL port ({url_port}) does not match ZATCA_NATS_PORT ({nats_port})",
+                    "1",
+                    f"Align NATS_URL port with ZATCA_NATS_PORT={nats_port} in {cfg_path} (or leave NATS_URL empty)",
+                )
+            else:
+                emit("PASS", "config.nats_url", f"NATS_URL is valid and matches ZATCA_NATS_PORT={nats_port} ({safe_nonsecret(nats_url)})")
+
+# Helper to collect deployment control-plane MySQL accounts (matching lib.sh mysql_admin_user/password)
+def extract_deploy_admin(source_label, mapping, fallback_host, fallback_port):
+    u = mapping.get("MYSQL_ADMIN_USER", "")
+    if not u:
+        u = mapping.get("MYSQL_ROOT_USER", "")
+    if not u:
+        if mapping.get("MYSQL_ROOT_PASSWORD", "") and not mapping.get("MYSQL_ADMIN_PASSWORD", ""):
+            u = "root"
+        else:
+            u = "dokku_admin"
+    p = mapping.get("MYSQL_ADMIN_PASSWORD", "") or mapping.get("MYSQL_ROOT_PASSWORD", "")
+    if not p or p == "changeme":
+        return None
+    h = mapping.get("MYSQL_HOST", "") or fallback_host or "127.0.0.1"
+    pt = mapping.get("MYSQL_PORT", "") or fallback_port or "3306"
+    return {"source": source_label, "user": u, "password": p, "host": h, "port": pt}
+
+deploy_admins = []
+seen_admin_sigs = set()
+cfg_admin = extract_deploy_admin(
+    os.path.basename(cfg_path),
+    {
+        "MYSQL_ADMIN_USER": env_get("MYSQL_ADMIN_USER", ""),
+        "MYSQL_ADMIN_PASSWORD": env_get("MYSQL_ADMIN_PASSWORD", ""),
+        "MYSQL_ROOT_USER": env_get("MYSQL_ROOT_USER", ""),
+        "MYSQL_ROOT_PASSWORD": env_get("MYSQL_ROOT_PASSWORD", ""),
+        "MYSQL_HOST": env_get("MYSQL_HOST", ""),
+        "MYSQL_PORT": env_get("MYSQL_PORT", ""),
+    },
+    env_get("MYSQL_HOST", ""),
+    env_get("MYSQL_PORT", ""),
+)
+if cfg_admin:
+    sig = (cfg_admin["user"], cfg_admin["password"], cfg_admin["host"], cfg_admin["port"])
+    seen_admin_sigs.add(sig)
+    deploy_admins.append(cfg_admin)
 
 # 10. Sibling install.env drift check
+local_host_aliases = {"host.docker.internal", "localhost", "127.0.0.1", "::1"}
 install_path = explicit_install if explicit_install else os.path.join(cfg_dir, "install.env")
 if os.path.isfile(install_path) and os.path.realpath(install_path) != os.path.realpath(cfg_path):
     inst_entries, _, _, _, _ = parse_raw_env(install_path)
     if inst_entries is None:
         emit("WARN", "config.drift.install_env", f"sibling install.env at {install_path} could not be read")
     else:
+        inst_admin = extract_deploy_admin(
+            os.path.basename(install_path),
+            inst_entries,
+            env_get("MYSQL_HOST", ""),
+            env_get("MYSQL_PORT", ""),
+        )
+        if inst_admin:
+            sig = (inst_admin["user"], inst_admin["password"], inst_admin["host"], inst_admin["port"])
+            if sig not in seen_admin_sigs:
+                seen_admin_sigs.add(sig)
+                deploy_admins.append(inst_admin)
         drift_found = False
         shared_nonsecret = [
             "MYSQL_HOST",
@@ -874,6 +1061,17 @@ if os.path.isfile(install_path) and os.path.realpath(install_path) != os.path.re
             c_val = env_get(k, "")
             i_val = inst_entries.get(k, "")
             if c_val and i_val and c_val != i_val:
+                if (
+                    k == "MYSQL_HOST"
+                    and c_val.casefold() in local_host_aliases
+                    and i_val.casefold() in local_host_aliases
+                ):
+                    emit(
+                        "INFO",
+                        "config.drift.install_env",
+                        f"MYSQL_HOST uses compatible local aliases between selected config ({safe_nonsecret(c_val)}) and {os.path.basename(install_path)} ({safe_nonsecret(i_val)})",
+                    )
+                    continue
                 drift_found = True
                 emit(
                     "WARN",
@@ -883,8 +1081,6 @@ if os.path.isfile(install_path) and os.path.realpath(install_path) != os.path.re
                     f"Reconcile {k} between {cfg_path} and {install_path}",
                 )
         # Boolean-only password consistency when usernames match
-        z_user = env_get("ZATCA_DB_USER", "")
-        z_pass = env_get("ZATCA_DB_PASSWORD", "")
         for u_key, p_key in (
             ("MYSQL_ADMIN_USER", "MYSQL_ADMIN_PASSWORD"),
             ("MYSQL_ROOT_USER", "MYSQL_ROOT_PASSWORD"),
@@ -924,6 +1120,13 @@ if os.path.isfile(install_path) and os.path.realpath(install_path) != os.path.re
             emit("PASS", "config.drift.install_env", f"sibling {os.path.basename(install_path)} settings align with selected config")
 else:
     emit("INFO", "config.drift.install_env", "no sibling install.env found (skipped)")
+
+if deploy_admin_path and deploy_admins:
+    try:
+        with open(deploy_admin_path, "w", encoding="utf-8") as fh:
+            json.dump(deploy_admins, fh)
+    except OSError:
+        pass
 
 # 11. Sibling .env drift/shadowing check
 dotenv_path = os.path.join(cfg_dir, ".env")
@@ -1010,9 +1213,11 @@ else
     fi
 fi
 
-# Run setup-zatca-daemon.sh --validate-only when enabled
+# Run setup-zatca-daemon.sh --validate-only when enabled (skipped in --db-only mode)
 SETUP_VALIDATION_OK=false
-if [ ! -f "$SETUP_SCRIPT" ]; then
+if [ "$DB_ONLY" = true ]; then
+    emit_info "config.validation" "skipped setup-zatca-daemon.sh --validate-only (--db-only mode)"
+elif [ ! -f "$SETUP_SCRIPT" ]; then
     mark_failure "FAIL" "config.validation" "daemon configuration validator (${SETUP_SCRIPT}) is unavailable"
     CONFIG_BLOCKED=true
 elif [ "$DAEMON_ENABLED" != true ]; then
@@ -1047,7 +1252,9 @@ fi
 # =============================================================================
 emit_stage "Stage 2/6: Host Tooling, Directories & Port Conflicts"
 
-if [ "$HAS_DOCKER" = true ]; then
+if [ "$DB_ONLY" = true ]; then
+    emit_info "host.docker" "skipped Docker check (--db-only mode runs direct host-Bash MySQL probes without Docker)"
+elif [ "$HAS_DOCKER" = true ]; then
     emit_pass "host.docker" "Docker CLI is available"
 else
     mark_failure "NOT VERIFIED" "docker" "Docker is unavailable"
@@ -1061,47 +1268,60 @@ else
     add_next_step "Install python3 on this host so structured verification checks can run"
 fi
 
-if [ "$HAS_CURL" = true ]; then
-    emit_pass "host.curl" "curl is available"
+if [ "$HAS_MYSQL_CLIENT" = true ]; then
+    emit_pass "host.mysql" "host mysql CLI is available for direct non-Docker database verification"
+elif [ "$DB_ONLY" = true ]; then
+    mark_failure "NOT VERIFIED" "host.mysql" "host mysql CLI is not installed (required for --db-only direct host-Bash MySQL verification)"
+    add_next_step "Install mysql-client (or mariadb-client) on this host to enable direct host-Bash MySQL verification"
 else
-    mark_failure "NOT VERIFIED" "host.curl" "curl is unavailable (required for /healthz and /jsz checks)"
-    add_next_step "Install curl on this host"
+    emit_info "host.mysql" "host mysql CLI is not installed; Stage 4 will rely on Docker zatca-check only"
 fi
 
-NATS_DATA_ROOT="${ZATCA_NATS_DATA_ROOT:-/opt/zatca-nats}"
-if [ -d "$NATS_DATA_ROOT" ]; then
-    if [ -w "$NATS_DATA_ROOT" ]; then
-        emit_pass "host.path.nats_data" "JetStream data directory exists and is writable ($(safe_display_value "$NATS_DATA_ROOT"))"
-    else
-        emit_warn "host.path.nats_data" "JetStream data directory exists but is not writable by current user ($(safe_display_value "$NATS_DATA_ROOT"))"
-    fi
+if [ "$DB_ONLY" = true ]; then
+    emit_info "host.curl" "skipped curl/directory/NATS port checks (--db-only mode)"
 else
-    emit_info "host.path.nats_data" "JetStream data directory does not exist yet ($(safe_display_value "$NATS_DATA_ROOT"); setup-zatca-daemon.sh creates it on start)"
-fi
-
-if [ -n "${ZATCA_DAEMON_SOURCE_DIR:-}" ]; then
-    if [ -d "$ZATCA_DAEMON_SOURCE_DIR" ]; then
-        emit_pass "host.path.daemon_source" "ZATCA_DAEMON_SOURCE_DIR exists ($(safe_display_value "$ZATCA_DAEMON_SOURCE_DIR"))"
+    if [ "$HAS_CURL" = true ]; then
+        emit_pass "host.curl" "curl is available"
     else
-        emit_warn "host.path.daemon_source" "ZATCA_DAEMON_SOURCE_DIR does not exist ($(safe_display_value "$ZATCA_DAEMON_SOURCE_DIR"); required for rebuild-zatca-daemon.sh)"
+        mark_failure "NOT VERIFIED" "host.curl" "curl is unavailable (required for /healthz and /jsz checks)"
+        add_next_step "Install curl on this host"
     fi
-fi
-if [ -n "${ZATCA_DAEMON_SDK_CONTEXT:-}" ]; then
-    if [ -d "$ZATCA_DAEMON_SDK_CONTEXT" ]; then
-        emit_pass "host.path.sdk_context" "ZATCA_DAEMON_SDK_CONTEXT exists ($(safe_display_value "$ZATCA_DAEMON_SDK_CONTEXT"))"
+
+    NATS_DATA_ROOT="${ZATCA_NATS_DATA_ROOT:-/opt/zatca-nats}"
+    if [ -d "$NATS_DATA_ROOT" ]; then
+        if [ -w "$NATS_DATA_ROOT" ]; then
+            emit_pass "host.path.nats_data" "JetStream data directory exists and is writable ($(safe_display_value "$NATS_DATA_ROOT"))"
+        else
+            emit_warn "host.path.nats_data" "JetStream data directory exists but is not writable by current user ($(safe_display_value "$NATS_DATA_ROOT"))"
+        fi
     else
-        emit_warn "host.path.sdk_context" "ZATCA_DAEMON_SDK_CONTEXT does not exist ($(safe_display_value "$ZATCA_DAEMON_SDK_CONTEXT"); required for rebuild-zatca-daemon.sh)"
+        emit_info "host.path.nats_data" "JetStream data directory does not exist yet ($(safe_display_value "$NATS_DATA_ROOT"); setup-zatca-daemon.sh creates it on start)"
+    fi
+
+    if [ -n "${ZATCA_DAEMON_SOURCE_DIR:-}" ]; then
+        if [ -d "$ZATCA_DAEMON_SOURCE_DIR" ]; then
+            emit_pass "host.path.daemon_source" "ZATCA_DAEMON_SOURCE_DIR exists ($(safe_display_value "$ZATCA_DAEMON_SOURCE_DIR"))"
+        else
+            emit_warn "host.path.daemon_source" "ZATCA_DAEMON_SOURCE_DIR does not exist ($(safe_display_value "$ZATCA_DAEMON_SOURCE_DIR"); required for rebuild-zatca-daemon.sh)"
+        fi
+    fi
+    if [ -n "${ZATCA_DAEMON_SDK_CONTEXT:-}" ]; then
+        if [ -d "$ZATCA_DAEMON_SDK_CONTEXT" ]; then
+            emit_pass "host.path.sdk_context" "ZATCA_DAEMON_SDK_CONTEXT exists ($(safe_display_value "$ZATCA_DAEMON_SDK_CONTEXT"))"
+        else
+            emit_warn "host.path.sdk_context" "ZATCA_DAEMON_SDK_CONTEXT does not exist ($(safe_display_value "$ZATCA_DAEMON_SDK_CONTEXT"); required for rebuild-zatca-daemon.sh)"
+        fi
     fi
 fi
 
 RUNNING_CONTAINER_NAMES=""
-if [ "$HAS_DOCKER" = true ]; then
+if [ "$DB_ONLY" != true ] && [ "$HAS_DOCKER" = true ]; then
     RUNNING_CONTAINER_NAMES="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
 fi
 
 LEGACY_NATS_CONTAINER="${NATS_CONTAINER_NAME:-nats}"
 CONFIGURED_NATS_PORT="${ZATCA_NATS_PORT:-4222}"
-if [ "$HAS_DOCKER" = true ] && [ -n "$RUNNING_CONTAINER_NAMES" ] &&
+if [ "$DB_ONLY" != true ] && [ "$HAS_DOCKER" = true ] && [ -n "$RUNNING_CONTAINER_NAMES" ] &&
     printf '%s\n' "$RUNNING_CONTAINER_NAMES" | grep -qxF "$LEGACY_NATS_CONTAINER"; then
     legacy_port="$(docker port "$LEGACY_NATS_CONTAINER" 4222/tcp 2>/dev/null | awk -F: 'NR == 1 {print $NF; exit}' || true)"
     if [ -n "$legacy_port" ] && [ "$legacy_port" = "$CONFIGURED_NATS_PORT" ]; then
@@ -1111,7 +1331,7 @@ if [ "$HAS_DOCKER" = true ] && [ -n "$RUNNING_CONTAINER_NAMES" ] &&
     else
         emit_info "host.nats_port_conflict" "legacy NATS container '${LEGACY_NATS_CONTAINER}' is running on a different port (${legacy_port:-none})"
     fi
-elif [ "$HAS_DOCKER" = true ]; then
+elif [ "$DB_ONLY" != true ] && [ "$HAS_DOCKER" = true ]; then
     emit_pass "host.nats_port_conflict" "no running legacy standalone NATS container ('${LEGACY_NATS_CONTAINER}') conflicts with ZATCA_NATS_PORT"
 fi
 
@@ -1133,8 +1353,11 @@ CONTAINER_RUNNING=false
 CONTAINER_EXISTS=false
 CONFIGURED_IMAGE_ID=""
 RUNNING_IMAGE_ID=""
+RECREATE_REASONS=()
 
-if [ "$DAEMON_ENABLED" != true ]; then
+if [ "$DB_ONLY" = true ]; then
+    emit_info "compose.resolved" "skipped Docker Compose, container, image, and parity checks (--db-only mode)"
+elif [ "$DAEMON_ENABLED" != true ]; then
     emit_info "compose.resolved" "skipped daemon Compose, container, image, and parity checks because ZATCA_DAEMON_ENABLED is disabled"
 else
     if [ ! -f "$COMPOSE_FILE" ]; then
@@ -1364,7 +1587,7 @@ PY
                 emit_pass "daemon.container" "configured daemon container '${CONTAINER}' is running"
             else
                 mark_failure "FAIL" "daemon.container" "configured daemon container '${CONTAINER}' exists but is not running (running=${container_state})"
-                add_next_step "Start or recreate the ZATCA daemon: bash scripts/setup-zatca-daemon.sh --config ${CONFIG_FILE} --recreate"
+                RECREATE_REASONS+=("start stopped container")
             fi
 
             # Best-effort container metadata (health, restarts, networks/IPs, extra_hosts)
@@ -1499,7 +1722,7 @@ PY
                     else
                         RUNNING_MONITOR_BIND_BAD=true
                         mark_failure "FAIL" "daemon.monitor_bind" "$mon_msg"
-                        add_next_step "Recreate the running ZATCA daemon container so it picks up NATS_MONITOR_HOST=0.0.0.0: bash scripts/setup-zatca-daemon.sh --config ${CONFIG_FILE} --recreate"
+                        RECREATE_REASONS+=("apply NATS_MONITOR_HOST=0.0.0.0")
                     fi
                 fi
             fi
@@ -1619,7 +1842,7 @@ PY
                                         ;;
                                 esac
                             done <<< "$parity_result"
-                            add_next_step "Recreate the daemon container so its environment matches ${CONFIG_FILE}: bash scripts/setup-zatca-daemon.sh --config ${CONFIG_FILE} --recreate"
+                            RECREATE_REASONS+=("sync running container env with ${CONFIG_FILE}")
                             ;;
                         *)
                             mark_failure "NOT VERIFIED" "env.parity" "Compose or container environment evidence is malformed"
@@ -1706,15 +1929,45 @@ PY
             add_next_step "Align the running daemon image with the configured image: bash scripts/rebuild-zatca-daemon.sh --config ${CONFIG_FILE} (or bash scripts/setup-zatca-daemon.sh --config ${CONFIG_FILE} --recreate if the image is already built)"
         fi
     fi
+
+    if [ "${#RECREATE_REASONS[@]}" -gt 0 ]; then
+        recreate_summary="${RECREATE_REASONS[0]}"
+        for ((ri = 1; ri < ${#RECREATE_REASONS[@]}; ri++)); do
+            recreate_summary="${recreate_summary}; ${RECREATE_REASONS[$ri]}"
+        done
+        add_next_step "Recreate the ZATCA daemon (${recreate_summary}): bash scripts/setup-zatca-daemon.sh --config ${CONFIG_FILE} --recreate"
+    fi
 fi
 
 # =============================================================================
-# Stage 4: Database Target & Live MySQL Verification (--verify-db --json)
+# Stage 4: Database Target, Docker Verifier & Direct Host-Bash MySQL Verification
 # =============================================================================
 emit_stage "Stage 4/6: Database Target & Live MySQL Verification"
 
 database_target_output=$'unavailable\tunavailable\tunavailable\tunavailable\tunavailable\tunavailable'
-if [ -n "$compose_json" ] && [ "$HAS_PYTHON" = true ]; then
+if [ "$DB_ONLY" = true ]; then
+    raw_db_host="${MYSQL_HOST:-host.docker.internal}"
+    raw_db_port="${MYSQL_PORT:-3306}"
+    db_only_class="custom_host_redacted"
+    case "${raw_db_host,,}" in
+        host.docker.internal) db_only_class="host_gateway" ;;
+        localhost|127.0.0.1|::1|"[::1]") db_only_class="container_loopback" ;;
+    esac
+    db_only_port="unavailable"
+    if is_valid_port "$raw_db_port"; then
+        db_only_port="$raw_db_port"
+    fi
+    db_only_host="$(safe_display_value "$raw_db_host")"
+    db_only_user="$(safe_display_value "${ZATCA_DB_USER:-}")"
+    [ "$db_only_user" = "(empty)" ] && db_only_user="unavailable"
+    db_only_master="$(safe_display_value "${MYSQL_MASTER_DB:-zatca_master}")"
+    db_only_admin="none"
+    if [ -n "${ZATCA_ADMIN_DB_USER:-}" ]; then
+        db_only_admin="$(safe_display_value "$ZATCA_ADMIN_DB_USER")"
+    fi
+    database_target_output="$(printf '%s\t%s\t%s\t%s\t%s\t%s' \
+        "$db_only_class" "$db_only_port" "$db_only_host" "$db_only_user" "$db_only_master" "$db_only_admin")"
+elif [ -n "$compose_json" ] && [ "$HAS_PYTHON" = true ]; then
     py_db_target=""
     IFS= read -r -d '' py_db_target <<'PY' || true
 import ipaddress
@@ -1816,7 +2069,7 @@ emit_info "database.target" "class=${database_target_class} port=${database_targ
 emit_info "database.target.details" \
     "user=${database_target_user} host=${database_target_host} port=${database_target_port} master_db=${database_target_master} admin_user=${database_target_admin} container_ips=${CONTAINER_IPS_DISPLAY}"
 
-if [ "$database_target_class" = "container_loopback" ]; then
+if [ "$DB_ONLY" != true ] && [ "$database_target_class" = "container_loopback" ]; then
     emit_warn "database.target.loopback" \
         "DB_HOST resolves to container loopback inside zatca-daemon; unless MySQL shares the container network namespace, set MYSQL_HOST=host.docker.internal"
     add_next_step "Set MYSQL_HOST=host.docker.internal in ${CONFIG_FILE} (containers cannot reach host MySQL via 127.0.0.1/localhost), then recreate zatca-daemon"
@@ -1825,7 +2078,12 @@ fi
 database_report=""
 database_exit_status=125
 database_probe_started=false
-if [ "$DAEMON_ENABLED" != true ]; then
+DOCKER_DB_CHECK_PASSED=false
+DOCKER_DB_RUNTIME_1045=false
+DOCKER_DB_FAILED=false
+if [ "$DB_ONLY" = true ]; then
+    emit_info "database.report" "skipped Docker zatca-check (--db-only mode runs direct host-Bash MySQL probes instead)"
+elif [ "$DAEMON_ENABLED" != true ]; then
     emit_info "database.report" "skipped one-shot --verify-db probe because ZATCA_DAEMON_ENABLED is disabled"
 elif [ "$CONFIG_BLOCKED" = true ]; then
     mark_failure "NOT VERIFIED" "database.report" "skipped one-shot verifier because Stage 1 configuration validation failed"
@@ -1845,9 +2103,11 @@ elif [ -n "$CONFIGURED_IMAGE_ID" ] && [ -n "$compose_json" ] && [ "$HAS_DOCKER" 
     else
         mark_failure "NOT VERIFIED" "database.report" \
             "private diagnostic capture could not be created; verifier was not started"
+        DOCKER_DB_FAILED=true
     fi
 else
     mark_failure "NOT VERIFIED" "database.report" "one-shot verifier image or Compose evidence is unavailable"
+    DOCKER_DB_FAILED=true
 fi
 
 if [ "$database_probe_started" = true ]; then
@@ -1976,6 +2236,7 @@ for line in lines:
                             FAIL)
                                 mark_failure "FAIL" "database.${check_id}" "$context"
                                 if [[ "$context" == *"mysql_code=1045"* ]]; then
+                                    DOCKER_DB_RUNTIME_1045=true
                                     emit_hint "database.${check_id}" \
                                         "MySQL 1045 means the server denied this tested connection; it does not prove the password is wrong. A successful Dokku admin test does not verify the daemon connection account/host match; compare the daemon target (user=${database_target_user}, host=${database_target_host}, container_ips=${CONTAINER_IPS_DISPLAY}) and MySQL host grants from its Compose network before changing credentials, without exposing them."
                                     add_next_step "Inspect MySQL grants for user '${database_target_user}' from container network IP(s) (${CONTAINER_IPS_DISPLAY}) and verify ZATCA_DB_PASSWORD matches the grant before rotating credentials"
@@ -2008,14 +2269,19 @@ for line in lines:
                         ;;
                 esac
             done <<< "$database_validation"
-            if [ "$database_report_status" != PASS ]; then
+            if [ "$database_report_status" = PASS ]; then
+                DOCKER_DB_CHECK_PASSED=true
+            else
+                DOCKER_DB_FAILED=true
                 VERIFICATION_OK=false
             fi
         else
+            DOCKER_DB_FAILED=true
             mark_failure "NOT VERIFIED" "database.report" "daemon JSON report is malformed, unknown, or inconsistent"
             add_next_step "Verify the daemon image supports the schema v1 --verify-db --json report format"
         fi
     else
+        DOCKER_DB_FAILED=true
         if grep -Eiq 'unknown flag|flag provided but not defined' "$DATABASE_DIAGNOSTIC_FILE"; then
             database_failure_detail="daemon image rejected --verify-db/--json; database probe was not run"
             add_next_step "Rebuild and refresh the ZATCA daemon image to a revision that supports --verify-db --json: bash scripts/rebuild-zatca-daemon.sh --config ${CONFIG_FILE}"
@@ -2037,47 +2303,729 @@ for line in lines:
     fi
 fi
 
+# -----------------------------------------------------------------------------
+# Stage 4B: Direct Host-Bash MySQL Probe Engine (non-Docker, uses host mysql CLI)
+# -----------------------------------------------------------------------------
+resolve_host_mysql_tcp() {
+    local raw_host="${1:-}"
+    case "${raw_host,,}" in
+        ""|host.docker.internal|localhost|127.0.0.1|::1|"[::1]")
+            printf '127.0.0.1'
+            ;;
+        *)
+            printf '%s' "$raw_host"
+            ;;
+    esac
+}
+
+is_local_mysql_host() {
+    local raw_host="${1:-}"
+    case "${raw_host,,}" in
+        ""|host.docker.internal|localhost|127.0.0.1|::1|"[::1]")
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+sql_escape_literal() {
+    local s="$1"
+    s="${s//$'\r'/}"
+    s="${s//$'\n'/}"
+    s="${s//\\/\\\\}"
+    s="${s//\'/\'\'}"
+    printf '%s' "$s"
+}
+
+MYSQL_NO_TLS_FLAG=""
+MYSQL_PUBLIC_KEY_FLAG=""
+
+detect_mysql_client_flags() {
+    local help_out=""
+    MYSQL_NO_TLS_FLAG=""
+    MYSQL_PUBLIC_KEY_FLAG=""
+    help_out="$(mysql --help 2>&1 || true)"
+    if printf '%s' "$help_out" | grep -q -- '--ssl-mode'; then
+        MYSQL_NO_TLS_FLAG="--ssl-mode=DISABLED"
+    elif printf '%s' "$help_out" | grep -q -- '--skip-ssl'; then
+        MYSQL_NO_TLS_FLAG="--skip-ssl"
+    elif printf '%s' "$help_out" | grep -q -- '--ssl='; then
+        MYSQL_NO_TLS_FLAG="--ssl=0"
+    fi
+    if printf '%s' "$help_out" | grep -q -- '--get-server-public-key'; then
+        MYSQL_PUBLIC_KEY_FLAG="--get-server-public-key"
+    fi
+}
+
+HOST_MYSQL_OUT=""
+HOST_MYSQL_ERR=""
+HOST_MYSQL_CODE=""
+
+host_mysql_query() {
+    local mode="$1"
+    local host="$2"
+    local port="$3"
+    local user="$4"
+    local pass="$5"
+    local sql="$6"
+    local extra_arg="${7:-}"
+
+    HOST_MYSQL_OUT=""
+    HOST_MYSQL_ERR=""
+    HOST_MYSQL_CODE=""
+
+    if [ -z "$HOST_MYSQL_ERR_FILE" ]; then
+        HOST_MYSQL_ERR_FILE="$(mktemp 2>/dev/null || true)"
+        [ -z "$HOST_MYSQL_ERR_FILE" ] || chmod 600 "$HOST_MYSQL_ERR_FILE" 2>/dev/null || true
+    fi
+    local err_target="${HOST_MYSQL_ERR_FILE:-/dev/null}"
+    : > "$err_target" 2>/dev/null || true
+
+    local -a args=()
+    local mycnf_home=""
+    case "$mode" in
+        tcp)
+            args+=(--no-defaults --protocol=TCP -h "$host" -P "$port")
+            [ -n "$MYSQL_PUBLIC_KEY_FLAG" ] && args+=("$MYSQL_PUBLIC_KEY_FLAG")
+            ;;
+        tcp_plaintext)
+            args+=(--no-defaults --protocol=TCP -h "$host" -P "$port")
+            [ -n "$extra_arg" ] && args+=("$extra_arg")
+            [ -n "$MYSQL_PUBLIC_KEY_FLAG" ] && args+=("$MYSQL_PUBLIC_KEY_FLAG")
+            ;;
+        socket)
+            args+=(--no-defaults --protocol=SOCKET -h localhost)
+            ;;
+        default_opts)
+            args+=(--protocol=TCP -h "$host" -P "$port")
+            [ -n "$MYSQL_PUBLIC_KEY_FLAG" ] && args+=("$MYSQL_PUBLIC_KEY_FLAG")
+            if [ -n "$extra_arg" ]; then
+                mycnf_home="$(dirname "$extra_arg")"
+            fi
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    args+=(-u "$user" --connect-timeout=5 -N -B -e "$sql")
+
+    local rc=0
+    if [ "$mode" = "default_opts" ]; then
+        if [ -n "$mycnf_home" ]; then
+            if HOST_MYSQL_OUT="$(env -u MYSQL_PWD HOME="$mycnf_home" mysql "${args[@]}" 2>"$err_target")"; then
+                rc=0
+            else
+                rc=$?
+            fi
+        elif HOST_MYSQL_OUT="$(env -u MYSQL_PWD mysql "${args[@]}" 2>"$err_target")"; then
+            rc=0
+        else
+            rc=$?
+        fi
+    else
+        if HOST_MYSQL_OUT="$(MYSQL_PWD="$pass" mysql "${args[@]}" 2>"$err_target")"; then
+            rc=0
+        else
+            rc=$?
+        fi
+    fi
+
+    if [ "$rc" -ne 0 ] && [ -n "$HOST_MYSQL_ERR_FILE" ] && [ -s "$HOST_MYSQL_ERR_FILE" ]; then
+        local raw_err=""
+        raw_err="$(grep -v '^mysql: \[Warning\]' "$HOST_MYSQL_ERR_FILE" | head -n 4 || true)"
+        if [ -z "$raw_err" ]; then
+            raw_err="$(head -n 4 "$HOST_MYSQL_ERR_FILE" || true)"
+        fi
+        HOST_MYSQL_ERR="$(printf '%s\n' "$raw_err" | redact_stdin | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')"
+        HOST_MYSQL_CODE="$(printf '%s' "$raw_err" | grep -Eo 'ERROR [0-9]{4}' | head -n 1 | awk '{print $2}' || true)"
+    fi
+    return "$rc"
+}
+
+run_host_mysql_probes=true
+if [ "$DB_ONLY" != true ] && [ "$DAEMON_ENABLED" != true ]; then
+    emit_info "database.host" "skipped direct host-Bash MySQL probe because ZATCA_DAEMON_ENABLED is disabled"
+    run_host_mysql_probes=false
+elif [ "$DB_ONLY" != true ] && [ "$CONFIG_BLOCKED" = true ]; then
+    emit_info "database.host" "skipped direct host-Bash MySQL probe because Stage 1 configuration validation failed (use --db-only to test MySQL independently)"
+    run_host_mysql_probes=false
+elif [ "$HAS_MYSQL_CLIENT" != true ]; then
+    if [ "$DB_ONLY" = true ]; then
+        mark_failure "NOT VERIFIED" "database.host" "host mysql CLI is unavailable; cannot run direct host-Bash MySQL verification"
+    else
+        emit_info "database.host" "skipped direct host-Bash MySQL probe because host mysql CLI is not installed"
+    fi
+    run_host_mysql_probes=false
+elif ! is_valid_port "${MYSQL_PORT:-3306}"; then
+    mark_failure "NOT VERIFIED" "database.host" "skipped direct host-Bash MySQL probe because MYSQL_PORT is not a valid TCP port"
+    run_host_mysql_probes=false
+elif [ -z "${ZATCA_DB_USER:-}" ] || [ -z "${ZATCA_DB_PASSWORD:-}" ]; then
+    mark_failure "NOT VERIFIED" "database.host" "skipped direct host-Bash MySQL probe because ZATCA_DB_USER or ZATCA_DB_PASSWORD is missing"
+    run_host_mysql_probes=false
+fi
+
+if [ "$run_host_mysql_probes" = true ]; then
+    HOST_MYSQL_RAW_HOST="${MYSQL_HOST:-host.docker.internal}"
+    HOST_MYSQL_TCP_HOST="$(resolve_host_mysql_tcp "$HOST_MYSQL_RAW_HOST")"
+    HOST_MYSQL_PORT="${MYSQL_PORT:-3306}"
+    HOST_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
+    HOST_RUNTIME_USER="${ZATCA_DB_USER:-}"
+    HOST_RUNTIME_PASS="${ZATCA_DB_PASSWORD:-}"
+    HOST_ADMIN_USER="${ZATCA_ADMIN_DB_USER:-}"
+    HOST_ADMIN_PASS="${ZATCA_ADMIN_DB_PASSWORD:-}"
+    HOST_ADMIN_RAW_HOST="${ZATCA_ADMIN_DB_HOST:-$HOST_MYSQL_RAW_HOST}"
+    HOST_ADMIN_TCP_HOST="$(resolve_host_mysql_tcp "$HOST_ADMIN_RAW_HOST")"
+    HOST_IS_LOCAL=false
+    is_local_mysql_host "$HOST_MYSQL_RAW_HOST" && HOST_IS_LOCAL=true
+    detect_mysql_client_flags
+
+    emit_info "database.host.target" \
+        "mode=host_bash_tcp host=$(safe_display_value "$HOST_MYSQL_TCP_HOST") port=${HOST_MYSQL_PORT} configured_host=$(safe_display_value "$HOST_MYSQL_RAW_HOST") user=$(safe_display_value "$HOST_RUNTIME_USER") master_db=$(safe_display_value "$HOST_MASTER_DB")"
+
+    HOST_RT_TCP_OK=false
+    HOST_RT_TCP_CODE=""
+    HOST_RT_TCP_CURR_USER=""
+    HOST_RT_TCP_CONN_USER=""
+    HOST_RT_TCP_VERSION=""
+    HOST_RT_PLAIN_OK="unknown"
+    HOST_RT_PLAIN_CODE=""
+    HOST_RT_SOCKET_OK=false
+    HOST_RT_SOCKET_CURR_USER=""
+    HOST_RT_MYCNF_OK=false
+    HOST_RT_MYCNF_CURR_USER=""
+    HOST_RT_SHADOW_OK=false
+    HOST_RT_SHADOW_LINE=""
+    HOST_RT_SHADOW_EFF_LINE=""
+    HOST_RT_SHADOW_CURR_USER=""
+    HOST_ONBOARD_TCP_OK=false
+    HOST_ONBOARD_SAME_TARGET=false
+    HOST_DEPLOY_ADMIN_OK=false
+    HOST_DEPLOY_ADMIN_USER=""
+    HOST_DEPLOY_ADMIN_SOURCE=""
+    HOST_DEPLOY_ADMIN_CURR_USER=""
+
+    META_CONN_MODE=""
+    META_CONN_HOST=""
+    META_CONN_PORT=""
+    META_CONN_USER=""
+    META_CONN_PASS=""
+    META_CONN_LABEL=""
+
+    # 1. Runtime TCP probe (--no-defaults --protocol=TCP)
+    if host_mysql_query "tcp" "$HOST_MYSQL_TCP_HOST" "$HOST_MYSQL_PORT" "$HOST_RUNTIME_USER" "$HOST_RUNTIME_PASS" \
+        "SELECT CURRENT_USER(), USER(), @@version;"; then
+        HOST_RT_TCP_OK=true
+        IFS=$'\t' read -r HOST_RT_TCP_CURR_USER HOST_RT_TCP_CONN_USER HOST_RT_TCP_VERSION <<< "$(printf '%s\n' "$HOST_MYSQL_OUT" | head -n 1)"
+        emit_pass "database.host.runtime_tcp" \
+            "direct host-Bash TCP login succeeded for user=$(safe_display_value "$HOST_RUNTIME_USER") (current_user=$(safe_display_value "$HOST_RT_TCP_CURR_USER" true) session_user=$(safe_display_value "$HOST_RT_TCP_CONN_USER" true) server=$(safe_display_value "$HOST_RT_TCP_VERSION"))"
+        META_CONN_MODE="tcp"
+        META_CONN_HOST="$HOST_MYSQL_TCP_HOST"
+        META_CONN_PORT="$HOST_MYSQL_PORT"
+        META_CONN_USER="$HOST_RUNTIME_USER"
+        META_CONN_PASS="$HOST_RUNTIME_PASS"
+        META_CONN_LABEL="runtime"
+
+        # Verify master DB visibility
+        esc_master="$(sql_escape_literal "$HOST_MASTER_DB")"
+        if host_mysql_query "tcp" "$HOST_MYSQL_TCP_HOST" "$HOST_MYSQL_PORT" "$HOST_RUNTIME_USER" "$HOST_RUNTIME_PASS" \
+            "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='${esc_master}';" && [ -n "$HOST_MYSQL_OUT" ]; then
+            emit_pass "database.host.master_db" \
+                "master database '$(safe_display_value "$HOST_MASTER_DB")' is visible to $(safe_display_value "$HOST_RT_TCP_CURR_USER" true)"
+        else
+            if [ "$DB_ONLY" = true ]; then
+                mark_failure "FAIL" "database.host.master_db" \
+                    "master database '$(safe_display_value "$HOST_MASTER_DB")' is missing or not visible to $(safe_display_value "$HOST_RT_TCP_CURR_USER" true)"
+            else
+                emit_warn "database.host.master_db" \
+                    "master database '$(safe_display_value "$HOST_MASTER_DB")' is missing or not visible to $(safe_display_value "$HOST_RT_TCP_CURR_USER" true)"
+            fi
+            add_next_step "Verify MYSQL_MASTER_DB=$(safe_display_value "$HOST_MASTER_DB") exists and grant privileges to $(safe_display_value "$HOST_RT_TCP_CURR_USER" true)"
+        fi
+
+        # Redacted SHOW GRANTS FOR CURRENT_USER()
+        if host_mysql_query "tcp" "$HOST_MYSQL_TCP_HOST" "$HOST_MYSQL_PORT" "$HOST_RUNTIME_USER" "$HOST_RUNTIME_PASS" \
+            "SHOW GRANTS FOR CURRENT_USER();" && [ -n "$HOST_MYSQL_OUT" ]; then
+            grant_limit=12
+            [ "$VERBOSE" = true ] && grant_limit=30
+            grant_count=0
+            while IFS= read -r gline; do
+                [ -n "$gline" ] || continue
+                grant_count=$((grant_count + 1))
+                if [ "$grant_count" -le "$grant_limit" ]; then
+                    emit_info "database.host.runtime_grants" "$gline"
+                fi
+            done < <(printf '%s\n' "$HOST_MYSQL_OUT" | redact_stdin)
+            if [ "$grant_count" -gt "$grant_limit" ]; then
+                emit_info "database.host.runtime_grants" "... (${grant_count} total grant rows; rerun with --verbose for more)"
+            fi
+        fi
+
+        # Plaintext TCP probe (matches Go zatca-daemon dbutil/dsn.go TLSConfig="")
+        if [ -n "$MYSQL_NO_TLS_FLAG" ]; then
+            if host_mysql_query "tcp_plaintext" "$HOST_MYSQL_TCP_HOST" "$HOST_MYSQL_PORT" "$HOST_RUNTIME_USER" "$HOST_RUNTIME_PASS" \
+                "SELECT 1;" "$MYSQL_NO_TLS_FLAG"; then
+                HOST_RT_PLAIN_OK="true"
+                emit_pass "database.host.runtime_plaintext" \
+                    "plaintext TCP login (${MYSQL_NO_TLS_FLAG}, matching Go zatca-daemon DSN) succeeded"
+            else
+                HOST_RT_PLAIN_OK="false"
+                HOST_RT_PLAIN_CODE="$HOST_MYSQL_CODE"
+                if [ "$DB_ONLY" != true ] && [ "$DOCKER_DB_CHECK_PASSED" = true ]; then
+                    emit_warn "database.host.runtime_plaintext" \
+                        "plaintext TCP login (${MYSQL_NO_TLS_FLAG}) failed (${HOST_MYSQL_ERR:-error}), though Docker zatca-check passed"
+                else
+                    mark_failure "FAIL" "database.host.runtime_plaintext" \
+                        "TLS TCP login succeeded, but plaintext TCP (${MYSQL_NO_TLS_FLAG}, matching Go zatca-daemon DSN) FAILED (${HOST_MYSQL_ERR:-TLS required})"
+                    emit_hint "database.host.runtime_plaintext" \
+                        "Go zatca-daemon connects over plaintext TCP (empty TLSConfig). Check MySQL require_secure_transport=ON or REQUIRE SSL / REQUIRE X509 on $(safe_display_value "$HOST_RT_TCP_CURR_USER" true)."
+                    add_next_step "Check MySQL require_secure_transport and REQUIRE SSL on $(safe_display_value "$HOST_RT_TCP_CURR_USER" true); Go zatca-daemon connects over plaintext TCP"
+                fi
+            fi
+        else
+            HOST_RT_PLAIN_OK="skipped"
+            emit_info "database.host.runtime_plaintext" "skipped plaintext TLS-disabled probe (host mysql client does not advertise --ssl-mode or --skip-ssl)"
+        fi
+    else
+        HOST_RT_TCP_OK=false
+        HOST_RT_TCP_CODE="$HOST_MYSQL_CODE"
+        if [ "$DB_ONLY" != true ] && [ "$DOCKER_DB_CHECK_PASSED" = true ]; then
+            emit_info "database.host.runtime_tcp" \
+                "direct host-Bash TCP login to ${HOST_MYSQL_TCP_HOST}:${HOST_MYSQL_PORT} was denied (${HOST_MYSQL_ERR:-error}), while Docker zatca-check PASSED — account likely has Docker-subnet-only host grants (e.g. '172.%') rather than '127.0.0.1'/'%'"
+        else
+            mark_failure "FAIL" "database.host.runtime_tcp" \
+                "direct host-Bash TCP login FAILED for user=$(safe_display_value "$HOST_RUNTIME_USER") at ${HOST_MYSQL_TCP_HOST}:${HOST_MYSQL_PORT} (${HOST_MYSQL_ERR:-connection failed})"
+
+            # 2. Unix socket fallback when targeting local MySQL
+            if [ "$HOST_IS_LOCAL" = true ]; then
+                if host_mysql_query "socket" "localhost" "$HOST_MYSQL_PORT" "$HOST_RUNTIME_USER" "$HOST_RUNTIME_PASS" \
+                    "SELECT CURRENT_USER(), USER();"; then
+                    HOST_RT_SOCKET_OK=true
+                    IFS=$'\t' read -r HOST_RT_SOCKET_CURR_USER _ <<< "$(printf '%s\n' "$HOST_MYSQL_OUT" | head -n 1)"
+                    emit_warn "database.host.runtime_socket" \
+                        "Unix socket login (--protocol=SOCKET -h localhost) SUCCEEDED as $(safe_display_value "$HOST_RT_SOCKET_CURR_USER" true) while TCP 127.0.0.1:${HOST_MYSQL_PORT} FAILED — credentials work on localhost socket only, not TCP"
+                    add_next_step "MySQL accepts '$(safe_display_value "$HOST_RUNTIME_USER")' on Unix socket (localhost) but not TCP; ensure a TCP host grant (e.g. '%' or Docker subnet) exists and check MySQL bind_address/skip_networking"
+                    META_CONN_MODE="socket"
+                    META_CONN_HOST="localhost"
+                    META_CONN_PORT="$HOST_MYSQL_PORT"
+                    META_CONN_USER="$HOST_RUNTIME_USER"
+                    META_CONN_PASS="$HOST_RUNTIME_PASS"
+                    META_CONN_LABEL="runtime_socket"
+                else
+                    emit_info "database.host.runtime_socket" \
+                        "Unix socket fallback (--protocol=SOCKET -h localhost) also failed (${HOST_MYSQL_ERR:-error})"
+                fi
+            fi
+
+            # 3. ~/.my.cnf option-file precedence check
+            mycnf_found=""
+            if [ -n "${HOME:-}" ] && [ -r "${HOME}/.my.cnf" ]; then
+                mycnf_found="${HOME}/.my.cnf"
+            elif [ -r "/root/.my.cnf" ]; then
+                mycnf_found="/root/.my.cnf"
+            fi
+            if [ -n "$mycnf_found" ]; then
+                if host_mysql_query "default_opts" "$HOST_MYSQL_TCP_HOST" "$HOST_MYSQL_PORT" "$HOST_RUNTIME_USER" "" \
+                    "SELECT CURRENT_USER(), USER();" "$mycnf_found"; then
+                    HOST_RT_MYCNF_OK=true
+                    IFS=$'\t' read -r HOST_RT_MYCNF_CURR_USER _ <<< "$(printf '%s\n' "$HOST_MYSQL_OUT" | head -n 1)"
+                    emit_warn "database.host.my_cnf" \
+                        "mysql WITHOUT --no-defaults (reading ${mycnf_found}) SUCCEEDED as $(safe_display_value "$HOST_RT_MYCNF_CURR_USER" true) while --no-defaults with config.env ZATCA_DB_PASSWORD FAILED — ${mycnf_found} supplies a different working password or client setting"
+                    add_next_step "Compare ${mycnf_found} against ZATCA_DB_PASSWORD in ${CONFIG_FILE}; ${mycnf_found} authenticated without --no-defaults while config.env failed"
+                else
+                    emit_info "database.host.my_cnf" \
+                        "${mycnf_found} exists, and default-options mysql also failed (${HOST_MYSQL_ERR:-error})"
+                fi
+            fi
+
+            # 4. Shadowed duplicate ZATCA_DB_PASSWORD probe
+            if [ -n "$SHADOWED_PASSWORDS_FILE" ] && [ -s "$SHADOWED_PASSWORDS_FILE" ] && [ "$HAS_PYTHON" = true ]; then
+                while IFS= read -r -d '' sh_line && IFS= read -r -d '' sh_eff_line && IFS= read -r -d '' sh_pass; do
+                    if host_mysql_query "tcp" "$HOST_MYSQL_TCP_HOST" "$HOST_MYSQL_PORT" "$HOST_RUNTIME_USER" "$sh_pass" \
+                        "SELECT CURRENT_USER(), USER();"; then
+                        HOST_RT_SHADOW_OK=true
+                        HOST_RT_SHADOW_LINE="$sh_line"
+                        HOST_RT_SHADOW_EFF_LINE="$sh_eff_line"
+                        IFS=$'\t' read -r HOST_RT_SHADOW_CURR_USER _ <<< "$(printf '%s\n' "$HOST_MYSQL_OUT" | head -n 1)"
+                        emit_warn "database.host.shadowed_password" \
+                            "EARLIER shadowed ZATCA_DB_PASSWORD on line ${sh_line} of ${CONFIG_FILE} AUTHENTICATED over host TCP as $(safe_display_value "$HOST_RT_SHADOW_CURR_USER" true), whereas effective line ${sh_eff_line} FAILED — duplicate definition in ${CONFIG_FILE} is overriding the working password (values withheld)"
+                        add_next_step "Remove the stale duplicate ZATCA_DB_PASSWORD on line ${sh_eff_line} of ${CONFIG_FILE} (earlier line ${sh_line} authenticated over host TCP), then recreate zatca-daemon"
+                        if [ -z "$META_CONN_MODE" ]; then
+                            META_CONN_MODE="tcp"
+                            META_CONN_HOST="$HOST_MYSQL_TCP_HOST"
+                            META_CONN_PORT="$HOST_MYSQL_PORT"
+                            META_CONN_USER="$HOST_RUNTIME_USER"
+                            META_CONN_PASS="$sh_pass"
+                            META_CONN_LABEL="shadowed_line_${sh_line}"
+                        fi
+                        break
+                    else
+                        emit_info "database.host.shadowed_password" \
+                            "shadowed ZATCA_DB_PASSWORD on line ${sh_line} of ${CONFIG_FILE} also failed host TCP (${HOST_MYSQL_ERR:-error})"
+                    fi
+                done < <(python3 - "$SHADOWED_PASSWORDS_FILE" <<'PY' 2>/dev/null || true
+import json
+import sys
+for item in json.load(open(sys.argv[1], "r", encoding="utf-8")):
+    sys.stdout.write(f"{item['line']}\0{item['effective_line']}\0{item['value']}\0")
+PY
+                )
+            fi
+        fi
+    fi
+
+    # 5. Onboarding (ZATCA_ADMIN_DB_USER) host TCP probe
+    if [ -n "$HOST_ADMIN_USER" ] && [ -n "$HOST_ADMIN_PASS" ]; then
+        if [ "$HOST_RT_TCP_OK" = true ] && [ "$DB_ONLY" != true ] && [ "$VERBOSE" != true ] &&
+            [ "$HOST_ADMIN_USER" = "$HOST_RUNTIME_USER" ] && [ "$HOST_ADMIN_PASS" = "$HOST_RUNTIME_PASS" ] &&
+            [ "$HOST_ADMIN_TCP_HOST" = "$HOST_MYSQL_TCP_HOST" ]; then
+            emit_info "database.host.onboarding_tcp" "ZATCA_ADMIN_DB_* matches verified runtime account and host"
+        elif host_mysql_query "tcp" "$HOST_ADMIN_TCP_HOST" "$HOST_MYSQL_PORT" "$HOST_ADMIN_USER" "$HOST_ADMIN_PASS" \
+            "SELECT CURRENT_USER(), USER();"; then
+            HOST_ONBOARD_TCP_OK=true
+            IFS=$'\t' read -r onboard_curr _ <<< "$(printf '%s\n' "$HOST_MYSQL_OUT" | head -n 1)"
+            if [ "$HOST_ADMIN_TCP_HOST" = "$HOST_MYSQL_TCP_HOST" ]; then
+                HOST_ONBOARD_SAME_TARGET=true
+                emit_pass "database.host.onboarding_tcp" \
+                    "direct host-Bash TCP login succeeded for ZATCA_ADMIN_DB_USER=$(safe_display_value "$HOST_ADMIN_USER") (current_user=$(safe_display_value "$onboard_curr" true))"
+                META_CONN_MODE="tcp"
+                META_CONN_HOST="$HOST_ADMIN_TCP_HOST"
+                META_CONN_PORT="$HOST_MYSQL_PORT"
+                META_CONN_USER="$HOST_ADMIN_USER"
+                META_CONN_PASS="$HOST_ADMIN_PASS"
+                META_CONN_LABEL="onboarding"
+            else
+                emit_pass "database.host.onboarding_tcp" \
+                    "direct host-Bash TCP login succeeded for ZATCA_ADMIN_DB_USER=$(safe_display_value "$HOST_ADMIN_USER") at $(safe_display_value "$HOST_ADMIN_TCP_HOST"):${HOST_MYSQL_PORT} (current_user=$(safe_display_value "$onboard_curr" true); different host from runtime target $(safe_display_value "$HOST_MYSQL_TCP_HOST"), not used as runtime metadata source)"
+            fi
+        else
+            if [ "$DB_ONLY" != true ] && [ "$DOCKER_DB_CHECK_PASSED" = true ]; then
+                emit_info "database.host.onboarding_tcp" \
+                    "direct host-Bash TCP login for ZATCA_ADMIN_DB_USER=$(safe_display_value "$HOST_ADMIN_USER") was denied (${HOST_MYSQL_ERR:-error}), while Docker zatca-check PASSED"
+            else
+                mark_failure "FAIL" "database.host.onboarding_tcp" \
+                    "direct host-Bash TCP login FAILED for ZATCA_ADMIN_DB_USER=$(safe_display_value "$HOST_ADMIN_USER") at ${HOST_ADMIN_TCP_HOST}:${HOST_MYSQL_PORT} (${HOST_MYSQL_ERR:-error})"
+            fi
+        fi
+    fi
+
+    # 6. Deployment control-plane admin (MYSQL_ADMIN_* / MYSQL_ROOT_*) host TCP probe (advisory)
+    if [ -n "$DEPLOY_ADMIN_CREDS_FILE" ] && [ -s "$DEPLOY_ADMIN_CREDS_FILE" ] && [ "$HAS_PYTHON" = true ] &&
+        { [ "$HOST_RT_TCP_OK" != true ] || [ "$DOCKER_DB_FAILED" = true ] || [ "$DB_ONLY" = true ] || [ "$VERBOSE" = true ]; }; then
+        while IFS= read -r -d '' da_source && IFS= read -r -d '' da_user && IFS= read -r -d '' da_pass && IFS= read -r -d '' da_host && IFS= read -r -d '' da_port; do
+            da_tcp_host="$(resolve_host_mysql_tcp "$da_host")"
+            if ! is_valid_port "$da_port"; then
+                da_port="$HOST_MYSQL_PORT"
+            fi
+            if [ "$da_tcp_host" != "$HOST_MYSQL_TCP_HOST" ] || [ "$da_port" != "$HOST_MYSQL_PORT" ]; then
+                emit_info "database.host.deploy_admin" \
+                    "skipped deployment control-plane account from ${da_source} (targets $(safe_display_value "$da_tcp_host"):${da_port}, different from runtime target $(safe_display_value "$HOST_MYSQL_TCP_HOST"):${HOST_MYSQL_PORT})"
+                continue
+            fi
+            if host_mysql_query "tcp" "$da_tcp_host" "$da_port" "$da_user" "$da_pass" \
+                "SELECT CURRENT_USER(), USER();"; then
+                HOST_DEPLOY_ADMIN_OK=true
+                HOST_DEPLOY_ADMIN_USER="$da_user"
+                HOST_DEPLOY_ADMIN_SOURCE="$da_source"
+                IFS=$'\t' read -r HOST_DEPLOY_ADMIN_CURR_USER _ <<< "$(printf '%s\n' "$HOST_MYSQL_OUT" | head -n 1)"
+                emit_pass "database.host.deploy_admin" \
+                    "deployment control-plane account from ${da_source} authenticated via host TCP as user=$(safe_display_value "$da_user") (current_user=$(safe_display_value "$HOST_DEPLOY_ADMIN_CURR_USER" true))"
+                META_CONN_MODE="tcp"
+                META_CONN_HOST="$da_tcp_host"
+                META_CONN_PORT="$da_port"
+                META_CONN_USER="$da_user"
+                META_CONN_PASS="$da_pass"
+                META_CONN_LABEL="deploy_admin:${da_source}"
+                break
+            else
+                emit_info "database.host.deploy_admin" \
+                    "deployment control-plane account from ${da_source} (user=$(safe_display_value "$da_user")) did not authenticate over host TCP (${HOST_MYSQL_ERR:-error})"
+            fi
+        done < <(python3 - "$DEPLOY_ADMIN_CREDS_FILE" <<'PY' 2>/dev/null || true
+import json
+import sys
+for item in json.load(open(sys.argv[1], "r", encoding="utf-8")):
+    sys.stdout.write(f"{item['source']}\0{item['user']}\0{item['password']}\0{item['host']}\0{item['port']}\0")
+PY
+        )
+    fi
+
+    # 7. Read-only MySQL server variables & non-secret mysql.user metadata via highest-privilege working connection
+    if [ -n "$META_CONN_MODE" ]; then
+        if host_mysql_query "$META_CONN_MODE" "$META_CONN_HOST" "$META_CONN_PORT" "$META_CONN_USER" "$META_CONN_PASS" \
+            "SHOW VARIABLES WHERE Variable_name IN ('bind_address','port','require_secure_transport','default_authentication_plugin');" && [ -n "$HOST_MYSQL_OUT" ]; then
+            srv_bind=""
+            srv_port=""
+            srv_req_ssl=""
+            srv_def_plugin=""
+            while IFS=$'\t' read -r vname vval; do
+                case "$vname" in
+                    bind_address) srv_bind="$vval" ;;
+                    port) srv_port="$vval" ;;
+                    require_secure_transport) srv_req_ssl="$vval" ;;
+                    default_authentication_plugin) srv_def_plugin="$vval" ;;
+                esac
+            done <<< "$HOST_MYSQL_OUT"
+            emit_info "database.host.server_vars" \
+                "via=${META_CONN_LABEL} bind_address=$(safe_display_value "${srv_bind:-unknown}") port=$(safe_display_value "${srv_port:-unknown}") require_secure_transport=$(safe_display_value "${srv_req_ssl:-unknown}") default_authentication_plugin=$(safe_display_value "${srv_def_plugin:-unknown}")"
+
+            case "${srv_req_ssl^^}" in
+                ON|1|TRUE)
+                    if [ "$DB_ONLY" != true ] && [ "$DOCKER_DB_CHECK_PASSED" = true ]; then
+                        emit_warn "database.host.tls_policy" \
+                            "MySQL require_secure_transport=${srv_req_ssl}; Go zatca-daemon defaults to plaintext TCP"
+                    else
+                        mark_failure "FAIL" "database.host.tls_policy" \
+                            "MySQL server sets require_secure_transport=${srv_req_ssl}, which rejects plaintext TCP connections from Go zatca-daemon"
+                        add_next_step "Disable require_secure_transport for local private-network access or update zatca-daemon DSN to support TLS"
+                    fi
+                    ;;
+            esac
+
+            case "${srv_bind,,}" in
+                127.0.0.1|::1|localhost)
+                    if [ "$DB_ONLY" != true ] && [ "$DOCKER_DB_CHECK_PASSED" != true ]; then
+                        emit_warn "database.host.bind_address" \
+                            "MySQL bind_address=${srv_bind} (loopback-only); Docker containers cannot reach host MySQL via host.docker.internal"
+                        add_next_step "Update MySQL bind-address to include the Docker bridge interface or 0.0.0.0 (restricted by host firewall) so containers can reach host MySQL"
+                    fi
+                    ;;
+            esac
+        fi
+
+        # Non-secret mysql.user inspection (NEVER reads authentication_string or password hashes)
+        user_in_list="'$(sql_escape_literal "$HOST_RUNTIME_USER")'"
+        if [ -n "$HOST_ADMIN_USER" ] && [ "$HOST_ADMIN_USER" != "$HOST_RUNTIME_USER" ]; then
+            user_in_list="${user_in_list},'$(sql_escape_literal "$HOST_ADMIN_USER")'"
+        fi
+        if [ -n "$HOST_DEPLOY_ADMIN_USER" ] && [ "$HOST_DEPLOY_ADMIN_USER" != "$HOST_RUNTIME_USER" ] && [ "$HOST_DEPLOY_ADMIN_USER" != "$HOST_ADMIN_USER" ]; then
+            user_in_list="${user_in_list},'$(sql_escape_literal "$HOST_DEPLOY_ADMIN_USER")'"
+        fi
+        mysql_user_sql="SELECT user, host, plugin, account_locked, ssl_type FROM mysql.user WHERE user IN (${user_in_list}) OR user = '' ORDER BY user, host;"
+        mysql_user_ok=false
+        if host_mysql_query "$META_CONN_MODE" "$META_CONN_HOST" "$META_CONN_PORT" "$META_CONN_USER" "$META_CONN_PASS" "$mysql_user_sql"; then
+            mysql_user_ok=true
+        elif [ "$HOST_MYSQL_CODE" = "1054" ]; then
+            mysql_user_sql="SELECT user, host, plugin, '' AS account_locked, ssl_type FROM mysql.user WHERE user IN (${user_in_list}) OR user = '' ORDER BY user, host;"
+            if host_mysql_query "$META_CONN_MODE" "$META_CONN_HOST" "$META_CONN_PORT" "$META_CONN_USER" "$META_CONN_PASS" "$mysql_user_sql"; then
+                mysql_user_ok=true
+            fi
+        fi
+
+        if [ "$mysql_user_ok" = true ]; then
+            mysql_user_rows="$HOST_MYSQL_OUT"
+            if [ "$HAS_PYTHON" = true ]; then
+                py_mysql_user=""
+                IFS= read -r -d '' py_mysql_user <<'PY' || true
+import sys
+
+rt_user, docker_passed_s, rt_tcp_ok_s, rt_plain_ok_s, rt_curr_user = sys.argv[1:6]
+docker_passed = docker_passed_s == "true"
+rt_tcp_ok = rt_tcp_ok_s == "true"
+rt_live_ok = rt_tcp_ok and rt_plain_ok_s != "false"
+curr_host = None
+if rt_curr_user and "@" in rt_curr_user:
+    curr_host = rt_curr_user.rsplit("@", 1)[1].strip("'\"`")
+
+rows = []
+for raw in sys.stdin.read().splitlines():
+    if not raw.strip():
+        continue
+    parts = raw.split("\t")
+    while len(parts) < 5:
+        parts.append("")
+    u, h, plugin, locked, ssl_type = [p.strip() for p in parts[:5]]
+    rows.append((u, h, plugin, locked, ssl_type))
+
+rt_rows = [r for r in rows if r[0] == rt_user]
+anon_rows = [r for r in rows if r[0] == ""]
+
+for u, h, plugin, locked, ssl_type in rows:
+    u_disp = u if u else "(anonymous)"
+    print(f"ROW\tuser='{u_disp}' host='{h}' plugin={plugin or 'unknown'} locked={locked or 'unknown'} ssl_type={ssl_type or 'none'}")
+
+if not rt_rows:
+    lvl = "WARN" if (docker_passed or rt_tcp_ok) else "FAIL"
+    print(f"{lvl}\tdatabase.host.account_missing\tMySQL has NO mysql.user row for ZATCA_DB_USER='{rt_user}'")
+else:
+    hosts = [r[1] for r in rt_rows]
+    for u, h, plugin, locked, ssl_type in rt_rows:
+        print(f"GRANT_TARGET\t{u}\t{h}")
+        is_inactive_secondary = curr_host is not None and h != curr_host
+        if locked.upper() == "Y":
+            if docker_passed or (rt_tcp_ok and is_inactive_secondary):
+                lvl = "WARN"
+                suffix = f" (inactive secondary host row; active login matched '{rt_curr_user}')" if (rt_tcp_ok and is_inactive_secondary) else ""
+            else:
+                lvl = "FAIL"
+                suffix = ""
+            print(f"{lvl}\tdatabase.host.account_locked\tMySQL account '{u}'@'{h}' has account_locked=Y{suffix}")
+        if ssl_type and ssl_type.upper() not in ("NONE", "NULL"):
+            if docker_passed or (rt_live_ok and is_inactive_secondary):
+                lvl = "WARN"
+                suffix = f" (inactive secondary host row; active plaintext login matched '{rt_curr_user}')" if (rt_live_ok and is_inactive_secondary) else ""
+            else:
+                lvl = "FAIL"
+                suffix = ""
+            print(f"{lvl}\tdatabase.host.account_ssl\tMySQL account '{u}'@'{h}' requires ssl_type={ssl_type}, which rejects plaintext TCP from Go zatca-daemon{suffix}")
+    narrower = [h for h in hosts if h != "%"]
+    if "%" in hosts and narrower:
+        print(
+            "WARN\tdatabase.host.host_precedence\t"
+            f"MySQL has MULTIPLE host rows for '{rt_user}' ({', '.join(hosts)}); MySQL sorts specific hosts BEFORE '%' — a narrower row with a different password/grants shadows '@%' and causes Error 1045"
+        )
+    elif hosts == ["localhost"]:
+        print(
+            "WARN\tdatabase.host.localhost_only\t"
+            f"MySQL only defines '{rt_user}'@'localhost' (no TCP/Docker host grant); TCP and Docker connections will fail with Error 1045"
+        )
+
+if anon_rows:
+    anon_hosts = ", ".join(f"''@'{r[1]}'" for r in anon_rows)
+    print(
+        "WARN\tdatabase.host.anonymous_user\t"
+        f"MySQL has anonymous user row(s) ({anon_hosts}); specific host matches before username and can intercept logins intended for '{rt_user}'@'%'"
+    )
+PY
+                mysql_user_analysis="$(
+                    printf '%s\n' "$mysql_user_rows" | python3 -c "$py_mysql_user" "$HOST_RUNTIME_USER" "$DOCKER_DB_CHECK_PASSED" "$HOST_RT_TCP_OK" "$HOST_RT_PLAIN_OK" "$HOST_RT_TCP_CURR_USER" 2>/dev/null || true
+                )"
+                grant_targets=()
+                while IFS=$'\t' read -r utag ucol1 ucol2; do
+                    case "$utag" in
+                        ROW) emit_info "database.host.mysql_user" "$ucol1" ;;
+                        WARN)
+                            emit_warn "$ucol1" "$ucol2"
+                            if [ "$HOST_RT_TCP_OK" != true ] || [ "$DOCKER_DB_RUNTIME_1045" = true ]; then
+                                add_next_step "Inspect MySQL account rows above (${ucol1}) and reconcile host grants/precedence for '$(safe_display_value "$HOST_RUNTIME_USER")'"
+                            fi
+                            ;;
+                        FAIL)
+                            mark_failure "FAIL" "$ucol1" "$ucol2"
+                            add_next_step "Fix MySQL account restriction (${ucol1}) for '$(safe_display_value "$HOST_RUNTIME_USER")'"
+                            ;;
+                        GRANT_TARGET)
+                            grant_targets+=("${ucol1}"$'\t'"${ucol2}")
+                            ;;
+                    esac
+                done <<< "$mysql_user_analysis"
+
+                # When runtime failed (or Docker 1045) and we have an admin connection, inspect redacted SHOW GRANTS FOR 'u'@'h'
+                if { [ "$HOST_RT_TCP_OK" != true ] || [ "$DOCKER_DB_RUNTIME_1045" = true ]; } &&
+                    [ "$META_CONN_LABEL" != "runtime" ] && [ "${#grant_targets[@]}" -gt 0 ]; then
+                    gt_shown=0
+                    for gt in "${grant_targets[@]}"; do
+                        gt_shown=$((gt_shown + 1))
+                        [ "$gt_shown" -le 6 ] || break
+                        IFS=$'\t' read -r gt_u gt_h <<< "$gt"
+                        esc_gt_u="$(sql_escape_literal "$gt_u")"
+                        esc_gt_h="$(sql_escape_literal "$gt_h")"
+                        if host_mysql_query "$META_CONN_MODE" "$META_CONN_HOST" "$META_CONN_PORT" "$META_CONN_USER" "$META_CONN_PASS" \
+                            "SHOW GRANTS FOR '${esc_gt_u}'@'${esc_gt_h}';" && [ -n "$HOST_MYSQL_OUT" ]; then
+                            gt_lines=0
+                            while IFS= read -r gline; do
+                                [ -n "$gline" ] || continue
+                                gt_lines=$((gt_lines + 1))
+                                [ "$gt_lines" -le 6 ] || break
+                                emit_info "database.host.account_grants" \
+                                    "for '$(safe_display_value "$gt_u")'@'$(safe_display_value "$gt_h")': ${gline}"
+                            done < <(printf '%s\n' "$HOST_MYSQL_OUT" | redact_stdin)
+                        fi
+                    done
+                fi
+            fi
+        elif [ "$HOST_MYSQL_CODE" = "1142" ]; then
+            emit_info "database.host.mysql_user" \
+                "connection (${META_CONN_LABEL}) lacks SELECT on mysql.user (normal for least-privilege runtime accounts)"
+        else
+            emit_info "database.host.mysql_user" \
+                "could not read non-secret mysql.user metadata via ${META_CONN_LABEL} (${HOST_MYSQL_ERR:-unavailable})"
+        fi
+    fi
+
+    # 8. Evidence-based cross-comparison diagnosis
+    if [ "$HOST_RT_SHADOW_OK" = true ]; then
+        emit_hint "database.diagnosis" \
+            "Duplicate ZATCA_DB_PASSWORD in ${CONFIG_FILE}: earlier line ${HOST_RT_SHADOW_LINE} AUTHENTICATED over host TCP as $(safe_display_value "$HOST_RT_SHADOW_CURR_USER" true), while effective line ${HOST_RT_SHADOW_EFF_LINE} FAILED. Remove the stale override on line ${HOST_RT_SHADOW_EFF_LINE} and recreate zatca-daemon."
+    elif [ "$HOST_RT_TCP_OK" = true ] && [ "$HOST_RT_PLAIN_OK" = "false" ]; then
+        emit_hint "database.diagnosis" \
+            "Credentials for '$(safe_display_value "$HOST_RUNTIME_USER")' are VALID over TLS TCP, but plaintext TCP (${MYSQL_NO_TLS_FLAG}) FAILED (${HOST_RT_PLAIN_CODE:-TLS required}). Go zatca-daemon connects without TLS; inspect require_secure_transport / account ssl_type."
+    elif [ "$HOST_RT_TCP_OK" = true ] && [ "$DB_ONLY" != true ] && [ "$DOCKER_DB_RUNTIME_1045" = true ]; then
+        emit_hint "database.diagnosis" \
+            "Direct host-Bash TCP login SUCCEEDED as $(safe_display_value "$HOST_RT_TCP_CURR_USER" true), while Docker zatca-check returned MySQL 1045 (container_ips=${CONTAINER_IPS_DISPLAY}). Credentials work from 127.0.0.1; check Docker-source host grant matching, host-precedence shadowing, or Compose env/interpolation parity."
+    elif [ "$HOST_RT_TCP_OK" = true ] && [ "$DB_ONLY" != true ] && [ "$DOCKER_DB_FAILED" = true ]; then
+        emit_hint "database.diagnosis" \
+            "Direct host-Bash TCP login SUCCEEDED as $(safe_display_value "$HOST_RT_TCP_CURR_USER" true), while Docker zatca-check failed. Host credentials are valid; check Docker-to-host networking (bind_address/firewall) or tenant schema/grants reported above."
+    elif [ "$HOST_RT_TCP_OK" != true ] && [ "$DB_ONLY" != true ] && [ "$DOCKER_DB_CHECK_PASSED" = true ]; then
+        emit_hint "database.diagnosis" \
+            "Docker zatca-check PASSED while host 127.0.0.1 TCP was denied — account is scoped to Docker subnet host grant(s) rather than 127.0.0.1."
+    elif [ "$HOST_RT_TCP_OK" != true ] && [ "$HOST_RT_SOCKET_OK" = true ]; then
+        emit_hint "database.diagnosis" \
+            "Direct host-Bash TCP (127.0.0.1:${HOST_MYSQL_PORT}) FAILED, while Unix socket (--protocol=SOCKET) SUCCEEDED as $(safe_display_value "$HOST_RT_SOCKET_CURR_USER" true). Credentials work on localhost socket only; add/fix TCP host grants or check bind_address."
+    elif [ "$HOST_RT_TCP_OK" != true ] && [ "$HOST_RT_MYCNF_OK" = true ]; then
+        emit_hint "database.diagnosis" \
+            "Direct host-Bash TCP with --no-defaults and ${CONFIG_FILE} FAILED, while mysql reading ~/.my.cnf SUCCEEDED as $(safe_display_value "$HOST_RT_MYCNF_CURR_USER" true). ~/.my.cnf holds working credentials/options that differ from ${CONFIG_FILE}."
+    elif [ "$HOST_RT_TCP_OK" != true ] && [ "$HOST_ONBOARD_SAME_TARGET" = true ] && [ "$HOST_ADMIN_USER" = "$HOST_RUNTIME_USER" ]; then
+        emit_hint "database.diagnosis" \
+            "ZATCA_DB_USER and ZATCA_ADMIN_DB_USER both use '$(safe_display_value "$HOST_RUNTIME_USER")', and ZATCA_ADMIN_DB_PASSWORD AUTHENTICATED over host TCP while ZATCA_DB_PASSWORD FAILED. Update ZATCA_DB_PASSWORD in ${CONFIG_FILE} to match ZATCA_ADMIN_DB_PASSWORD."
+    elif [ "$HOST_RT_TCP_OK" != true ] && [ "$HOST_DEPLOY_ADMIN_OK" = true ] && [ "$HOST_DEPLOY_ADMIN_USER" = "$HOST_RUNTIME_USER" ]; then
+        emit_hint "database.diagnosis" \
+            "Deployment control-plane account '$(safe_display_value "$HOST_DEPLOY_ADMIN_USER")' from ${HOST_DEPLOY_ADMIN_SOURCE} AUTHENTICATED over host TCP, while ZATCA_DB_PASSWORD for the SAME user '$(safe_display_value "$HOST_RUNTIME_USER")' FAILED. The effective ZATCA_DB_PASSWORD in ${CONFIG_FILE} differs from the working deployment credential."
+    elif [ "$HOST_RT_TCP_OK" != true ] && [ "$HOST_DEPLOY_ADMIN_OK" = true ]; then
+        emit_hint "database.diagnosis" \
+            "Host MySQL is reachable over TCP (verified via ${HOST_DEPLOY_ADMIN_SOURCE} user '$(safe_display_value "$HOST_DEPLOY_ADMIN_USER")'), while ZATCA_DB_USER='$(safe_display_value "$HOST_RUNTIME_USER")' failed (${HOST_RT_TCP_CODE:-error}). Review the mysql.user rows and account grants above for host precedence, account lock, SSL policy, or password mismatch."
+    elif [ "$HOST_RT_TCP_OK" != true ]; then
+        emit_hint "database.diagnosis" \
+            "Direct host-Bash TCP login failed for '$(safe_display_value "$HOST_RUNTIME_USER")' at ${HOST_MYSQL_TCP_HOST}:${HOST_MYSQL_PORT} (${HOST_RT_TCP_CODE:-connection/auth error}); verify MySQL listens on TCP ${HOST_MYSQL_PORT} and check credentials in ${CONFIG_FILE}."
+    fi
+fi
+
 # =============================================================================
 # Stage 5: Live Daemon Health, Readiness (/healthz), JetStream (/jsz) & Logs
 # =============================================================================
 emit_stage "Stage 5/6: Live Daemon Health, Readiness & JetStream"
 
-MONITOR_HOST="${ZATCA_NATS_MONITOR_HOST:-127.0.0.1}"
-MONITOR_PORT="${ZATCA_NATS_MONITOR_PORT:-8222}"
-monitor_target_class="custom_host_redacted"
-case "${MONITOR_HOST,,}" in
-    localhost|127.0.0.1|::1) monitor_target_class="loopback" ;;
-esac
-
-safe_monitor_port="unavailable"
-if is_valid_port "$MONITOR_PORT"; then
-    safe_monitor_port="$MONITOR_PORT"
-fi
-monitor_context="class=${monitor_target_class} port=${safe_monitor_port}"
-emit_info "daemon.monitor.target" "${monitor_context} endpoints=/healthz,/jsz"
-emit_info "daemon.monitor.details" \
-    "host=$(safe_display_value "$MONITOR_HOST") port=${safe_monitor_port} compose_bind=${COMPOSE_MONITOR_BIND_DISPLAY} running_bind=${RUNNING_MONITOR_BIND_DISPLAY}"
-
 health_output=""
 health_exit_status=125
 health_probe_started=false
-if [ "$DAEMON_ENABLED" != true ]; then
-    emit_info "daemon.health" "skipped live monitor probe because ZATCA_DAEMON_ENABLED is disabled"
-elif [ -z "${ZATCA_MONITOR_PASSWORD:-}" ]; then
-    mark_failure "NOT VERIFIED" "daemon.health" "skipped live monitor probe because ZATCA_MONITOR_PASSWORD is missing"
-elif [ ! -f "$HEALTH_SCRIPT" ]; then
-    mark_failure "NOT VERIFIED" "daemon.health" "daemon health checker is unavailable"
-elif HEALTH_DIAGNOSTIC_FILE="$(mktemp 2>/dev/null)"; then
-    chmod 600 "$HEALTH_DIAGNOSTIC_FILE" 2>/dev/null || true
-    health_probe_started=true
-    if health_output="$(bash "$HEALTH_SCRIPT" --config "$CONFIG_FILE" --json 2>"$HEALTH_DIAGNOSTIC_FILE")"; then
-        health_exit_status=0
-    else
-        health_exit_status=$?
-    fi
+if [ "$DB_ONLY" = true ]; then
+    emit_info "daemon.health" "skipped live /healthz, /jsz, and container log checks (--db-only mode)"
 else
-    mark_failure "NOT VERIFIED" "daemon.health" \
-        "private diagnostic capture could not be created; health check was not started"
+    MONITOR_HOST="${ZATCA_NATS_MONITOR_HOST:-127.0.0.1}"
+    MONITOR_PORT="${ZATCA_NATS_MONITOR_PORT:-8222}"
+    monitor_target_class="custom_host_redacted"
+    case "${MONITOR_HOST,,}" in
+        localhost|127.0.0.1|::1) monitor_target_class="loopback" ;;
+    esac
+
+    safe_monitor_port="unavailable"
+    if is_valid_port "$MONITOR_PORT"; then
+        safe_monitor_port="$MONITOR_PORT"
+    fi
+    monitor_context="class=${monitor_target_class} port=${safe_monitor_port}"
+    emit_info "daemon.monitor.target" "${monitor_context} endpoints=/healthz,/jsz"
+    emit_info "daemon.monitor.details" \
+        "host=$(safe_display_value "$MONITOR_HOST") port=${safe_monitor_port} compose_bind=${COMPOSE_MONITOR_BIND_DISPLAY} running_bind=${RUNNING_MONITOR_BIND_DISPLAY}"
+
+    if [ "$DAEMON_ENABLED" != true ]; then
+        emit_info "daemon.health" "skipped live monitor probe because ZATCA_DAEMON_ENABLED is disabled"
+    elif [ -z "${ZATCA_MONITOR_PASSWORD:-}" ]; then
+        mark_failure "NOT VERIFIED" "daemon.health" "skipped live monitor probe because ZATCA_MONITOR_PASSWORD is missing"
+    elif [ ! -f "$HEALTH_SCRIPT" ]; then
+        mark_failure "NOT VERIFIED" "daemon.health" "daemon health checker is unavailable"
+    elif HEALTH_DIAGNOSTIC_FILE="$(mktemp 2>/dev/null)"; then
+        chmod 600 "$HEALTH_DIAGNOSTIC_FILE" 2>/dev/null || true
+        health_probe_started=true
+        if health_output="$(bash "$HEALTH_SCRIPT" --config "$CONFIG_FILE" --json 2>"$HEALTH_DIAGNOSTIC_FILE")"; then
+            health_exit_status=0
+        else
+            health_exit_status=$?
+        fi
+    else
+        mark_failure "NOT VERIFIED" "daemon.health" \
+            "private diagnostic capture could not be created; health check was not started"
+    fi
 fi
 
 HEALTH_FAILED=false
@@ -2269,11 +3217,42 @@ def redact(s):
         if sec in s:
             s = s.replace(sec, "[REDACTED]")
     s = re.sub(r"[\x00-\x1f\x7f]", " ", s)
+    _sql_str = r"(?:'(?:\\.|''|[^'\\])*'|\"(?:\\.|\"\"|[^\"\\])*\")"
     s = re.sub(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^:@/\s]+):([^@/\s]+)@", r"\1[REDACTED]@", s)
     s = re.sub(r"([A-Za-z0-9._-]+):([^@\s]+)@tcp\(", r"\1:[REDACTED]@tcp(", s)
     s = re.sub(
-        r'(?i)\b([A-Za-z0-9_.-]*(?:password|passwd|pass|pwd|secret|token|encrypt_key|monitor_pass|api_key|authorization))\s*([:=])\s*(?:"[^"]*"|\'[^\']*\'|[^\s,;}\]]+)',
-        r"\1\2[REDACTED]",
+        rf"(?i)\bIDENTIFIED\s+BY\s+(?:PASSWORD\s+)?{_sql_str}",
+        "IDENTIFIED BY '[REDACTED]'",
+        s,
+    )
+    s = re.sub(
+        rf"(?i)\bIDENTIFIED\s+WITH\s+\S+\s+(?:AS|BY)\s+{_sql_str}",
+        "IDENTIFIED WITH [REDACTED]",
+        s,
+    )
+    s = re.sub(
+        rf"(?i)\bIDENTIFIED\s+VIA\s+(?:{_sql_str}|[^\n;])+",
+        lambda m: re.sub(
+            rf"(?i)\bUSING\s+(?:PASSWORD\s+)?{_sql_str}",
+            "USING '[REDACTED]'",
+            m.group(0),
+        ),
+        s,
+    )
+    def _redact_kv(match):
+        prefix_start = max(0, match.start() - 6)
+        before = s[prefix_start:match.start()].lower()
+        if (
+            before == "using "
+            and match.group(1).lower() == "password"
+            and match.group(2) == ":"
+            and re.fullmatch(r"(?i)(?:YES|NO)\)?", match.group(3))
+        ):
+            return match.group(0)
+        return f"{match.group(1)}{match.group(2)}[REDACTED]"
+    s = re.sub(
+        r'(?i)\b([A-Za-z0-9_.-]*(?:password|passwd|pass|pwd|secret|token|encrypt_key|monitor_pass|api_key|authorization))\s*([:=])\s*("[^"]*"|\'[^\']*\'|[^\s,;}\]]+)',
+        _redact_kv,
         s,
     )
     return s.strip()[:240]
@@ -2359,7 +3338,9 @@ fi
 emit_stage "Stage 6/6: Tenant Backend Wiring (Dokku)"
 
 DOKKU_CONTAINER="${DOKKU_CONTAINER:-dokku}"
-if [ "$HAS_DOCKER" != true ]; then
+if [ "$DB_ONLY" = true ]; then
+    emit_info "tenants.dokku" "skipped Dokku tenant wiring checks (--db-only mode)"
+elif [ "$HAS_DOCKER" != true ]; then
     emit_info "tenants.dokku" "Docker is unavailable; skipping tenant backend wiring checks"
 elif [ -z "$RUNNING_CONTAINER_NAMES" ] || ! printf '%s\n' "$RUNNING_CONTAINER_NAMES" | grep -qxF "$DOKKU_CONTAINER"; then
     emit_info "tenants.dokku" "Dokku container '${DOKKU_CONTAINER}' is not running; skipping tenant backend wiring checks"
@@ -2372,19 +3353,24 @@ else
         emit_info "tenants.dokku" "Dokku is running, but no *-backend tenant apps were found"
     else
         expected_nats_url="${NATS_URL:-nats://host.docker.internal:${ZATCA_NATS_PORT:-4222}}"
-        expected_mysql_host="${MYSQL_HOST:-host.docker.internal}"
-        while IFS= read -r app_name; do
-            [ -n "$app_name" ] || continue
-            app_cfg="$(docker exec "$DOKKU_CONTAINER" dokku config "$app_name" 2>/dev/null || true)"
-            app_opts="$(docker exec "$DOKKU_CONTAINER" dokku docker-options:report "$app_name" 2>/dev/null || true)"
-            if [ "$HAS_PYTHON" = true ]; then
-                tenant_audit="$(
-                    python3 - "$app_name" "$expected_nats_url" "$expected_mysql_host" "$app_cfg" "$app_opts" "$SECRETS_FILE" <<'PY' 2>/dev/null || true
+        expected_app_mysql_host="${MYSQL_HOST:-host.docker.internal}"
+        case "${expected_app_mysql_host,,}" in
+            ""|localhost|127.0.0.1|::1|"[::1]") expected_app_mysql_host="host.docker.internal" ;;
+        esac
+        expected_mysql_port="${MYSQL_PORT:-3306}"
+        is_valid_port "$expected_mysql_port" || expected_mysql_port="3306"
+        py_stage6_audit=""
+        if [ "$HAS_PYTHON" = true ]; then
+            IFS= read -r -d '' py_stage6_audit <<'PY' || true
 import os
 import re
 import sys
 
-app_name, exp_url, exp_db_host, cfg_text, opts_text, secrets_path = sys.argv[1:7]
+app_name, exp_db_host, exp_db_port, secrets_path = sys.argv[1:5]
+stdin_parts = sys.stdin.read().split("\0", 2)
+exp_url = stdin_parts[0] if len(stdin_parts) > 0 else ""
+cfg_text = stdin_parts[1] if len(stdin_parts) > 1 else ""
+opts_text = stdin_parts[2] if len(stdin_parts) > 2 else ""
 secrets = []
 if secrets_path and os.path.isfile(secrets_path):
     try:
@@ -2428,15 +3414,33 @@ if exp_pass:
     if cfg.get("NATS_PASSWORD", "") != exp_pass:
         issues.append("NATS_PASSWORD does not match selected config (value withheld)")
 
+exp_host_port = f"{exp_db_host}:{exp_db_port}"
 app_host = cfg.get("HOST", "")
-if app_host and exp_db_host and app_host != exp_db_host:
-    issues.append(f"HOST={safe_disp(app_host)} differs from MYSQL_HOST={safe_disp(exp_db_host)}")
+if app_host and exp_db_host and app_host not in (exp_host_port, exp_db_host):
+    issues.append(f"HOST={safe_disp(app_host)} differs from expected {safe_disp(exp_host_port)}")
+
+app_db_host = cfg.get("DB_HOST", "")
+if app_db_host and exp_db_host and app_db_host != exp_db_host:
+    issues.append(f"DB_HOST={safe_disp(app_db_host)} differs from expected {safe_disp(exp_db_host)}")
+
+app_db_port = cfg.get("DB_PORT", "")
+if app_db_port and exp_db_port and app_db_port != exp_db_port:
+    issues.append(f"DB_PORT={safe_disp(app_db_port)} differs from expected {safe_disp(exp_db_port)}")
 
 if issues:
     print("WARN\t" + "; ".join(issues))
 else:
-    print("PASS\thost-gateway, NATS_URL, NATS_USER, NATS_PASSWORD, and HOST align with selected config")
+    print("PASS\thost-gateway, NATS_URL, NATS_USER, NATS_PASSWORD, and DB host/port align with selected config")
 PY
+        fi
+        while IFS= read -r app_name; do
+            [ -n "$app_name" ] || continue
+            app_cfg="$(docker exec "$DOKKU_CONTAINER" dokku config "$app_name" 2>/dev/null || true)"
+            app_opts="$(docker exec "$DOKKU_CONTAINER" dokku docker-options:report "$app_name" 2>/dev/null || true)"
+            if [ "$HAS_PYTHON" = true ]; then
+                tenant_audit="$(
+                    printf '%s\0%s\0%s' "$expected_nats_url" "$app_cfg" "$app_opts" | \
+                        python3 -c "$py_stage6_audit" "$app_name" "$expected_app_mysql_host" "$expected_mysql_port" "$SECRETS_FILE" 2>/dev/null || true
                 )"
                 if [ -n "$tenant_audit" ]; then
                     IFS=$'\t' read -r tstatus tmsg <<< "$tenant_audit"
@@ -2468,7 +3472,11 @@ if [ "${#NEXT_STEPS[@]}" -gt 0 ]; then
 fi
 
 if [ "$VERIFICATION_OK" = true ]; then
-    printf 'OVERALL PASS | selected configuration, database access, active-branch consumer readiness, and daemon health verified; external invoice submission was not tested\n'
+    if [ "$DB_ONLY" = true ]; then
+        printf 'OVERALL PASS | selected configuration and direct host-Bash MySQL database access verified without Docker; daemon runtime, /healthz, JetStream, and external invoice submission were not tested\n'
+    else
+        printf 'OVERALL PASS | selected configuration, database access, active-branch consumer readiness, and daemon health verified; external invoice submission was not tested\n'
+    fi
     exit 0
 fi
 

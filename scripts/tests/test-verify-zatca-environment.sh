@@ -122,6 +122,32 @@ write_compose_json() {
 JSON
 }
 
+write_database_target() {
+    local host="$1" port="$2"
+    python3 - "$COMPOSE_JSON_FILE" "$RUNNING_ENV_FILE" "$host" "$port" <<'PY'
+import json
+import sys
+
+compose_path, running_path, host, port = sys.argv[1:]
+with open(compose_path, encoding="utf-8") as source:
+    compose = json.load(source)
+compose["services"]["zatca-daemon"]["environment"]["DB_HOST"] = host
+compose["services"]["zatca-daemon"]["environment"]["DB_PORT"] = port
+with open(compose_path, "w", encoding="utf-8") as target:
+    json.dump(compose, target)
+
+with open(running_path, encoding="utf-8") as source:
+    environment = json.load(source)
+environment = [
+    "DB_HOST=" + host if item.startswith("DB_HOST=") else
+    "DB_PORT=" + port if item.startswith("DB_PORT=") else item
+    for item in environment
+]
+with open(running_path, "w", encoding="utf-8") as target:
+    json.dump(environment, target)
+PY
+}
+
 write_running_env() {
     cat > "$RUNNING_ENV_FILE" <<'JSON'
 [
@@ -460,6 +486,9 @@ contains "$OUTPUT" "INFO | daemon.image.provenance | configured_id=$MOCK_VALID_I
     "safe configured/running image provenance was not reported"
 contains "$OUTPUT" 'INFO | daemon.monitor.target | class=loopback port=8222 endpoints=/healthz,/jsz' \
     "safe default monitor target context was not reported"
+contains "$OUTPUT" 'INFO | database.target | class=custom_host_redacted port=3307' \
+    "safe database target class and port were not reported"
+not_contains "$OUTPUT" 'db.test.internal' "database hostname was printed"
 contains "$DOCKER_LOG" "--profile zatca-check run --rm --no-deps zatca-check" \
     "one-shot verifier was not run in isolation"
 contains "$DOCKER_LOG" "--env-file $TEST_REPO/config.env" \
@@ -472,15 +501,45 @@ assert_no_secret_fixtures
 pass "complete DB, image, environment, and live-health evidence is required for PASS"
 
 reset_mocks
+write_database_target "host.docker.internal" "3306"
+run_verify
+contains "$OUTPUT" 'INFO | database.target | class=host_gateway port=3306' \
+    "host gateway database target was not classified"
+not_contains "$OUTPUT" 'host.docker.internal' "host gateway database hostname was printed"
+assert_no_secret_fixtures
+pass "host gateway database targets report only the safe class and port"
+
+reset_mocks
+write_database_target "127.0.0.2" "3307"
+run_verify
+contains "$OUTPUT" 'INFO | database.target | class=container_loopback port=3307' \
+    "container loopback database target was not classified"
+not_contains "$OUTPUT" '127.0.0.2' "container loopback database address was printed"
+assert_no_secret_fixtures
+pass "container loopback database targets report only the safe class and port"
+
+reset_mocks
+write_database_target "private-db.test.invalid" "70000"
+run_verify
+contains "$OUTPUT" 'INFO | database.target | class=custom_host_redacted port=unavailable' \
+    "invalid database port was not withheld"
+not_contains "$OUTPUT" 'private-db.test.invalid' "private database hostname was printed"
+not_contains "$OUTPUT" '70000' "invalid database port was printed"
+assert_no_secret_fixtures
+pass "invalid database ports and custom database hosts are withheld"
+
+reset_mocks
 MOCK_RUNNING_IMAGE_ID="$MOCK_STALE_IMAGE_ID"
-MOCK_RUNNING_IMAGE_REVISION=0123456789abcdef0123456789abcdef01234567
+MOCK_RUNNING_IMAGE_REVISION="$MOCK_DAEMON_REVISION"
 run_verify
 [ "$RUN_STATUS" -ne 0 ] || {
     grep -E '^(PASS|FAIL|NOT VERIFIED) \| daemon\.image \||^OVERALL ' "$OUTPUT" >&2 || true
     fail "stale running daemon image was accepted"
 }
-contains "$OUTPUT" "configured_id=$MOCK_VALID_IMAGE_ID configured_revision=$MOCK_DAEMON_REVISION running_id=$MOCK_STALE_IMAGE_ID running_revision=0123456789abcdef0123456789abcdef01234567" \
+contains "$OUTPUT" "configured_id=$MOCK_VALID_IMAGE_ID configured_revision=$MOCK_DAEMON_REVISION running_id=$MOCK_STALE_IMAGE_ID running_revision=$MOCK_DAEMON_REVISION" \
     "stale daemon provenance was not exposed safely"
+contains "$OUTPUT" 'matching source revision labels do not prove identical image artifacts' \
+    "same-revision image mismatch did not explain why IDs still differ"
 not_contains "$OUTPUT" 'OVERALL PASS' "running image mismatch produced an overall PASS"
 assert_no_secret_fixtures
 pass "configured and running daemon image identities must match"
@@ -582,6 +641,13 @@ run_verify
 }
 not_contains "$OUTPUT" 'OVERALL PASS' "daemon failure report produced an overall PASS"
 contains "$OUTPUT" 'FAIL | database.master.connection' "daemon failure check was not surfaced"
+contains "$OUTPUT" 'does not prove the password is wrong' \
+    "MySQL 1045 was treated as proof of a bad password"
+contains "$OUTPUT" 'successful Dokku admin test does not verify the daemon connection' \
+    "MySQL 1045 guidance ignored the known working Dokku admin test"
+contains "$OUTPUT" 'before changing credentials' \
+    "MySQL 1045 guidance did not prioritize diagnosis before credential changes"
+not_contains "$OUTPUT" 'db.test.internal' "MySQL 1045 diagnostics exposed the database hostname"
 assert_no_secret_fixtures
 pass "a valid nonzero daemon report is parsed and remains a failure"
 
@@ -592,7 +658,7 @@ cp "$TEST_REPO/config.env" "$TEST_ROOT/custom-monitor.env"
 printf '%s\n' \
     'ZATCA_NATS_MONITOR_HOST=monitor.private.invalid' \
     'ZATCA_NATS_MONITOR_PORT=9123' >> "$TEST_ROOT/custom-monitor.env"
-for curl_code in 6 7 28; do
+for curl_code in 6 7 28 56; do
     reset_mocks
     CURL_HEALTH_CURL_CODE="$curl_code"
     run_verify --env-file "$TEST_ROOT/custom-monitor.env"
@@ -604,6 +670,15 @@ for curl_code in 6 7 28; do
         6) contains "$OUTPUT" 'name resolution failure' "curl error 6 was not classified" ;;
         7) contains "$OUTPUT" 'connection failure' "curl error 7 was not classified" ;;
         28) contains "$OUTPUT" 'timeout' "curl error 28 was not classified" ;;
+        56)
+            contains "$OUTPUT" 'response receive failure' "curl error 56 was not classified"
+            contains "$OUTPUT" 'HINT | daemon.health | curl error 56 indicates a response receive failure' \
+                "curl error 56 did not include a safe diagnostic hint"
+            contains "$OUTPUT" 'does not establish a connection reset or identify the cause' \
+                "curl error 56 asserted an unproven transport root cause"
+            contains "$OUTPUT" 'If it persists after database access and configured/running image alignment are verified, inspect the daemon container logs and state' \
+                "curl error 56 omitted the safe logs/state follow-up after DB and image checks"
+            ;;
     esac
     not_contains "$OUTPUT" 'monitor.private.invalid' "private monitor hostname was printed"
     not_contains "$OUTPUT" 'Failed to connect' "raw curl diagnostic was printed"
@@ -611,7 +686,7 @@ for curl_code in 6 7 28; do
     not_contains "$OUTPUT" 'OVERALL PASS' "curl error $curl_code produced an overall PASS"
     assert_no_secret_fixtures
 done
-pass "curl resolution, connection, and timeout errors include safe target context only"
+pass "curl resolution, connection, timeout, and response-receive errors include safe target context only"
 
 reset_mocks
 cp "$TEST_REPO/config.env" "$TEST_ROOT/invalid-monitor-port.env"

@@ -126,6 +126,78 @@ else
     fi
 fi
 
+database_target_output=$'unavailable\tunavailable'
+if [ -n "$compose_json" ] && command -v python3 >/dev/null 2>&1; then
+    if parsed_database_target="$(
+        printf '%s' "$compose_json" |
+            python3 -c '
+import ipaddress
+import json
+import re
+import sys
+
+def unavailable():
+    print("unavailable\tunavailable")
+
+try:
+    document = json.load(sys.stdin)
+except json.JSONDecodeError:
+    unavailable()
+    raise SystemExit(0)
+
+services = document.get("services") if isinstance(document, dict) else None
+service = services.get("zatca-daemon") if isinstance(services, dict) else None
+environment = service.get("environment") if isinstance(service, dict) else None
+if not isinstance(environment, dict):
+    unavailable()
+    raise SystemExit(0)
+
+host = environment.get("DB_HOST")
+if not isinstance(host, str) or not host.strip():
+    target_class = "unavailable"
+else:
+    host = host.strip()
+    if host.casefold() == "host.docker.internal":
+        target_class = "host_gateway"
+    elif host.casefold() == "localhost":
+        target_class = "container_loopback"
+    else:
+        address = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+        try:
+            is_loopback = ipaddress.ip_address(address).is_loopback
+        except ValueError:
+            is_loopback = False
+        target_class = "container_loopback" if is_loopback else "custom_host_redacted"
+
+port = environment.get("DB_PORT")
+if type(port) is int:
+    numeric_port = port
+elif isinstance(port, str) and re.fullmatch(r"[0-9]{1,5}", port):
+    numeric_port = int(port)
+else:
+    numeric_port = None
+safe_port = str(numeric_port) if numeric_port is not None and 1 <= numeric_port <= 65535 else "unavailable"
+print("%s\t%s" % (target_class, safe_port))
+'
+    )" 2>/dev/null; then
+        [ -z "$parsed_database_target" ] || database_target_output="$parsed_database_target"
+    fi
+fi
+IFS=$'\t' read -r database_target_class database_target_port <<< "$database_target_output"
+case "$database_target_class" in
+    host_gateway|container_loopback|custom_host_redacted|unavailable) ;;
+    *) database_target_class="unavailable"; database_target_port="unavailable" ;;
+esac
+if [ "$database_target_port" != "unavailable" ] &&
+    [[ ! "$database_target_port" =~ ^[0-9]{1,5}$ ]]; then
+    database_target_port="unavailable"
+fi
+if [ "$database_target_class" = "unavailable" ]; then
+    database_target_port="unavailable"
+fi
+printf 'INFO | database.target | class=%s port=%s\n' \
+    "$database_target_class" "$database_target_port"
+
 CONTAINER="${ZATCA_DAEMON_CONTAINER:-zatca-daemon}"
 if container_state="$(docker inspect --format '{{.State.Running}}' "$CONTAINER" 2>/dev/null)"; then
     if [ "$container_state" = true ]; then
@@ -279,6 +351,7 @@ if [ -n "$CONFIGURED_IMAGE_ID" ] && [ -n "$RUNNING_IMAGE_ID" ]; then
         printf 'PASS | daemon.image | configured image matches the running daemon image\n'
     else
         mark_failure "FAIL" "daemon.image" "configured image does not match the running daemon image"
+        printf 'HINT | daemon.image | configured and running image IDs differ; matching source revision labels do not prove identical image artifacts. Run scripts/rebuild-zatca-daemon.sh, then rerun scripts/verify-zatca-environment.sh\n'
     fi
 fi
 
@@ -430,6 +503,10 @@ for line in lines:
                                 ;;
                             FAIL)
                                 mark_failure "FAIL" "database.${check_id}" "$context"
+                                if [[ "$context" == *"mysql_code=1045"* ]]; then
+                                    printf 'HINT | database.%s | MySQL 1045 means the server denied this tested connection; it does not prove the password is wrong. A successful Dokku admin test does not verify the daemon connection account/host match; compare the daemon target and MySQL host grants from its Compose network before changing credentials, without exposing them.\n' \
+                                        "$check_id"
+                                fi
                                 ;;
                             "NOT VERIFIED")
                                 mark_failure "NOT VERIFIED" "database.${check_id}" "$context"
@@ -562,6 +639,7 @@ print("%s\t%s\t%s" % (status, "true" if limits_ok else "false", os.environ["HEAL
             6) health_curl_category="name resolution failure" ;;
             7) health_curl_category="connection failure" ;;
             28) health_curl_category="timeout" ;;
+            56) health_curl_category="response receive failure" ;;
             "") ;;
             *) health_curl_category="transport failure" ;;
         esac
@@ -570,6 +648,8 @@ print("%s\t%s\t%s" % (status, "true" if limits_ok else "false", os.environ["HEAL
                 health_failure_detail="/healthz rejected monitor authentication (HTTP ${health_http_status})"
             elif [ -n "$health_http_status" ]; then
                 health_failure_detail="/healthz returned HTTP ${health_http_status}; daemon readiness failed"
+            elif [ "$health_curl_code" = 56 ]; then
+                health_failure_detail="/healthz response receive failure (curl error 56); no complete HTTP response was obtained, and this does not establish a connection reset or identify the cause"
             elif [ -n "$health_curl_code" ]; then
                 health_failure_detail="/healthz request failed before an HTTP response (${health_curl_category}; curl error ${health_curl_code})"
             else
@@ -580,6 +660,8 @@ print("%s\t%s\t%s" % (status, "true" if limits_ok else "false", os.environ["HEAL
                 health_failure_detail="/jsz rejected monitor authentication (HTTP ${health_http_status})"
             elif [ -n "$health_http_status" ]; then
                 health_failure_detail="/jsz returned HTTP ${health_http_status}"
+            elif [ "$health_curl_code" = 56 ]; then
+                health_failure_detail="/jsz response receive failure (curl error 56); no complete HTTP response was obtained, and this does not establish a connection reset or identify the cause"
             elif [ -n "$health_curl_code" ]; then
                 health_failure_detail="/jsz request failed before an HTTP response (${health_curl_category}; curl error ${health_curl_code})"
             else
@@ -594,6 +676,9 @@ print("%s\t%s\t%s" % (status, "true" if limits_ok else "false", os.environ["HEAL
         fi
         health_failure_detail="${health_failure_detail} (${monitor_context})"
         mark_failure "NOT VERIFIED" "daemon.health" "$health_failure_detail"
+        if [ "$health_curl_code" = 56 ] && [ -z "$health_http_status" ]; then
+            printf 'HINT | daemon.health | curl error 56 indicates a response receive failure; no complete HTTP response was obtained. If it persists after database access and configured/running image alignment are verified, inspect the daemon container logs and state. This does not establish a connection reset or identify the cause.\n'
+        fi
     fi
 fi
 

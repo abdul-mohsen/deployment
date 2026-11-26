@@ -137,63 +137,83 @@ access to the Docker daemon:
 
 ```bash
 sudo bash ./scripts/verify-zatca-environment.sh
+# or via deployctl:
+sudo bash ./scripts/deployctl.sh setup verify
+sudo bash ./scripts/deployctl.sh --config /secure/path/config.env stack verify --verbose
 ```
 
-This is the single read-only full-environment test; it runs the isolated DB
-probe and authenticated daemon health checks without requiring manual daemon
-flags or per-shell path variables.
+This is the single read-only, verbose, start-to-finish setup verifier. It runs
+six layered stages and finishes with a summary and numbered **Guided Next
+Steps** without requiring manual daemon flags or per-shell path variables:
+
+1. **Stage 1 — Configuration, Security Gates & File Drift**: checks LF line
+   endings, file permissions, `ZATCA_DAEMON_ENABLED`, all 7 required daemon
+   settings in a single pass (never stopping at the first missing key),
+   optional account pairs (`ZATCA_ADMIN_DB_*`, `ZATCA_SMTP_*`),
+   `ZATCA_ENCRYPT_KEY` 32-byte AES-256 format, all 5 NATS security gates
+   individually, TCP port ranges and backlog thresholds, `NATS_URL` vs
+   `ZATCA_NATS_PORT` consistency, quoting/`$`/`#` syntax hazards, sibling
+   `install.env` and `.env` drift (boolean-only comparison for passwords), and
+   `setup-zatca-daemon.sh --validate-only`.
+2. **Stage 2 — Host Tooling, Directories & Port Conflicts**: verifies `docker`,
+   `python3`, `curl`, JetStream/build paths, and whether a legacy standalone
+   `nats` container conflicts with `ZATCA_NATS_PORT`.
+3. **Stage 3 — Compose Resolution, Container Runtime, Image & Env Parity**:
+   resolves `dashboard/docker-compose.zatca.yml`, checks Bash-vs-Compose
+   interpolation parity, verifies `NATS_MONITOR_HOST: "0.0.0.0"` in both
+   Compose and the running container (required so Docker's loopback-only
+   `127.0.0.1:8222:8222` port mapping can reach the monitor proxy without
+   `curl error 56`), inspects running container health/restarts/networks/IPs,
+   compares every mapped env key (showing `expected`/`actual` for non-secret
+   keys only), and validates configured vs running image IDs and OCI source
+   revisions.
+4. **Stage 4 — Database Target & Live MySQL Verification**: prints non-secret
+   target metadata (`user`, `host`, `port`, `master_db`, container IPs), flags
+   container loopback (`localhost`/`127.0.0.1`) traps, and runs the isolated
+   `zatca-check` (`--verify-db --json`) probe across enabled tenants and active
+   branches using non-mutating `EXPLAIN` privilege checks.
+5. **Stage 5 — Live Daemon Health, Readiness & JetStream**: runs authenticated
+   `/healthz` and `/jsz` checks via `health-zatca-daemon.sh`, prints JetStream
+   counters (`messages`, `consumers`, `pending`, `ack_pending`, `redelivered`),
+   surfaces allow-listed redacted `/healthz` readiness reasons on HTTP 503,
+   correlates `curl error 56` directly to Stage 3 `NATS_MONITOR_HOST` if
+   misconfigured, and tails bounded secret-redacted daemon logs on failure.
+6. **Stage 6 — Tenant Backend Wiring (Dokku)**: when the `dokku` container is
+   running, checks every `*-backend` app for `host.docker.internal:host-gateway`,
+   `NATS_URL`, `NATS_USER`, boolean `NATS_PASSWORD` alignment, and `HOST`.
 
 By default, the verifier selects only the deployment repository's `config.env`;
-it never falls back to `.env`, shell variables, or another file. To check a
-specific alternate file, pass it explicitly:
+it never falls back to `.env`, shell variables, or another file. Supported
+flags:
 
 ```bash
 sudo bash ./scripts/verify-zatca-environment.sh --env-file /secure/path/config.env
+sudo bash ./scripts/verify-zatca-environment.sh --config /secure/path/config.env --install-env /secure/path/install.env --verbose
 ```
 
-The verifier requires `ZATCA_DAEMON_ENABLED=1`. It compares every mapped
-Compose setting and the configured image identity with the running daemon,
-then checks database access for every enabled tenant and active branch using
-the configured runtime account and, when supplied, the optional onboarding
-account. Required write privileges are checked with non-mutating `EXPLAIN`
-probes; it does not require MySQL global-administrator credentials or inspect
-`mysql.*` privilege tables. It also checks the running daemon's authenticated
-health and active-branch consumer readiness. If the file was changed, restart
-or recreate the daemon first; a stale container environment or image is not
-reported as verified.
-
-Each check reports `PASS`, `FAIL`, or `NOT VERIFIED`. Exit status `0` means all
-required checks passed, `1` means at least one check failed or remains unknown,
-and `2` means invocation or selected-configuration validation prevented a
-check. Overall success covers configuration, database access, consumer
-readiness, and daemon health only; it does not test external invoice
+Each check reports `PASS`, `WARN`, `INFO`, `FAIL`, or `NOT VERIFIED`. Exit
+status `0` means all required checks passed (`OVERALL PASS`), `1` means at
+least one runtime, image, database, or health check failed or remains unknown,
+and `2` means invocation or blocking selected-configuration validation
+prevented verification. Overall success covers configuration, database access,
+consumer readiness, and daemon health only; it does not test external invoice
 submission. The verifier performs no persistent database writes, NATS
-publishes, or invoice submissions. It never prints passwords, encryption keys,
-DSNs, or raw database, Compose, or monitor errors. If the one-shot database
-report is missing, it reports whether the image rejected the verifier flags or
-the process exited without a report; in either case, it states that database
-access was not verified. Health failures identify the endpoint and HTTP/curl
-status when available, while withholding response bodies.
-
-For diagnosis, the verifier also prints configured/running daemon image IDs
-and validated source revisions when available, plus the monitor target class,
-valid port, checked endpoints, and the database target class/validated port.
-Custom monitor and database hostnames, image references, raw Docker/curl errors,
-and response bodies are withheld. A curl error 7 means the monitor connection
-could not be established before an HTTP response; it does not mean the
-database probe ran.
+publishes, or invoice submissions, and centrally scrubs all passwords,
+encryption keys, tokens, DSN credentials, and auth headers across every
+diagnostic line and container log tail.
 
 MySQL error 1045 means the server denied the tested daemon connection; it does
 not prove the password is wrong. A successful Dokku admin test does not verify
-the daemon connection's account/host match. Compare the daemon's configured
-database target and MySQL host grants from its Compose network before changing
-credentials. Different configured/running image IDs remain a mismatch even if
-their validated source-revision labels match; matching labels do not prove
-identical image artifacts, and the verifier points to the config-driven refresh
-command. Curl error 56 is reported as a response-receive failure. If it
-persists after database access and configured/running image alignment are
-verified, inspect the daemon container logs and state. It does not establish
-a connection reset or identify the cause.
+the daemon connection's account/host match — compare the reported daemon
+`user`, `host`, and Compose container IPs against MySQL host grants before
+changing credentials. Different configured/running image IDs remain a mismatch
+even if their validated source-revision labels match; matching labels do not
+prove identical image artifacts, and the verifier points to the config-driven
+refresh command. `dashboard/docker-compose.zatca.yml` sets
+`NATS_MONITOR_HOST: "0.0.0.0"` inside the container while keeping the host
+binding strictly loopback (`127.0.0.1:${ZATCA_NATS_MONITOR_PORT:-8222}:8222`);
+if an older running container lacks `NATS_MONITOR_HOST=0.0.0.0`, recreate it
+with `scripts/setup-zatca-daemon.sh --recreate` to resolve host `curl error 56`.
 
 ### Refreshing the daemon image
 

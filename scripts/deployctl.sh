@@ -43,8 +43,9 @@ Areas:
   fleet auto-pull [flags]            Run one auto-pull cycle
 
   stack restart [flags]              Restart Dokku/dashboard stack
+  stack verify [flags]               Run full verbose ZATCA/environment setup verification
   stack rebuild-zatca-daemon [flags] Rebuild and recreate the ZATCA daemon image
-  setup all|dokku|nats|dev-tenant    Bootstrap server pieces
+  setup all|dokku|nats|verify|dev-tenant Bootstrap or verify server pieces
   db verify                          Check MySQL connectivity
   db migrate-master [flags]          Apply the ZATCA-owned master Goose artifact
   dokku fix-hostname|discover-nginx|traffic
@@ -73,7 +74,7 @@ need_arg() {
 
 script_accepts_config() {
     case "$1" in
-        auto-pull.sh|backup-tenant.sh|cleanup-broken-tenant.sh|create-tenant.sh|deploy-all.sh|health-zatca-daemon.sh|init-tenant-db.sh|list-tenants.sh|manage-backups.sh|migrate-zatca-master.sh|migration-status.sh|rebuild-zatca-daemon.sh|remove-tenant.sh|reload-zatca-daemon.sh|restore-tenant.sh|restart-stack.sh|rollback-tenant.sh|set-tenant-image.sh|setup-dev-tenant.sh|setup-nats.sh|setup-zatca-daemon.sh|setup.sh|status.sh|update-tenant.sh|webhook-server.sh)
+        auto-pull.sh|backup-tenant.sh|cleanup-broken-tenant.sh|create-tenant.sh|deploy-all.sh|health-zatca-daemon.sh|init-tenant-db.sh|list-tenants.sh|manage-backups.sh|migrate-zatca-master.sh|migration-status.sh|rebuild-zatca-daemon.sh|remove-tenant.sh|reload-zatca-daemon.sh|restore-tenant.sh|restart-stack.sh|rollback-tenant.sh|set-tenant-image.sh|setup-dev-tenant.sh|setup-nats.sh|setup-zatca-daemon.sh|setup.sh|status.sh|update-tenant.sh|verify-zatca-environment.sh|webhook-server.sh)
             return 0
             ;;
         *)
@@ -242,6 +243,7 @@ stack_cmd() {
     case "$verb" in
         status) run_script status.sh "$@" ;;
         restart) run_script restart-stack.sh "$@" ;;
+        verify|verify-zatca|zatca-verify) run_script verify-zatca-environment.sh "$@" ;;
         rebuild-zatca-daemon|refresh-zatca-daemon) run_script rebuild-zatca-daemon.sh "$@" ;;
         *) die "unknown stack command: $verb" ;;
     esac
@@ -254,6 +256,7 @@ setup_cmd() {
         all) run_script setup.sh "$@" ;;
         dokku) run_script setup-dokku.sh "$@" ;;
         nats) run_script setup-nats.sh "$@" ;;
+        verify|zatca-verify) run_script verify-zatca-environment.sh "$@" ;;
         zatca-daemon|zatca) run_script setup-zatca-daemon.sh "$@" ;;
         zatca-health|health) run_script health-zatca-daemon.sh "$@" ;;
         zatca-reload|reload) run_script reload-zatca-daemon.sh "$@" ;;

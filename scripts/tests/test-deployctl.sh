@@ -77,6 +77,12 @@ expect_plan "bash scripts/backup-tenant.sh acme --origin user --owner alice" \
 expect_plan "bash scripts/restart-stack.sh --env all" \
     stack restart --env all
 
+expect_plan "bash scripts/verify-zatca-environment.sh --verbose --config /opt/deployment/config.prod.env" \
+    --config /opt/deployment/config.prod.env stack verify --verbose
+
+expect_plan "bash scripts/verify-zatca-environment.sh" \
+    setup verify
+
 expect_plan "bash scripts/rebuild-zatca-daemon.sh --source-dir /opt/src/zatca-daemon --revision 0123456789abcdef0123456789abcdef01234567 --sdk-context /opt/private/zatca-sdk --config /opt/deployment/config.env" \
     --config /opt/deployment/config.env stack rebuild-zatca-daemon \
     --source-dir /opt/src/zatca-daemon \

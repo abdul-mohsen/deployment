@@ -15,6 +15,7 @@ RELOAD_SCRIPT="scripts/reload-zatca-daemon.sh"
 
 echo "=== ZATCA runtime shell syntax ==="
 bash -n "$SETUP_SCRIPT" "$HEALTH_SCRIPT" "$RELOAD_SCRIPT" \
+    scripts/verify-zatca-environment.sh \
     scripts/create-tenant.sh scripts/remove-tenant.sh scripts/cleanup-broken-tenant.sh \
     scripts/restart-stack.sh scripts/setup-nats.sh scripts/deployctl.sh \
     scripts/update-tenant.sh scripts/deploy-all.sh scripts/tests/test-dokku-host-gateway.sh \
@@ -44,6 +45,8 @@ grep -qF 'ENCRYPT_KEY: ${ZATCA_ENCRYPT_KEY:?ZATCA_ENCRYPT_KEY must be set}' "$CO
     || fail "daemon encryption key is not required"
 grep -qF 'MONITOR_PASS: ${ZATCA_MONITOR_PASSWORD:?ZATCA_MONITOR_PASSWORD must be set}' "$COMPOSE_FILE" \
     || fail "daemon monitor password is not required"
+grep -qF 'NATS_MONITOR_HOST: "0.0.0.0"' "$COMPOSE_FILE" \
+    || fail "daemon monitor must bind 0.0.0.0 inside container for loopback host port forwarding"
 grep -qF 'NATS_USER: "${NATS_USER:?NATS_USER must be set}"' "$COMPOSE_FILE" \
     || fail "daemon NATS user is not required"
 grep -qF 'NATS_PASSWORD: "${NATS_PASSWORD:?NATS_PASSWORD must be set}"' "$COMPOSE_FILE" \
@@ -128,6 +131,13 @@ echo "=== deployctl command mapping ==="
     "bash scripts/health-zatca-daemon.sh" ] || fail "setup zatca-health mapping"
 [ "$(bash scripts/deployctl.sh --plan setup zatca-reload)" = \
     "bash scripts/reload-zatca-daemon.sh" ] || fail "setup zatca-reload mapping"
+[ "$(bash scripts/deployctl.sh --plan setup verify)" = \
+    "bash scripts/verify-zatca-environment.sh" ] || fail "setup verify mapping"
+[ "$(bash scripts/deployctl.sh --plan stack verify)" = \
+    "bash scripts/verify-zatca-environment.sh" ] || fail "stack verify mapping"
+[ "$(bash scripts/deployctl.sh --plan --config /opt/deployment/config.env setup verify)" = \
+    "bash scripts/verify-zatca-environment.sh --config /opt/deployment/config.env" ] \
+    || fail "setup verify config forwarding"
 [ "$(bash scripts/deployctl.sh --plan --config /opt/deployment/config.env setup zatca-health)" = \
     "bash scripts/health-zatca-daemon.sh --config /opt/deployment/config.env" ] \
     || fail "daemon config forwarding"

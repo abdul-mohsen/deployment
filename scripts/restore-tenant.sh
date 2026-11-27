@@ -113,9 +113,11 @@ if [ "$RESTORE_DB" -eq 1 ]; then
     verify_gzip_artifact "$DB_PATH" || { err "MySQL dump is corrupt: $DB_ARTIFACT"; exit 1; }
 fi
 
+TENANT_DB_NAME="$(tenant_db_name "$TENANT")" || exit 1
+
 info "Restore plan for tenant '$TENANT' from backup '$FROM_ID':"
 [ "$RESTORE_FILES" -eq 1 ] && info "  files ← $FILES_ARTIFACT → $STORAGE_ROOT/$TENANT"
-[ "$RESTORE_DB" -eq 1 ]    && info "  db    ← $DB_ARTIFACT → database tenant_${TENANT//-/_}"
+[ "$RESTORE_DB" -eq 1 ]    && info "  db    ← $DB_ARTIFACT → database $TENANT_DB_NAME"
 [ "$SAFETY_BACKUP" -eq 1 ] && info "  safety backup of current state will be taken first"
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -151,7 +153,7 @@ fi
 
 # Restore database: pipe the gunzipped dump into the tenant DB.
 if [ "$RESTORE_DB" -eq 1 ]; then
-    local_db="tenant_${TENANT//-/_}"
+    local_db="$TENANT_DB_NAME"
     if ! mysql_admin_configured; then
         err "MYSQL_ADMIN_PASSWORD not configured — cannot restore database."
         exit 1

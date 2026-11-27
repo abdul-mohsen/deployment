@@ -113,7 +113,7 @@ if [ -z "$MYSQL_ROOT_PASSWORD" ] || [ "$MYSQL_ROOT_PASSWORD" = "changeme" ]; the
 fi
 
 BACKEND_APP="${TENANT_NAME}-backend"
-TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
+TENANT_DB_NAME="$(tenant_db_name "$TENANT_NAME")" || exit 1
 TENANT_DOMAIN="${TENANT_NAME}.${BASE_DOMAIN}"
 
 env_value() {

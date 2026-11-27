@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# restart-stack.sh — Stop, then start Dokku + Dashboard
+# restart-stack.sh — Stop, then start Dokku + Dashboard (+ optional ZATCA daemon)
 # =============================================================================
 # One command to bounce the stack cleanly. It always stops selected dashboard
-# containers before touching Dokku, then starts Dokku, then starts dashboards.
+# containers before touching Dokku, restarts Dokku, starts selected dashboards
+# immediately so the control plane stays reachable, and then starts the
+# optional ZATCA daemon (which still fails non-zero if unready without leaving
+# the dashboard down).
 # If the existing Dokku container has the wrong HTTP port, no HTTP port, or an
 # old 443 publish, it is removed and recreated via setup-dokku.sh. Dokku state
 # survives because /var/lib/dokku is bind-mounted.
@@ -93,7 +96,7 @@ start_zatca_daemon() {
     fi
     log "Starting ZATCA daemon..."
     if ! bash "${SCRIPT_DIR}/setup-zatca-daemon.sh" --config "$CONFIG_FILE"; then
-        error "  ZATCA daemon did not become ready. Recent logs:"
+        error "  ZATCA daemon did not become ready. Dokku and dashboard containers remain running. Recent logs:"
         docker logs --tail 200 "${ZATCA_DAEMON_CONTAINER:-zatca-daemon}" 2>&1 \
             | sed 's/^/    /' >&2 || true
         exit 1
@@ -296,7 +299,6 @@ fi
 if ! $DASHBOARD_ONLY; then
     stop_dokku_if_present
     start_or_recreate_dokku
-    start_zatca_daemon
 fi
 
 if ! $DOKKU_ONLY; then
@@ -305,7 +307,12 @@ if ! $DOKKU_ONLY; then
     done < <(dashboard_envs)
 fi
 
+if ! $DASHBOARD_ONLY; then
+    start_zatca_daemon
+fi
+
 echo ""
 log "Stack restarted (env=$ENV_NAME)."
+zatca_container="${ZATCA_DAEMON_CONTAINER:-zatca-daemon}"
 docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' \
-    | awk '$1 == "NAMES" || $1 == "dokku" || $1 == "dokku-dashboard-dev" || $1 == "dokku-dashboard-prod"'
+    | awk -v zatca="$zatca_container" '$1 == "NAMES" || $1 == "dokku" || $1 == "dokku-dashboard-dev" || $1 == "dokku-dashboard-prod" || $1 == zatca'

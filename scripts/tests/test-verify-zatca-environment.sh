@@ -1459,4 +1459,62 @@ not_contains "$OUTPUT" 'OTHER_SERVER_SECRET_FIXTURE' "other-server deploy admin 
 assert_no_secret_fixtures
 pass "healthy --db-only downgrades inactive secondary locked/SSL rows to WARN and skips different-target install.env admin"
 
+# 22. Tenant DB prefix scoping validation (TENANT_NAME_PREFIX / TENANT_DB_PREFIX) and env.parity
+reset_mocks
+cp "$TEST_REPO/config.env" "$TEST_ROOT/scoped-dev.env"
+printf '\nTENANT_NAME_PREFIX=dev-\n' >> "$TEST_ROOT/scoped-dev.env"
+python3 - "$COMPOSE_JSON_FILE" "$RUNNING_ENV_FILE" <<'PY'
+import json, sys
+c_path, r_path = sys.argv[1:3]
+c = json.load(open(c_path, encoding="utf-8"))
+c["services"]["zatca-daemon"]["environment"]["TENANT_NAME_PREFIX"] = "dev-"
+c["services"]["zatca-daemon"]["environment"]["TENANT_DB_PREFIX"] = ""
+json.dump(c, open(c_path, "w", encoding="utf-8"))
+r = json.load(open(r_path, encoding="utf-8"))
+r.extend(["TENANT_NAME_PREFIX=dev-", "TENANT_DB_PREFIX="])
+json.dump(r, open(r_path, "w", encoding="utf-8"))
+PY
+run_verify --env-file "$TEST_ROOT/scoped-dev.env"
+[ "$RUN_STATUS" -eq 0 ] || { cat "$OUTPUT" >&2; fail "valid TENANT_NAME_PREFIX=dev- config failed verification (status=$RUN_STATUS)"; }
+contains "$OUTPUT" 'PASS | config.tenant_scope | ZATCA daemon tenant DB scope active: prefix=tenant_dev_ (derived from TENANT_NAME_PREFIX=dev-)' \
+    "derived tenant DB prefix PASS line missing"
+contains "$OUTPUT" 'PASS | env.parity' "env.parity failed on matching TENANT_NAME_PREFIX"
+
+reset_mocks
+cp "$TEST_REPO/config.env" "$TEST_ROOT/conflict-prefix.env"
+printf '\nTENANT_NAME_PREFIX=dev-\nTENANT_DB_PREFIX=tenant_prod_\n' >> "$TEST_ROOT/conflict-prefix.env"
+run_verify --env-file "$TEST_ROOT/conflict-prefix.env"
+[ "$RUN_STATUS" -eq 2 ] || { cat "$OUTPUT" >&2; fail "conflicting TENANT_NAME_PREFIX/TENANT_DB_PREFIX did not exit 2 (status=$RUN_STATUS)"; }
+contains "$OUTPUT" 'FAIL | config.tenant_scope | conflicting tenant prefix configuration' \
+    "conflicting tenant prefix error missing"
+
+reset_mocks
+cp "$TEST_REPO/config.env" "$TEST_ROOT/bad-prefix.env"
+printf '\nTENANT_DB_PREFIX=tenant-bad!\n' >> "$TEST_ROOT/bad-prefix.env"
+run_verify --env-file "$TEST_ROOT/bad-prefix.env"
+[ "$RUN_STATUS" -eq 2 ] || { cat "$OUTPUT" >&2; fail "invalid TENANT_DB_PREFIX did not exit 2 (status=$RUN_STATUS)"; }
+contains "$OUTPUT" 'FAIL | config.tenant_scope | TENANT_DB_PREFIX is invalid' \
+    "invalid TENANT_DB_PREFIX error missing"
+
+reset_mocks
+cp "$TEST_REPO/config.env" "$TEST_ROOT/parity-prefix.env"
+printf '\nTENANT_DB_PREFIX=tenant_prod_\n' >> "$TEST_ROOT/parity-prefix.env"
+python3 - "$COMPOSE_JSON_FILE" "$RUNNING_ENV_FILE" <<'PY'
+import json, sys
+c_path, r_path = sys.argv[1:3]
+c = json.load(open(c_path, encoding="utf-8"))
+c["services"]["zatca-daemon"]["environment"]["TENANT_NAME_PREFIX"] = ""
+c["services"]["zatca-daemon"]["environment"]["TENANT_DB_PREFIX"] = "tenant_prod_"
+json.dump(c, open(c_path, "w", encoding="utf-8"))
+r = json.load(open(r_path, encoding="utf-8"))
+r.extend(["TENANT_NAME_PREFIX=", "TENANT_DB_PREFIX=tenant_dev_"])
+json.dump(r, open(r_path, "w", encoding="utf-8"))
+PY
+run_verify --env-file "$TEST_ROOT/parity-prefix.env"
+[ "$RUN_STATUS" -ne 0 ] || fail "drifted running TENANT_DB_PREFIX was accepted"
+contains "$OUTPUT" 'INFO | env.parity.diff | TENANT_DB_PREFIX: expected=tenant_prod_ actual=tenant_dev_' \
+    "env.parity did not show TENANT_DB_PREFIX drift"
+assert_no_secret_fixtures
+pass "tenant DB prefix scoping validates derivation, conflicts, invalid syntax, and running env parity"
+
 printf '\nAll environment-verifier wrapper tests passed.\n'

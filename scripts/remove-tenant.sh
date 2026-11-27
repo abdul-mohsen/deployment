@@ -75,6 +75,8 @@ MYSQL_PORT="${MYSQL_PORT:-3306}"
 MYSQL_MASTER_DB="${MYSQL_MASTER_DB:-zatca_master}"
 BACKEND_APP="${TENANT_NAME}-backend"
 FRONTEND_APP="${TENANT_NAME}-frontend"
+TENANT_DB_NAME="$(tenant_db_name "$TENANT_NAME")" || exit 1
+TENANT_DB_USER="usr_${TENANT_NAME//-/_}"
 TENANT_REGISTRY_CHANGED=false
 
 # Check apps exist
@@ -93,7 +95,7 @@ if ! $FORCE; then
     echo ""
     warn "About to DESTROY tenant: $TENANT_NAME"
     warn "  Apps:          $BACKEND_APP, $FRONTEND_APP"
-    warn "  Database:      tenant_${TENANT_NAME//-/_} + user"
+    warn "  Database:      $TENANT_DB_NAME + user"
     warn "  Master DB row: DELETED (dashboard will no longer show this tenant)"
     warn "  Tenant state:  $TENANT_STATE_DIR/$TENANT_NAME.json"
     $KEEP_DATA    && warn "  Data:          KEPT at $STORAGE_ROOT/$TENANT_NAME/ (--keep-data)"    || warn "  Data:          DELETED at $STORAGE_ROOT/$TENANT_NAME/"
@@ -107,8 +109,6 @@ if ! $FORCE; then
 fi
 
 # ---- Drop tenant database and user from external MySQL ----
-TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
-TENANT_DB_USER="usr_${TENANT_NAME//-/_}"
 
 if mysql_admin_configured; then
     log "Dropping MySQL database: $TENANT_DB_NAME"

@@ -217,10 +217,10 @@ validate_tenant_env_override() {
         IMAGE_PULL_POLICY|LOG_DIR|MSG_HOST|MSG_PORT|NATS_PASSWORD|NATS_PORT|NATS_PRIVATE_NETWORK_FIREWALL_CONFIRMED|\
         NATS_PRIVATE_NETWORK_ONLY|NATS_SHARED_CREDENTIALS_*|NATS_URL|NATS_USER|NGINX_*|\
         PORT|PUBLIC_PROTOCOL|PULL_TAG|SERVER_PORT|STORAGE_ROOT|\
-        TENANT_APP_NETWORK|TENANT_ID|\
+        TENANT_APP_NETWORK|TENANT_DB_PREFIX|TENANT_ID|\
         TENANT_IMAGE_PULL_POLICY|TENANT_NAME_PREFIX|TENANT_NETWORK|\
         TENANT_PROVENANCE_*|TENANT_STATE_DIR|TENANT_VERIFY_*|\
-        WEBHOOK_SECRET)
+        WEBHOOK_SECRET|ZATCA_TENANT_DB_PREFIX)
             reason="control-plane key" ;;
 
         # Deployment/admin database credentials and connection controls.
@@ -561,6 +561,87 @@ tenant_in_scope() {
     tenant="$(sanitize_tenant_name "$1")"
     prefix="$(tenant_name_prefix)"
     [ -z "$prefix" ] || [[ "$tenant" == "$prefix"* ]]
+}
+
+# Canonical MySQL database name for a tenant:
+#   tenant_<full_name with '-' replaced by '_'>
+# Examples:
+#   TENANT_NAME_PREFIX=dev-  + acme -> tenant_dev_acme
+#   TENANT_NAME_PREFIX=prod- + acme -> tenant_prod_acme
+#   (unset)                  + acme -> tenant_acme
+tenant_db_name() {
+    local full db
+    full="$(tenant_full_name "${1:-}")" || return 1
+    db="tenant_${full//-/_}"
+    validate_database_identifier "$db" || return 1
+    printf '%s' "$db"
+}
+
+validate_tenant_db_prefix() {
+    local prefix="${1:-}"
+    [ -z "$prefix" ] && return 0
+    if [[ "$prefix" =~ ^[A-Za-z0-9_]{1,63}$ ]]; then
+        return 0
+    fi
+    printf 'Invalid TENANT_DB_PREFIX %q; expected 1-63 ASCII letters, digits, or underscores.\n' \
+        "$prefix" >&2
+    return 1
+}
+
+# Derive the canonical MySQL database prefix for a deployment TENANT_NAME_PREFIX
+# (e.g. "dev" or "dev-" -> "tenant_dev_", "prod-" -> "tenant_prod_", "qa-2-" -> "tenant_qa_2_").
+# Fails closed on malformed non-empty prefixes (such as "---" or "dev--1").
+tenant_db_prefix() {
+    local raw trimmed body prefix
+    if [ "$#" -gt 0 ]; then
+        raw="$1"
+    else
+        raw="${TENANT_NAME_PREFIX_OVERRIDE:-${TENANT_NAME_PREFIX:-}}"
+    fi
+    trimmed="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+    [ -z "$trimmed" ] && return 0
+
+    body="${trimmed%-}"
+    if [ -z "$body" ] || ! [[ "$body" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+        printf 'Invalid TENANT_NAME_PREFIX %q; expected lowercase letters, digits, and single hyphens (e.g. dev-, prod-).\n' \
+            "$raw" >&2
+        return 1
+    fi
+
+    prefix="tenant_${body//-/_}_"
+    if [ "${#prefix}" -gt 63 ]; then
+        printf 'Derived TENANT_DB_PREFIX %q exceeds 63 characters.\n' "$prefix" >&2
+        return 1
+    fi
+    printf '%s' "$prefix"
+}
+
+# Resolve the ZATCA daemon's active tenant DB prefix from explicit
+# TENANT_DB_PREFIX and/or TENANT_NAME_PREFIX. Fails closed on invalid syntax or
+# when both are configured with conflicting prefixes.
+resolve_zatca_tenant_db_prefix() {
+    local explicit_raw name_raw explicit derived
+    if [ "$#" -gt 0 ]; then
+        explicit_raw="${1:-}"
+        name_raw="${2:-}"
+    else
+        explicit_raw="${TENANT_DB_PREFIX:-}"
+        name_raw="${TENANT_NAME_PREFIX:-}"
+    fi
+    explicit="$(printf '%s' "$explicit_raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    validate_tenant_db_prefix "$explicit" || return 1
+    derived="$(tenant_db_prefix "$name_raw")" || return 1
+
+    if [ -n "$explicit" ] && [ -n "$derived" ] && [ "$explicit" != "$derived" ]; then
+        printf 'Conflicting tenant prefix configuration: TENANT_DB_PREFIX=%q does not match TENANT_NAME_PREFIX=%q (derived %q).\n' \
+            "$explicit" "$name_raw" "$derived" >&2
+        return 1
+    fi
+    if [ -n "$explicit" ]; then
+        printf '%s' "$explicit"
+    else
+        printf '%s' "$derived"
+    fi
 }
 
 # tenant_auto_redeploy_enabled <tenant>

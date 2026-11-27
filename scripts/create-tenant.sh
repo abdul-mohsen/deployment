@@ -551,7 +551,7 @@ MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-}"
 
 BACKEND_APP="${TENANT_NAME}-backend"
 FRONTEND_APP="${TENANT_NAME}-frontend"
-TENANT_DB_NAME="tenant_${TENANT_NAME//-/_}"
+TENANT_DB_NAME="$(tenant_db_name "$TENANT_NAME")" || exit 1
 TENANT_DOMAIN="${TENANT_NAME}.${BASE_DOMAIN}"
 TENANT_NETWORK="${TENANT_APP_NETWORK:-web}"
 # Export so init-tenant-db.sh (invoked as child bash) inherits these â€” it uses
@@ -659,7 +659,7 @@ create_dokku_app() {
 echo ""
 info "=== Tenant Provisioning Plan ==="
 info "  Tenant:         $TENANT_NAME"
-if [ -n "${TENANT_NAME_PREFIX:-}" ]; then
+if [ -n "$(tenant_name_prefix)" ]; then
     info "  Tenant prefix:  $(tenant_name_prefix)"
 fi
 info "  Domain:         $TENANT_DOMAIN"
@@ -670,7 +670,7 @@ info "  Backend port:   $BACKEND_PORT"
 info "  Frontend port:  $FRONTEND_PORT"
 info "  Storage:        $STORAGE_ROOT/$TENANT_NAME/{uploads,data}"
 if ! $NO_DATABASE; then
-    info "  Database:       MySQL â†’ tenant_${TENANT_NAME} on ${MYSQL_HOST:-127.0.0.1}"
+    info "  Database:       MySQL â†’ ${TENANT_DB_NAME} on ${MYSQL_HOST:-127.0.0.1}"
 else
     info "  Database:       skipped (--no-database)"
 fi

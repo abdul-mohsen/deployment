@@ -416,9 +416,149 @@ for f in scripts/deploy-all.sh scripts/rollback-tenant.sh scripts/list-tenants.s
 done
 grep -q 'TENANT_NAME_PREFIX=' dashboard/internal/scripts/scripts.go \
     && grep -q 'filterAppNames' dashboard/internal/web/web.go \
+    && grep -q 'TENANT_NAME_PREFIX: \${TENANT_NAME_PREFIX:-}' dashboard/docker-compose.dev.yml \
     && grep -q 'TENANT_NAME_PREFIX' dashboard/README.md \
-    && PASS "dashboard passes, filters, and documents tenant prefix" \
-    || FAIL "dashboard must pass/filter/document TENANT_NAME_PREFIX"
+    && PASS "dashboard passes, forwards, filters, and documents tenant prefix" \
+    || FAIL "dashboard must pass/forward/filter/document TENANT_NAME_PREFIX"
+
+echo
+echo "=== 14. canonical tenant DB naming and ZATCA prefix resolution ==="
+OUT="$(bash -c '
+set -euo pipefail
+source scripts/lib.sh
+TENANT_NAME_PREFIX=""
+[ "$(tenant_db_name acme)" = "tenant_acme" ]
+[ "$(tenant_db_name my-shop)" = "tenant_my_shop" ]
+TENANT_NAME_PREFIX="dev-"
+[ "$(tenant_db_name acme)" = "tenant_dev_acme" ]
+[ "$(tenant_db_name dev-acme)" = "tenant_dev_acme" ]
+[ "$(tenant_db_name my-shop)" = "tenant_dev_my_shop" ]
+TENANT_NAME_PREFIX="prod-"
+[ "$(tenant_db_name acme)" = "tenant_prod_acme" ]
+[ "$(tenant_db_prefix dev)" = "tenant_dev_" ]
+[ "$(tenant_db_prefix dev-)" = "tenant_dev_" ]
+[ "$(tenant_db_prefix prod-)" = "tenant_prod_" ]
+[ "$(tenant_db_prefix qa-2-)" = "tenant_qa_2_" ]
+[ "$(resolve_zatca_tenant_db_prefix "" "dev-")" = "tenant_dev_" ]
+[ "$(resolve_zatca_tenant_db_prefix "tenant_dev_" "dev-")" = "tenant_dev_" ]
+[ "$(resolve_zatca_tenant_db_prefix "tenant_prod_" "")" = "tenant_prod_" ]
+[ -z "$(resolve_zatca_tenant_db_prefix "" "")" ]
+if resolve_zatca_tenant_db_prefix "tenant_prod_" "dev-" >/dev/null 2>&1; then
+    echo "CONFLICT_ACCEPTED"
+    exit 1
+fi
+if resolve_zatca_tenant_db_prefix "tenant-bad" "" >/dev/null 2>&1; then
+    echo "BAD_DB_PREFIX_ACCEPTED"
+    exit 1
+fi
+if resolve_zatca_tenant_db_prefix "" "---" >/dev/null 2>&1; then
+    echo "BAD_NAME_PREFIX_ACCEPTED"
+    exit 1
+fi
+echo "CANONICAL_OK"
+')"
+echo "$OUT" | grep -q '^CANONICAL_OK$' \
+    && PASS "canonical tenant_db_name and resolve_zatca_tenant_db_prefix enforce exact formula and fail closed" \
+    || { echo "$OUT"; FAIL "canonical tenant DB / prefix helpers failed"; }
+for f in scripts/create-tenant.sh scripts/init-tenant-db.sh scripts/remove-tenant.sh scripts/cleanup-broken-tenant.sh scripts/backup-tenant.sh scripts/restore-tenant.sh; do
+    grep -q 'tenant_db_name' "$f" \
+        && PASS "$f uses canonical tenant_db_name helper" \
+        || FAIL "$f must derive DB names via tenant_db_name"
+done
+
+echo
+echo "=== 15. restart-stack starts dashboards before ZATCA and keeps dashboards up if ZATCA fails ==="
+ISOLATED_REPO="$STUB_DIR/restart-order-repo"
+DASH_STATE_FILE="$STUB_DIR/dash.state"
+TRACE_FILE="$STUB_DIR/restart-order.trace"
+mkdir -p "$ISOLATED_REPO/scripts" "$ISOLATED_REPO/dashboard"
+cp scripts/restart-stack.sh scripts/lib.sh "$ISOLATED_REPO/scripts/"
+cat > "$ISOLATED_REPO/config.env" <<'CFG'
+ZATCA_DAEMON_ENABLED=1
+ZATCA_DAEMON_CONTAINER=zatca-daemon
+DOKKU_PORT=18082
+CFG
+cat > "$ISOLATED_REPO/dashboard/docker-compose.dev.yml" <<'YML'
+services:
+  dashboard:
+    image: stub
+YML
+cat > "$ISOLATED_REPO/dashboard/dev-up.sh" <<'DEVUP'
+#!/usr/bin/env bash
+echo running > "${DASH_STATE_FILE:?}"
+echo "dashboard:dev:start" >> "${TRACE_FILE:?}"
+DEVUP
+chmod +x "$ISOLATED_REPO/dashboard/dev-up.sh"
+cat > "$ISOLATED_REPO/scripts/setup-zatca-daemon.sh" <<'ZATCAFAIL'
+#!/usr/bin/env bash
+echo "zatca:start:fail" >> "${TRACE_FILE:?}"
+exit 1
+ZATCAFAIL
+chmod +x "$ISOLATED_REPO/scripts/setup-zatca-daemon.sh"
+echo running > "$STATE_FILE"
+echo running > "$DASH_STATE_FILE"
+cat > "$STUB_DIR/docker" <<'STUB'
+#!/usr/bin/env bash
+state_file="${STATE_FILE:?}"
+dash_state_file="${DASH_STATE_FILE:?}"
+trace_file="${TRACE_FILE:?}"
+state="$(cat "$state_file" 2>/dev/null || echo absent)"
+dash_state="$(cat "$dash_state_file" 2>/dev/null || echo stopped)"
+case "$1" in
+    compose)
+        if [[ "$*" == *" down "* ]]; then
+            echo stopped > "$dash_state_file"
+            echo "dashboard:dev:stop" >> "$trace_file"
+        fi
+        exit 0 ;;
+    ps)
+        if [[ "$*" == *"--format {{.Names}}"* || "$*" == *"--format '{{.Names}}'"* ]]; then
+            if [[ "$*" == *"-a"* ]]; then
+                [ "$state" != absent ] && echo dokku
+                [ "$dash_state" = running ] && echo dokku-dashboard-dev
+            else
+                [ "$state" = running ] && echo dokku
+                [ "$dash_state" = running ] && echo dokku-dashboard-dev
+            fi
+        fi
+        exit 0 ;;
+    stop)
+        echo "dokku:stop" >> "$trace_file"
+        echo stopped > "$state_file"
+        exit 0 ;;
+    inspect)
+        if [[ "$*" == *"80/tcp"* ]]; then
+            echo 18082
+        fi
+        exit 0 ;;
+    start)
+        echo "dokku:start" >> "$trace_file"
+        echo running > "$state_file"
+        exit 0 ;;
+    exec)
+        if [ "$2" = dokku ] && [ "$3" = dokku ] && [ "$4" = version ]; then
+            echo "dokku version stub"
+        fi
+        exit 0 ;;
+    logs)
+        echo "stub zatca failure log"
+        exit 0 ;;
+esac
+exit 0
+STUB
+chmod +x "$STUB_DIR/docker"
+: > "$TRACE_FILE"
+set +e
+OUT="$(STATE_FILE="$STATE_FILE" DASH_STATE_FILE="$DASH_STATE_FILE" TRACE_FILE="$TRACE_FILE" PATH="$STUB_DIR:$PATH" bash "$ISOLATED_REPO/scripts/restart-stack.sh" --env dev 2>&1)"
+RC=$?
+set -e
+TRACE_ONE_LINE="$(paste -sd ',' "$TRACE_FILE")"
+[ "$RC" -ne 0 ] \
+    && [ "$(cat "$DASH_STATE_FILE")" = "running" ] \
+    && echo "$OUT" | grep -q 'Dokku and dashboard containers remain running' \
+    && [ "$TRACE_ONE_LINE" = "dashboard:dev:stop,dokku:stop,dokku:start,dashboard:dev:start,zatca:start:fail" ] \
+    && PASS "restart-stack starts dashboard before ZATCA and fails fast while keeping dashboard running" \
+    || { echo "RC=$RC TRACE=$TRACE_ONE_LINE"; echo "$OUT"; FAIL "restart-stack ordering or ZATCA fail-fast contract failed"; }
 
 echo
 echo "ALL TESTS PASSED"

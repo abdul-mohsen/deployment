@@ -121,7 +121,12 @@ backup_tenant() {
     fi
 
     # Backup MySQL database from external server
-    local tenant_db="tenant_${tenant//-/_}"
+    local tenant_db
+    tenant_db="$(tenant_db_name "$tenant")" || {
+        err "Invalid database identifier for tenant '$tenant'."
+        LAST_VERIFIED="false"
+        return 1
+    }
     if mysql_admin_configured; then
         # Check if the database exists
         if run_mysql -e "USE \`${tenant_db}\`" 2>/dev/null; then

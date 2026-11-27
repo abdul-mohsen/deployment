@@ -99,6 +99,7 @@ case "${NATS_PRIVATE_NETWORK_ONLY:-false}" in
     *) fail "NATS_PRIVATE_NETWORK_ONLY=true is required because this overlay runs NATS without TLS" ;;
 esac
 validate_zatca_daemon_security_gates || exit 1
+RESOLVED_ZATCA_TENANT_DB_PREFIX="$(resolve_zatca_tenant_db_prefix "${TENANT_DB_PREFIX:-}" "${TENANT_NAME_PREFIX:-}")" || exit 1
 
 [[ "$HEALTH_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] && [ "$HEALTH_TIMEOUT_SECONDS" -gt 0 ] \
     || fail "--health-timeout must be a positive integer"
@@ -146,6 +147,9 @@ $RECREATE && compose_args+=(--force-recreate)
 compose_args+=(zatca-daemon)
 
 info "Starting ZATCA daemon image: $ZATCA_DAEMON_IMAGE"
+if [ -n "$RESOLVED_ZATCA_TENANT_DB_PREFIX" ]; then
+    info "ZATCA daemon tenant DB prefix scope: $RESOLVED_ZATCA_TENANT_DB_PREFIX"
+fi
 docker compose "${compose_args[@]}"
 
 info "Waiting for $CONTAINER readiness..."

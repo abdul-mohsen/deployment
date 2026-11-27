@@ -14,6 +14,8 @@ x-zatca-daemon-environment: &zatca-daemon-environment
   DB_HOST: ${MYSQL_HOST:-host.docker.internal}
   DB_PORT: ${MYSQL_PORT:-3306}
   MASTER_DB: ${MYSQL_MASTER_DB:-zatca_master}
+  TENANT_NAME_PREFIX: ${TENANT_NAME_PREFIX:-}
+  TENANT_DB_PREFIX: ${TENANT_DB_PREFIX:-}
   ADMIN_DB_USER: ${ZATCA_ADMIN_DB_USER:-}
   ADMIN_DB_PASS: ${ZATCA_ADMIN_DB_PASSWORD:-}
   ADMIN_DB_HOST: ${ZATCA_ADMIN_DB_HOST:-}

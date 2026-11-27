@@ -41,6 +41,12 @@ grep -qF 'DB_USER: ${ZATCA_DB_USER:?ZATCA_DB_USER must be set}' "$COMPOSE_FILE" 
     || fail "daemon DB user contract is missing"
 grep -qF 'MASTER_DB: ${MYSQL_MASTER_DB:-zatca_master}' "$COMPOSE_FILE" \
     || fail "master DB contract is missing"
+grep -qF 'TENANT_NAME_PREFIX: ${TENANT_NAME_PREFIX:-}' "$COMPOSE_FILE" \
+    || fail "daemon Compose overlay does not forward TENANT_NAME_PREFIX"
+grep -qF 'TENANT_DB_PREFIX: ${TENANT_DB_PREFIX:-}' "$COMPOSE_FILE" \
+    || fail "daemon Compose overlay does not forward TENANT_DB_PREFIX"
+grep -qF 'resolve_zatca_tenant_db_prefix' "$SETUP_SCRIPT" \
+    || fail "daemon setup does not validate tenant DB prefix scoping"
 grep -qF 'ENCRYPT_KEY: ${ZATCA_ENCRYPT_KEY:?ZATCA_ENCRYPT_KEY must be set}' "$COMPOSE_FILE" \
     || fail "daemon encryption key is not required"
 grep -qF 'MONITOR_PASS: ${ZATCA_MONITOR_PASSWORD:?ZATCA_MONITOR_PASSWORD must be set}' "$COMPOSE_FILE" \

@@ -991,6 +991,80 @@ if not db_only:
             else:
                 emit("PASS", "config.nats_url", f"NATS_URL is valid and matches ZATCA_NATS_PORT={nats_port} ({safe_nonsecret(nats_url)})")
 
+# 9b. Tenant DB prefix scoping (TENANT_DB_PREFIX / TENANT_NAME_PREFIX)
+raw_db_prefix = env_get("TENANT_DB_PREFIX", "").strip()
+raw_name_prefix = env_get("TENANT_NAME_PREFIX", "").strip()
+prefix_error = False
+derived_db_prefix = ""
+
+if raw_db_prefix:
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,63}", raw_db_prefix):
+        prefix_error = True
+        emit(
+            "FAIL",
+            "config.tenant_scope",
+            "TENANT_DB_PREFIX is invalid (expected 1-63 ASCII letters, digits, or underscores, e.g. tenant_dev_ or tenant_prod_)",
+            "1",
+            f"Fix TENANT_DB_PREFIX in {cfg_path} (e.g. TENANT_DB_PREFIX=tenant_dev_ or unset to derive from TENANT_NAME_PREFIX)",
+        )
+
+if raw_name_prefix:
+    norm_name = raw_name_prefix.lower()
+    body = norm_name[:-1] if norm_name.endswith("-") else norm_name
+    if not body or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", body):
+        prefix_error = True
+        emit(
+            "FAIL",
+            "config.tenant_scope",
+            "TENANT_NAME_PREFIX is invalid (expected lowercase letters, digits, and single hyphens, e.g. dev- or prod-)",
+            "1",
+            f"Fix TENANT_NAME_PREFIX in {cfg_path} (e.g. TENANT_NAME_PREFIX=dev- or TENANT_NAME_PREFIX=prod-)",
+        )
+    else:
+        derived_db_prefix = "tenant_" + body.replace("-", "_") + "_"
+        if len(derived_db_prefix) > 63:
+            prefix_error = True
+            emit(
+                "FAIL",
+                "config.tenant_scope",
+                "derived TENANT_DB_PREFIX from TENANT_NAME_PREFIX exceeds 63 characters",
+                "1",
+                f"Shorten TENANT_NAME_PREFIX in {cfg_path} so tenant_<prefix>_ is at most 63 characters",
+            )
+
+if not prefix_error:
+    if raw_db_prefix and derived_db_prefix and raw_db_prefix != derived_db_prefix:
+        emit(
+            "FAIL",
+            "config.tenant_scope",
+            f"conflicting tenant prefix configuration: TENANT_DB_PREFIX={safe_nonsecret(raw_db_prefix)} does not match TENANT_NAME_PREFIX={safe_nonsecret(raw_name_prefix)} (derived {safe_nonsecret(derived_db_prefix)})",
+            "1",
+            f"Align TENANT_DB_PREFIX with TENANT_NAME_PREFIX (or unset TENANT_DB_PREFIX to derive {safe_nonsecret(derived_db_prefix)}) in {cfg_path}",
+        )
+    elif raw_db_prefix:
+        src_note = (
+            f"explicit TENANT_DB_PREFIX (matches TENANT_NAME_PREFIX={safe_nonsecret(raw_name_prefix)})"
+            if derived_db_prefix
+            else "explicit TENANT_DB_PREFIX"
+        )
+        emit(
+            "PASS",
+            "config.tenant_scope",
+            f"ZATCA daemon tenant DB scope active: prefix={safe_nonsecret(raw_db_prefix)} ({src_note})",
+        )
+    elif derived_db_prefix:
+        emit(
+            "PASS",
+            "config.tenant_scope",
+            f"ZATCA daemon tenant DB scope active: prefix={safe_nonsecret(derived_db_prefix)} (derived from TENANT_NAME_PREFIX={safe_nonsecret(raw_name_prefix)})",
+        )
+    else:
+        emit(
+            "INFO",
+            "config.tenant_scope",
+            "tenant DB prefix scoping is unset (daemon will load all enabled tenants in zatca_master; set TENANT_NAME_PREFIX=dev-/prod- or TENANT_DB_PREFIX=tenant_dev_/tenant_prod_ to isolate shared registries)",
+        )
+
 # Helper to collect deployment control-plane MySQL accounts (matching lib.sh mysql_admin_user/password)
 def extract_deploy_admin(source_label, mapping, fallback_host, fallback_port):
     u = mapping.get("MYSQL_ADMIN_USER", "")
@@ -1052,6 +1126,8 @@ if os.path.isfile(install_path) and os.path.realpath(install_path) != os.path.re
             "MYSQL_HOST",
             "MYSQL_PORT",
             "MYSQL_MASTER_DB",
+            "TENANT_NAME_PREFIX",
+            "TENANT_DB_PREFIX",
             "DOKKU_PORT",
             "BASE_DOMAIN",
             "STORAGE_ROOT",
@@ -1141,6 +1217,8 @@ if os.path.isfile(dotenv_path) and os.path.realpath(dotenv_path) != os.path.real
             "MYSQL_HOST",
             "MYSQL_PORT",
             "MYSQL_MASTER_DB",
+            "TENANT_NAME_PREFIX",
+            "TENANT_DB_PREFIX",
             "ZATCA_ADMIN_DB_USER",
             "ZATCA_ADMIN_DB_PASSWORD",
             "ZATCA_ENCRYPT_KEY",
@@ -1462,6 +1540,8 @@ mapping = [
     ("DB_HOST", "MYSQL_HOST", "host.docker.internal"),
     ("DB_PORT", "MYSQL_PORT", "3306"),
     ("MASTER_DB", "MYSQL_MASTER_DB", "zatca_master"),
+    ("TENANT_NAME_PREFIX", "TENANT_NAME_PREFIX", ""),
+    ("TENANT_DB_PREFIX", "TENANT_DB_PREFIX", ""),
     ("ADMIN_DB_USER", "ZATCA_ADMIN_DB_USER", ""),
     ("ADMIN_DB_PASS", "ZATCA_ADMIN_DB_PASSWORD", ""),
     ("ADMIN_DB_HOST", "ZATCA_ADMIN_DB_HOST", ""),

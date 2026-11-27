@@ -126,9 +126,17 @@ If a restart/scale-only update adds the missing option, it rebuilds the backend
 so the new Docker option takes effect; a rebuild failure stops the update. The
 rollout also stops if Dokku cannot install or report the route. After changing
 `config.env`, use the tenant update/restart and daemon restart scripts so both
-the Dokku app and daemon receive the new values. The daemon retries tenant
-discovery; a schema failure in one tenant is reported without stopping other
-ready tenants.
+the Dokku app and daemon receive the new values. To isolate dev and prod
+environments sharing a `zatca_master` registry, set `TENANT_NAME_PREFIX=dev-`
+(or `prod-`) in `config.env` so tenants follow the canonical
+`tenant_dev_<name>` / `tenant_prod_<name>` formula and `zatca-daemon`
+automatically scopes discovery to `tenant_dev_` / `tenant_prod_` (or set
+`TENANT_DB_PREFIX` explicitly; conflicting values fail closed). The daemon
+retries tenant discovery; a schema failure in one tenant is reported without
+stopping other ready tenants. During `scripts/restart-stack.sh`, Dokku and the
+selected dashboard container(s) are started before `zatca-daemon`, so a ZATCA
+readiness failure still exits non-zero (fail-fast) without leaving the
+dashboard stopped.
 
 ### Verifying the configured environment and database access
 
@@ -160,6 +168,8 @@ Steps** without requiring manual daemon flags or per-shell path variables:
    `MYSQL_ADMIN_USER`, and `MYSQL_ROOT_USER`, `ZATCA_ENCRYPT_KEY` 32-byte
    AES-256 format, all 5 NATS security gates individually, TCP port ranges and
    backlog thresholds, `NATS_URL` vs `ZATCA_NATS_PORT` consistency,
+   `TENANT_NAME_PREFIX` / `TENANT_DB_PREFIX` scoping and conflict detection
+   (`config.tenant_scope`),
    quoting/`$`/`#` syntax hazards, sibling `install.env` (treating local
    `MYSQL_HOST` aliases like `host.docker.internal` and `127.0.0.1` as
    compatible) and `.env` drift (boolean-only comparison for passwords), and
